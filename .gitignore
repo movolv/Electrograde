@@ -1,0 +1,8 @@
+.env
+data/inventory.db
+data/inventory.xlsx
+data/uploads/
+__pycache__/
+*.pyc
+.venv/
+venv/

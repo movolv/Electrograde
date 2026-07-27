@@ -1,0 +1,17 @@
+[server]
+enableStaticServing = true
+maxUploadSize = 25
+# Uncomment and point at real certs if you want Streamlit itself to terminate
+# HTTPS instead of using ngrok/Cloudflare Tunnel/a hosting provider:
+# sslCertFile = "path/to/fullchain.pem"
+# sslKeyFile = "path/to/privkey.pem"
+
+[theme]
+base = "dark"
+primaryColor = "#38bdf8"
+backgroundColor = "#111827"
+secondaryBackgroundColor = "#1f2937"
+textColor = "#f3f4f6"
+
+[browser]
+gatherUsageStats = false
