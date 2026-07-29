@@ -7,8 +7,9 @@ cost profile of only paying per-item for the Anthropic API.
 import io
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 from rembg import new_session, remove
+from scipy import ndimage
 
 # isnet-general-use trades a bit of speed for noticeably cleaner edges than
 # the default u2net model on glossy/reflective product photography (steel,
@@ -33,16 +34,64 @@ def _get_session():
     return _session
 
 
+def _largest_component_mask(alpha: np.ndarray) -> np.ndarray:
+    """rembg's alpha channel often leaves a handful of stray non-transparent
+    pixels/small islands scattered outside the actual product (imperfect
+    segmentation on a real-world, non-studio background) — a bounding box
+    over ALL of them is much bigger than the product itself, so the product
+    ends up looking small and off-center once composited. Keeping only the
+    largest connected blob of foreground pixels discards that noise and
+    gives a bounding box that's tight around the actual product."""
+    mask = alpha > 10
+    labeled, n = ndimage.label(mask)
+    if n <= 1:
+        return mask
+    sizes = ndimage.sum(mask, labeled, index=range(1, n + 1))
+    largest_label = int(np.argmax(sizes)) + 1
+    return labeled == largest_label
+
+
+def _add_drop_shadow(canvas: Image.Image, product_box: tuple[int, int, int, int]) -> Image.Image:
+    """Draws a soft, blurred ellipse under the product's footprint before
+    it's pasted on top — the difference between a catalog photo (product
+    reads as sitting on a surface) and a flat cutout that looks like it's
+    floating, which is what a plain white-background paste looks like on
+    its own."""
+    left, top, right, bottom = product_box
+    width = right - left
+    height = bottom - top
+
+    shadow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(shadow_layer)
+    shadow_w = int(width * 0.75)
+    shadow_h = max(8, int(height * 0.06))
+    cx = (left + right) // 2
+    shadow_top = bottom - shadow_h // 2
+    draw.ellipse(
+        [cx - shadow_w // 2, shadow_top, cx + shadow_w // 2, shadow_top + shadow_h],
+        fill=(0, 0, 0, 90),
+    )
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=max(6, shadow_h // 2)))
+    return Image.alpha_composite(canvas, shadow_layer)
+
+
 def clean_product_photo(
     image_bytes: bytes,
     canvas_size: int = 1600,
     fill_ratio: float = 0.85,
 ) -> tuple[bytes, bool]:
-    """Removes the background, crops to the product's bounding box, and
-    composites it centered onto a pure white square canvas — filling
-    `fill_ratio` of the frame if the source resolution allows it without
-    upscaling past `_MAX_UPSCALE`, otherwise left at native size (see
-    module docstring above). Returns (jpeg_bytes, low_resolution).
+    """Removes the background, crops tightly to the product (largest
+    connected foreground blob — see _largest_component_mask), lightly
+    freshens brightness/contrast, and composites it centered onto a pure
+    white square canvas with a soft drop shadow — filling `fill_ratio` of
+    the frame if the source resolution allows it without upscaling past
+    `_MAX_UPSCALE`, otherwise left at native size (see module docstring
+    above). Returns (jpeg_bytes, low_resolution).
+
+    Does NOT remove reflections/glare — that needs actual generative photo
+    retouching (a different, paid AI image-editing service), not background
+    segmentation; a bright contrast boost can soften harsh hotspots but
+    won't erase what's actually reflected in a glossy surface.
 
     Raises ValueError if rembg finds no non-transparent pixels (e.g. a
     completely blank/blown-out photo) — the caller should fall back to
@@ -52,15 +101,30 @@ def clean_product_photo(
     rgba = Image.open(io.BytesIO(cutout)).convert("RGBA")
 
     alpha = np.array(rgba.getchannel("A"))
-    mask = alpha > 10
+    mask = _largest_component_mask(alpha)
     if not mask.any():
         raise ValueError("Background removal found no foreground subject in this photo.")
+
+    # Zero out alpha for anything outside the kept component so no stray
+    # pixels bleed into the final composite either.
+    clean_alpha = np.where(mask, alpha, 0).astype(np.uint8)
+    rgba.putalpha(Image.fromarray(clean_alpha))
 
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     top, bottom = np.where(rows)[0][[0, -1]]
     left, right = np.where(cols)[0][[0, -1]]
     cropped = rgba.crop((int(left), int(top), int(right) + 1, int(bottom) + 1))
+
+    # Freshen the product itself: auto-levels the RGB channels (per-channel
+    # contrast stretch, ignoring the transparent surround) then a small
+    # brightness/contrast lift — reads as a cleaner, more "catalog" product
+    # shot without looking artificially edited.
+    rgb = cropped.convert("RGB")
+    rgb = ImageOps.autocontrast(rgb, cutoff=1)
+    rgb = ImageEnhance.Brightness(rgb).enhance(1.05)
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.08)
+    cropped = Image.merge("RGBA", (*rgb.split(), cropped.getchannel("A")))
 
     target_dim = int(canvas_size * fill_ratio)
     ideal_scale = target_dim / max(cropped.width, cropped.height)
@@ -75,6 +139,7 @@ def clean_product_photo(
     canvas = Image.new("RGBA", (canvas_size, canvas_size), (255, 255, 255, 255))
     paste_x = (canvas_size - new_w) // 2
     paste_y = (canvas_size - new_h) // 2
+    canvas = _add_drop_shadow(canvas, (paste_x, paste_y, paste_x + new_w, paste_y + new_h))
     canvas.paste(cropped, (paste_x, paste_y), cropped)
 
     out = io.BytesIO()
