@@ -175,8 +175,10 @@ def _init_state():
                                      # across shots within a session so the
                                      # user's chosen facing mode (front/rear)
                                      # survives between photos
-        "last_camera_shot_hash": None,  # dedupes a still-displayed capture
-                                         # from a genuinely new one
+        "photo0_low_res_warning": False,  # set by the "Clean background"
+                                           # button when the source photo
+                                           # was too low-res to fill the
+                                           # frame without blurring
         "spec_result": None,
         "grading_result": None,
         "price_estimate": None,
@@ -198,7 +200,7 @@ def reset_wizard():
     st.session_state.captured_photos = []
     st.session_state.photo_widget_seq += 1
     st.session_state.camera_session_id += 1
-    st.session_state.last_camera_shot_hash = None
+    st.session_state.photo0_low_res_warning = False
     st.session_state.spec_result = None
     st.session_state.grading_result = None
     st.session_state.price_estimate = None
@@ -409,38 +411,27 @@ if page == "🆕 New Item":
         st.caption(
             "Take front, back, sides, and close-ups of any scratches/defects. "
             "If a barcode/label is visible in any photo, it will also be used "
-            "to cross-check against the manifest during grading. On phones, "
-            "switch to the rear camera once at the start (top-right icon) — "
-            "it'll stay on the rear camera for every shot. After each photo, "
-            "tap the circle again to return to the live view for the next one."
+            "to cross-check against the manifest during grading."
         )
 
-        _enlarge_camera_preview()
-        # A stable key (not bumped per shot) is what keeps the camera on the
-        # facing mode the user picked — bumping the key to reset for the
-        # next photo, as this used to do, fully remounts the widget and
-        # Streamlit's camera_input always restarts on the front camera with
-        # no way to request the rear one from Python. Since the same widget
-        # instance now persists, its returned value doesn't clear itself
-        # after a capture (there's no way to do that from Python either) —
-        # so a content hash tells a still-displayed old capture apart from
-        # an actual new one instead of relying on the key change to do it.
-        shot = st.camera_input("Take a photo", key=f"photo_cam_{st.session_state.camera_session_id}")
-        if shot is not None:
-            shot_bytes = shot.getvalue()
-            shot_hash = hash(shot_bytes)
-            if shot_hash != st.session_state.last_camera_shot_hash:
-                st.session_state.captured_photos.append(shot_bytes)
-                st.session_state.last_camera_shot_hash = shot_hash
-                st.rerun()
-
+        # Deliberately st.file_uploader rather than st.camera_input: on a
+        # phone this still opens the OS's own camera (tap "Take Photo" in
+        # the picker sheet) with a live viewfinder exactly like any other
+        # photo — it's just the phone's native camera screen rather than
+        # one embedded in the page. The payoff is full sensor resolution
+        # (camera_input instead grabs a frame from a low-res in-browser
+        # video stream — a few hundred px on the long side, not enough to
+        # background-remove or grade defects from without visible blur) and
+        # the rear camera opens automatically every time, no manual switch.
         uploaded = st.file_uploader(
-            "Or add photos from library",
+            "Take a photo or choose from library",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.photo_widget_seq}",
         )
         if uploaded:
+            if not st.session_state.captured_photos:
+                st.session_state.photo0_low_res_warning = False
             for f in uploaded:
                 st.session_state.captured_photos.append(f.getvalue())
             st.session_state.photo_widget_seq += 1
@@ -460,13 +451,24 @@ if page == "🆕 New Item":
                         if st.button("🧼 Clean background", key="clean_bg_0", use_container_width=True):
                             with st.spinner("Removing background — first run downloads the model (~170MB) and may take a minute..."):
                                 try:
-                                    cleaned = background_removal.clean_product_photo(img_bytes)
+                                    cleaned, low_res = background_removal.clean_product_photo(img_bytes)
                                 except Exception as e:
                                     st.error(f"Background removal failed: {e}")
                                 else:
                                     st.session_state.captured_photos[0] = cleaned
+                                    if low_res:
+                                        st.session_state.photo0_low_res_warning = True
                                     st.rerun()
+                        if st.session_state.get("photo0_low_res_warning"):
+                            st.caption(
+                                "⚠️ Source photo resolution was too low to fill the "
+                                "frame without blurring — the product was kept at its "
+                                "native sharpness instead. For a bigger, crisper result, "
+                                "retake this photo closer up and in better focus."
+                            )
                     if st.button("🗑️", key=f"del_photo_{i}"):
+                        if i == 0:
+                            st.session_state.photo0_low_res_warning = False
                         st.session_state.captured_photos.pop(i)
                         st.rerun()
 

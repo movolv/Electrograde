@@ -79,6 +79,10 @@ JSON-serializable record), and multi-company use:
   - If zbar isn't available, the app **still works** — it just falls back to
     manual model-number entry (barcode auto-decode is a convenience, not a
     hard requirement).
+- **"Clean background"** (Step 2) needs `rembg` + `onnxruntime` (in
+  `requirements.txt`) and an internet connection the *first* time it's
+  used — it downloads a ~180MB segmentation model to `~/.u2net/` on first
+  run, then works offline/instantly after that.
 
 ## 2. Setup
 
@@ -146,29 +150,37 @@ network — both tunnels work over the internet, not just LAN).
 4. Tap **Add**. The ElectroGrader icon now appears on your Home Screen and
    launches full-screen, without Safari's address bar/toolbar.
 
-Camera permission: the first time you use `st.camera_input` from the
-installed app, iOS will prompt for camera access — allow it.
+Camera permission: the first time you use the camera from the installed
+app, iOS will prompt for camera access — allow it.
 
-Known limitation — front camera by default on phones: `st.camera_input`
-opens the FRONT camera first on iPhone/Android (this is hardcoded in
-Streamlit's own widget with no Python-level option to change it — confirmed
-by inspecting Streamlit's installed frontend bundle). The widget has a
-built-in switch-camera icon — tap it to flip to the rear camera. This has to
-be done manually each time a new camera_input instance is created (i.e. for
-every photo), since the widget always restarts on the front camera.
+**Step 2 (product photos) uses `st.file_uploader`, not `st.camera_input`:**
+tapping it opens the phone's own native camera app (via the OS's picker
+sheet) rather than an in-page live video widget. This was a deliberate
+switch away from `st.camera_input` — full sensor resolution matters here,
+since both the AI grading (`vision_grading.py`, spotting small defects) and
+the "Clean background" cutout tool (`modules/background_removal.py`) need
+enough source detail to work with; `st.camera_input` instead grabs a frame
+from a low-res in-browser video stream (measured as low as ~400×500px on a
+modern phone, vs. several thousand px from the native camera app), which
+reads as visibly blurry once cropped/enlarged for a cutout. The trade-off:
+the live preview happens in the native camera app's own screen rather than
+embedded in the page — you still see exactly what you're photographing,
+it's just not inline. In exchange, the rear camera opens automatically
+every time (no manual switch-camera tap needed, unlike `st.camera_input`,
+which we found always restarts on the front camera on iPhone/Android with
+no Python-level way to change that — confirmed by inspecting Streamlit's
+installed frontend bundle; a `components.html`-injected `getUserMedia`
+override was also tried and worked in isolated testing but didn't render
+at all on iOS Safari in practice, so that approach was abandoned).
 
-We tried patching this via a `components.html`-injected script (overriding
-`getUserMedia`), which worked correctly in isolated testing but turned out
-to not render at all on iOS Safari in practice (confirmed: even script-free
-static HTML inside a `components.html` iframe doesn't show up there) — so
-that approach was abandoned as unreliable. A device-detection + native
-file-input fallback was also tried (`st.file_uploader`, which reliably opens
-the rear camera via the OS's own camera app) but was reverted in favor of
-keeping `st.camera_input`'s live in-page preview, at the cost of the manual
-switch-camera tap. If you'd rather have automatic rear-camera selection and
-don't mind losing the live preview, swap `st.camera_input` for
-`st.file_uploader(label, type=["jpg","jpeg","png"])` in `app.py`'s two
-camera-capture call sites (Step 1 barcode scan, Step 2 photo capture).
+**Step 1 (barcode/label scan) still uses `st.camera_input`** — its live
+in-page preview is worth keeping there, since lining up a barcode in frame
+benefits more from instant visual feedback than from resolution (barcode
+decoding needs the barcode sharp and legible, not the whole photo
+high-res). If you'd rather have that step also open the native camera app,
+swap `st.camera_input` for
+`st.file_uploader(label, type=["jpg","jpeg","png"])` at its call site in
+`app.py`.
 
 ## 5. Using the app
 
@@ -203,8 +215,15 @@ search/export is scoped to it. This is the seam for future multi-company use
    (shows its ASIN/EAN/description/qty/weight), or **start from scratch**
    by scanning a barcode/model label (auto-decoded) or typing it manually.
 2. *Photos* — capture front/back/sides/defect close-ups. Add as many as you
-   need; delete any with the 🗑️ button. If a barcode/label ends up in any
-   photo, it's later decoded and used as a hard cross-check against the
+   need; delete any with the 🗑️ button. The first photo (the one used as
+   the main listing thumbnail) gets a **"🧼 Clean background"** button —
+   uses `rembg` (local, no per-photo API cost) to cut the product out,
+   crop to it, and recomposite it centered on a pure white e-commerce-style
+   background. It never enlarges past the source photo's native resolution
+   (upscaling a low-res crop just introduces blur, not real detail) — if
+   the source is too small to fill the frame this way, a warning suggests
+   retaking the photo closer up. If a barcode/label ends up in any photo,
+   it's later decoded and used as a hard cross-check against the
    manifest's claimed EAN. **SKU is required here** before continuing —
    entered manually, never touched by AI, and carried through everything
    from this point on (photo folder name, AI results, Excel export).
