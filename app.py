@@ -3,6 +3,7 @@ inventory management and Baselinker-ready export.
 
 Run with:  streamlit run app.py
 """
+import io
 import math
 import os
 import re
@@ -13,6 +14,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import pandas as pd
+from PIL import Image, ImageOps
 
 from modules import (
     background_removal,
@@ -142,6 +144,37 @@ def _enlarge_camera_preview():
         """,
         unsafe_allow_html=True,
     )
+
+
+_PHOTO_MAX_DIM = 2400  # long-side cap in px — well above what any listing
+
+
+def _normalize_captured_photo(raw_bytes: bytes) -> bytes:
+    """Corrects orientation and caps resolution for a freshly captured/
+    uploaded photo. Native camera photos (via st.file_uploader, see
+    _style_photo_uploader below) store an EXIF orientation tag rather than
+    physically rotating pixels — PIL (and therefore st.image, and Claude's
+    vision API) ignores that tag by default, so a portrait photo taken
+    normally renders sideways unless corrected here. Also downscales to
+    `_PHOTO_MAX_DIM` on the long side: full sensor resolution (often
+    10-12MP+, several MB) is far more than any marketplace listing needs
+    and noticeably slows down upload/display/AI calls for no visible
+    quality gain — still a large jump up from st.camera_input's ~400px
+    output, just not needlessly huge. Done once here at capture time so
+    every downstream consumer (gallery, background removal, AI grading,
+    BaseLinker export) works with an already-correct image.
+    """
+    img = Image.open(io.BytesIO(raw_bytes))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+
+    if max(img.width, img.height) > _PHOTO_MAX_DIM:
+        scale = _PHOTO_MAX_DIM / max(img.width, img.height)
+        img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))), Image.LANCZOS)
+
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
 
 
 def _style_photo_uploader():
@@ -498,8 +531,9 @@ if page == "🆕 New Item":
         if uploaded:
             if not st.session_state.captured_photos:
                 st.session_state.photo0_low_res_warning = False
-            for f in uploaded:
-                st.session_state.captured_photos.append(f.getvalue())
+            with st.spinner(f"Processing {len(uploaded)} photo(s)..."):
+                for f in uploaded:
+                    st.session_state.captured_photos.append(_normalize_captured_photo(f.getvalue()))
             st.session_state.photo_widget_seq += 1
             st.rerun()
 
