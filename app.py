@@ -162,15 +162,21 @@ def _style_photo_uploader():
         div[data-testid="stFileUploaderDropzoneInstructions"] {
             display: none !important;
         }
-        div[data-testid="stFileUploaderDropzone"] {
+        section[data-testid="stFileUploaderDropzone"] {
             background: transparent !important;
             border: none !important;
             padding: 0 !important;
-            justify-content: center !important;
+            display: block !important;
         }
-        div[data-testid="stFileUploaderDropzone"] button {
+        section[data-testid="stFileUploaderDropzone"] > span {
+            display: block !important;
             width: 100% !important;
-            padding: 1.15rem !important;
+        }
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
+            display: block !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+            padding: 1.15rem 0.5rem !important;
             background: #38bdf8 !important;
             border: none !important;
             border-radius: 0.75rem !important;
@@ -179,20 +185,22 @@ def _style_photo_uploader():
             position: relative !important;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
         }
-        div[data-testid="stFileUploaderDropzone"] button svg {
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] span[data-testid="stIconMaterial"] {
             display: none !important;
         }
-        div[data-testid="stFileUploaderDropzone"] button::after {
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
             content: "📷  Take a Photo or Choose from Library" !important;
             position: absolute !important;
             top: 50% !important;
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
+            width: 90% !important;
             font-size: 1rem !important;
-            line-height: 1.2 !important;
+            line-height: 1.3 !important;
             color: #0b1120 !important;
             font-weight: 700 !important;
-            white-space: nowrap !important;
+            white-space: normal !important;
+            text-align: center !important;
         }
         </style>
         """,
