@@ -3,7 +3,7 @@ verified necessary this session on a real low-res phone photo), and
 compositing onto a solid background with a soft drop shadow so the
 product reads as sitting on a surface rather than floating.
 """
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 import numpy as np
 
 from .config import PipelineConfig
@@ -54,6 +54,18 @@ def composite(cropped_rgba: Image.Image, config: PipelineConfig) -> tuple[Image.
     new_h = max(1, int(cropped_rgba.height * scale))
     resample = Image.LANCZOS if scale < 1 else Image.BICUBIC
     resized = cropped_rgba.resize((new_w, new_h), resample)
+
+    if scale > 1.0:
+        # Upscaling (even capped at max_upscale) still softens edges via
+        # interpolation — enhancer.py's sharpening ran BEFORE this resize,
+        # so it can't compensate for blur the resize itself introduces.
+        # A second, small sharpen + contrast pass here (on RGB only, alpha
+        # untouched) recovers a crisper, punchier look specifically for
+        # the enlarged case.
+        rgb = resized.convert("RGB")
+        rgb = rgb.filter(ImageFilter.UnsharpMask(radius=1.5, percent=80, threshold=2))
+        rgb = ImageEnhance.Contrast(rgb).enhance(1.06)
+        resized = Image.merge("RGBA", (*rgb.split(), resized.getchannel("A")))
 
     canvas = Image.new("RGBA", (config.canvas_size, config.canvas_size), config.background_color + (255,))
     paste_x = (config.canvas_size - new_w) // 2

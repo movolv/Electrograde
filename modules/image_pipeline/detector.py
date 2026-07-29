@@ -7,12 +7,20 @@ off-center in the final composite).
 """
 import io
 
+import cv2
 import numpy as np
 from PIL import Image
 from rembg import new_session, remove
 from scipy import ndimage
 
 from .hardware import select_device
+
+# Soft-feathers the mask edge over this many pixels so the product blends
+# into the background smoothly instead of a hard "cut with scissors" edge
+# — a plain boolean threshold on rembg's alpha (even though it keeps
+# rembg's own antialiased 11-254 values inside the mask) still clips
+# anything at/below the threshold to hard zero right at the boundary.
+_EDGE_FEATHER_PX = 2
 
 # isnet-general-use trades a bit of speed for noticeably cleaner edges than
 # the default u2net model on glossy/reflective product photography (steel,
@@ -88,6 +96,11 @@ def detect(image: Image.Image, use_gpu: bool = True) -> tuple[Image.Image, np.nd
     confidence = mask_confidence(full_mask, mask)
 
     clean_alpha = np.where(mask, alpha, 0).astype(np.uint8)
+    # Feather: blur just the alpha channel a little so the mask boundary
+    # fades smoothly rather than clipping hard. Only affects the edge band
+    # (the blur is applied everywhere but the interior is already ~255 and
+    # the exterior already 0, so it only visibly changes the transition).
+    clean_alpha = cv2.GaussianBlur(clean_alpha, (0, 0), sigmaX=_EDGE_FEATHER_PX)
     rgba.putalpha(Image.fromarray(clean_alpha))
 
     return rgba, mask, confidence
