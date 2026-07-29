@@ -79,7 +79,9 @@ JSON-serializable record), and multi-company use:
   - If zbar isn't available, the app **still works** — it just falls back to
     manual model-number entry (barcode auto-decode is a convenience, not a
     hard requirement).
-- **"Clean background"** (Step 2) needs `rembg` + `onnxruntime` (in
+- **"Clean background"** (Step 2) is backed by `modules/image_pipeline/`
+  (see its own `README.md` for the full design) — needs `rembg` +
+  `onnxruntime` + `opencv-python-headless` + `scipy` (all in
   `requirements.txt`) and an internet connection the *first* time it's
   used — it downloads a ~180MB segmentation model to `~/.u2net/` on first
   run, then works offline/instantly after that.
@@ -158,7 +160,7 @@ tapping it opens the phone's own native camera app (via the OS's picker
 sheet) rather than an in-page live video widget. This was a deliberate
 switch away from `st.camera_input` — full sensor resolution matters here,
 since both the AI grading (`vision_grading.py`, spotting small defects) and
-the "Clean background" cutout tool (`modules/background_removal.py`) need
+the "Clean background" cutout tool (`modules/image_pipeline/`) need
 enough source detail to work with; `st.camera_input` instead grabs a frame
 from a low-res in-browser video stream (measured as low as ~400×500px on a
 modern phone, vs. several thousand px from the native camera app), which
@@ -216,17 +218,25 @@ search/export is scoped to it. This is the seam for future multi-company use
    by scanning a barcode/model label (auto-decoded) or typing it manually.
 2. *Photos* — capture front/back/sides/defect close-ups. Add as many as you
    need; delete any with the 🗑️ button. The first photo (the one used as
-   the main listing thumbnail) gets a **"🧼 Clean background"** button —
-   uses `rembg` (local, no per-photo API cost) to cut the product out,
-   crop to it, and recomposite it centered on a pure white e-commerce-style
-   background. It never enlarges past the source photo's native resolution
-   (upscaling a low-res crop just introduces blur, not real detail) — if
-   the source is too small to fill the frame this way, a warning suggests
-   retaking the photo closer up. If a barcode/label ends up in any photo,
-   it's later decoded and used as a hard cross-check against the
-   manifest's claimed EAN. **SKU is required here** before continuing —
-   entered manually, never touched by AI, and carried through everything
-   from this point on (photo folder name, AI results, Excel export).
+   the main listing thumbnail) gets a **"🧼 Clean background"** button,
+   backed by `modules/image_pipeline/` — a local, no-per-photo-API-cost
+   pipeline (`rembg` + classical OpenCV/PIL processing) that detects the
+   product, straightens minor in-plane tilt, crops to it, lightly softens
+   small glare hot-spots, freshens lighting/contrast, and recomposites it
+   centered on a pure white e-commerce background with a soft drop
+   shadow. It never enlarges past what the source resolution supports
+   (upscaling a low-res crop just introduces blur, not real detail), and
+   runs an automatic quality check (sharpness/exposure/centering/
+   framing) — a photo that fails the check is rejected with a specific
+   reason instead of silently producing a bad result; see
+   `modules/image_pipeline/README.md` for the full pipeline design,
+   scope, and known limitations (it does **not** truly remove
+   reflections — see that doc before expecting it to). If a barcode/
+   label ends up in any photo, it's later decoded and used as a hard
+   cross-check against the manifest's claimed EAN. **SKU is required
+   here** before continuing — entered manually, never touched by AI, and
+   carried through everything from this point on (photo folder name, AI
+   results, Excel export).
 3. *Specs* — "Fetch specs from the web" using whichever identifiers exist
    (EAN, ASIN, manifest description, or typed model number) to fill in
    brand/model/name/category/spec summary/box contents; all editable.

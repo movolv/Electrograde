@@ -20,12 +20,12 @@ import pandas as pd
 from PIL import Image, ImageOps
 
 from modules import (
-    background_removal,
     barcode_scanner,
     baselinker_client,
     description_gen,
     export,
     identifier_lookup,
+    image_pipeline,
     inventory_store,
     manifest_import,
     manifest_store,
@@ -237,15 +237,23 @@ def _render_photo_gallery(product):
                 # shown in search results/thumbnails, so it's the one
                 # worth a clean white e-commerce background.
                 if st.button("🧼 Clean background", key="clean_bg_0", use_container_width=True):
-                    with st.spinner("Removing background — first run downloads the model (~170MB) and may take a minute..."):
+                    with st.spinner("Enhancing photo — first run downloads the model (~170MB) and may take a minute..."):
                         try:
-                            cleaned, low_res = background_removal.clean_product_photo(img_bytes)
+                            enhanced, score, report = image_pipeline.process_image(img_bytes)
+                        except image_pipeline.LowQualityImageError as e:
+                            st.error(
+                                "Photo didn't pass the quality check: "
+                                + " ".join(e.report.issues)
+                                + " Please retake it (better focus/lighting, or closer up)."
+                            )
                         except Exception as e:
                             st.error(f"Background removal failed: {e}")
                         else:
-                            st.session_state.captured_photos[0] = cleaned
-                            if low_res:
+                            st.session_state.captured_photos[0] = enhanced.jpeg_bytes
+                            if enhanced.low_resolution:
                                 st.session_state.photo0_low_res_warning = True
+                            for warning in report.warnings:
+                                st.toast(warning, icon="⚠️")
                             st.rerun(scope="fragment")
                 if st.session_state.get("photo0_low_res_warning"):
                     st.caption(

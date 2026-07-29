@@ -10,3 +10,5 @@ python-dotenv>=1.0
 pyzbar>=0.1.9
 rembg>=2.0.59
 onnxruntime>=1.16  # rembg's inference backend — not pulled in automatically by rembg itself
+opencv-python-headless>=4.9  # classical CV for modules/image_pipeline (perspective, sharpness/exposure scoring, reflection inpainting)
+scipy>=1.11  # connected-component analysis, also pulled in transitively by rembg
