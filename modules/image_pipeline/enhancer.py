@@ -95,6 +95,7 @@ def enhance(rgba: Image.Image, config: PipelineConfig) -> Image.Image:
     rgb = _local_contrast_pop(rgb)
     rgb = ImageEnhance.Brightness(rgb).enhance(1.03)
     rgb = ImageEnhance.Contrast(rgb).enhance(1.04)
+    rgb = ImageEnhance.Color(rgb).enhance(config.saturation_boost)
 
     if config.denoise:
         rgb = _denoise(rgb)

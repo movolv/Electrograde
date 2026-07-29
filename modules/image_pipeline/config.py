@@ -29,6 +29,12 @@ class PipelineConfig:
     sharpening_strength: float = 0.3  # 0=off, 1=maximum
     denoise: bool = True
 
+    # Modest color-intensity lift (1.0 = untouched, matching PIL's
+    # ImageEnhance.Color scale) — presentation polish in the same spirit
+    # as the brightness/contrast lift above, not a hue/color change, so it
+    # doesn't cross into "altering what the product looks like."
+    saturation_boost: float = 1.15
+
     # Auto-detected at runtime by hardware.py; set False to force CPU
     # even if a CUDA-capable onnxruntime provider is present.
     use_gpu: bool = True
