@@ -3,11 +3,14 @@ inventory management and Baselinker-ready export.
 
 Run with:  streamlit run app.py
 """
+import concurrent.futures
+import hashlib
 import io
 import math
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -146,6 +149,18 @@ def _enlarge_camera_preview():
     )
 
 
+@st.cache_resource
+def _photo_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """One shared background worker pool for photo normalization, so
+    capturing the next photo doesn't have to wait for the previous one to
+    finish uploading/processing — st.cache_resource keeps a single
+    instance alive across reruns instead of spawning a new pool every
+    script run. Modest worker count: this is CPU-bound Pillow work
+    (EXIF transpose + resize), not I/O-bound, so more workers than cores
+    just causes contention rather than helping."""
+    return concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
 _PHOTO_MAX_DIM = 2400  # long-side cap in px — well above what any listing
 
 
@@ -177,6 +192,115 @@ def _normalize_captured_photo(raw_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+@st.fragment(run_every=1)
+def _render_photo_gallery(product):
+    """Background-processing-aware Step 2 gallery + SKU + nav controls.
+    Resolves any _photo_executor jobs that finished since the last tick
+    into captured_photos, shows a "Processing..." placeholder for ones
+    still running, and — because this is an `st.fragment(run_every=1)` —
+    reruns itself once a second independently of the rest of the page.
+    That's what lets a photo finish uploading/normalizing and land in the
+    gallery on its own, without the user needing to tap anything, while
+    they're already back in the camera app taking the next shot.
+
+    The SKU input and Back/Next buttons live in this same fragment (not
+    just the image grid) so the "Next" button's disabled state and the
+    "waiting for processing" caption also update on their own once the
+    last background job finishes — otherwise they'd stay stuck showing
+    stale state until some unrelated interaction forced a full rerun.
+    `product` is the same object as st.session_state.product (not a
+    copy), so mutating product.sku here persists normally."""
+    for job_id, future in list(st.session_state.pending_photos.items()):
+        if future.done():
+            del st.session_state.pending_photos[job_id]
+            try:
+                st.session_state.captured_photos.append(future.result())
+            except Exception as e:
+                st.error(f"Photo processing failed: {e}")
+
+    photos = st.session_state.captured_photos
+    pending_count = len(st.session_state.pending_photos)
+    if not photos and not pending_count:
+        return
+
+    status = f"**{len(photos)} photo(s) captured**"
+    if pending_count:
+        status += f" · ⏳ {pending_count} still processing..."
+    st.write(status)
+
+    cols = st.columns(4)
+    for i, img_bytes in enumerate(photos):
+        with cols[i % 4]:
+            st.image(img_bytes, use_container_width=True)
+            if i == 0:
+                # Only the first (main listing) photo — this is the one
+                # shown in search results/thumbnails, so it's the one
+                # worth a clean white e-commerce background.
+                if st.button("🧼 Clean background", key="clean_bg_0", use_container_width=True):
+                    with st.spinner("Removing background — first run downloads the model (~170MB) and may take a minute..."):
+                        try:
+                            cleaned, low_res = background_removal.clean_product_photo(img_bytes)
+                        except Exception as e:
+                            st.error(f"Background removal failed: {e}")
+                        else:
+                            st.session_state.captured_photos[0] = cleaned
+                            if low_res:
+                                st.session_state.photo0_low_res_warning = True
+                            st.rerun(scope="fragment")
+                if st.session_state.get("photo0_low_res_warning"):
+                    st.caption(
+                        "⚠️ Source photo resolution was too low to fill the "
+                        "frame without blurring — the product was kept at its "
+                        "native sharpness instead. For a bigger, crisper result, "
+                        "retake this photo closer up and in better focus."
+                    )
+            if st.button("🗑️", key=f"del_photo_{i}"):
+                if i == 0:
+                    st.session_state.photo0_low_res_warning = False
+                st.session_state.captured_photos.pop(i)
+                st.rerun(scope="fragment")
+
+    for j in range(pending_count):
+        with cols[(len(photos) + j) % 4]:
+            st.info("⏳ Processing...")
+
+    st.divider()
+    if product.sku:
+        # Already assigned (manifest import auto-assigns SKU on import) —
+        # nothing to enter here, never changed or generated by AI.
+        st.write(f"**SKU:** {product.sku}")
+        st.caption("Assigned automatically from the manifest import.")
+        sku_input = product.sku
+        sku_missing = False
+    else:
+        sku_spacer, sku_col = st.columns([1, 1])
+        with sku_col:
+            sku_input = st.text_input(
+                "SKU *",
+                value=product.sku,
+                placeholder="Enter SKU before continuing",
+                help="Entered manually — never changed or generated by AI. "
+                "This SKU will be linked to all AI analysis results and the Excel record for this item.",
+            )
+            sku_missing = not sku_input.strip()
+            if sku_missing:
+                st.warning("⚠️ SKU is required before you can continue to analysis.")
+
+    if pending_count:
+        st.caption("⏳ Waiting for photo processing to finish before continuing...")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("⬅ Back", use_container_width=True):
+            st.session_state.wizard_step = 1
+            st.rerun()
+    with col3:
+        if st.button("Next ➜", type="primary", use_container_width=True, disabled=not photos or sku_missing or bool(pending_count)):
+            product.sku = sku_input.strip()
+            st.session_state.wizard_step = 3
+            st.rerun()
+
+
 def _style_photo_uploader():
     """Restyles Step 2's st.file_uploader into a single big branded
     "Take a Photo" button instead of Streamlit's default dashed dropzone +
@@ -195,21 +319,49 @@ def _style_photo_uploader():
         div[data-testid="stFileUploaderDropzoneInstructions"] {
             display: none !important;
         }
+        /* The per-file name/size chip row: redundant once at least one
+        photo exists, since our own gallery below already shows a
+        thumbnail (and a delete button) for every captured photo. Hiding
+        the individual stFileChip rows rather than their stFileChips
+        container — that container also holds the "Add files" button
+        (stBaseButton-borderlessIcon below), so hiding the whole
+        container hides the button along with it. */
+        div[data-testid="stFileChip"] {
+            display: none !important;
+        }
+        div[data-testid="stFileChips"] {
+            display: block !important;
+            width: 100% !important;
+        }
         section[data-testid="stFileUploaderDropzone"] {
             background: transparent !important;
             border: none !important;
             padding: 0 !important;
             display: block !important;
         }
-        section[data-testid="stFileUploaderDropzone"] > span {
+        /* Streamlit swaps in a *different* button+wrapper once at least
+        one file is already selected (a small icon-only "Add files"
+        button, data-testid stBaseButton-borderlessIcon, replacing the
+        empty-state stBaseButton-secondary) — both cases are styled
+        identically below so the call-to-action stays equally big and
+        obvious for the 2nd/3rd/... photo, not just the 1st. */
+        section[data-testid="stFileUploaderDropzone"] > span,
+        section[data-testid="stFileUploaderDropzone"] > div {
             display: block !important;
             width: 100% !important;
+            height: auto !important;
+            min-height: 3.5rem !important;
+            max-height: none !important;
+            overflow: visible !important;
         }
-        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"],
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-borderlessIcon"] {
             display: block !important;
             width: 100% !important;
             box-sizing: border-box !important;
             padding: 1.15rem 0.5rem !important;
+            min-height: 3.5rem !important;
+            max-height: none !important;
             background: #38bdf8 !important;
             border: none !important;
             border-radius: 0.75rem !important;
@@ -218,11 +370,12 @@ def _style_photo_uploader():
             position: relative !important;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
         }
-        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] span[data-testid="stIconMaterial"] {
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] span[data-testid="stIconMaterial"],
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-borderlessIcon"] span[data-testid="stIconMaterial"] {
             display: none !important;
         }
-        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
-            content: "📷  Take a Photo or Choose from Library" !important;
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after,
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-borderlessIcon"]::after {
             position: absolute !important;
             top: 50% !important;
             left: 50% !important;
@@ -234,6 +387,12 @@ def _style_photo_uploader():
             font-weight: 700 !important;
             white-space: normal !important;
             text-align: center !important;
+        }
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
+            content: "📷  Take a Photo or Choose from Library" !important;
+        }
+        section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-borderlessIcon"]::after {
+            content: "📷  Take Another Photo" !important;
         }
         </style>
         """,
@@ -267,6 +426,15 @@ def _init_state():
         "wizard_step": 1,
         "product": Product(),
         "captured_photos": [],       # list of raw bytes
+        "pending_photos": {},        # job_id -> concurrent.futures.Future,
+                                      # still-processing captures (see
+                                      # _photo_executor) so the uploader
+                                      # stays usable for the next shot
+                                      # instead of blocking on this one
+        "seen_photo_hashes": set(),  # content hashes already queued from
+                                      # the Step 2 uploader — see its
+                                      # comment for why this replaces
+                                      # bumping the widget's key
         "photo_widget_seq": 0,       # bumped to reset st.file_uploader after use
         "camera_session_id": 0,      # bumped only on reset_wizard(); kept stable
                                      # across shots within a session so the
@@ -295,6 +463,8 @@ def reset_wizard():
     st.session_state.wizard_step = 1
     st.session_state.product = Product(company_id=st.session_state.company_id)
     st.session_state.captured_photos = []
+    st.session_state.pending_photos = {}
+    st.session_state.seen_photo_hashes = set()
     st.session_state.photo_widget_seq += 1
     st.session_state.camera_session_id += 1
     st.session_state.photo0_low_res_warning = False
@@ -521,89 +691,38 @@ if page == "🆕 New Item":
         # background-remove or grade defects from without visible blur) and
         # the rear camera opens automatically every time, no manual switch.
         _style_photo_uploader()
+        # A stable key (never bumped) is deliberate: each repeat trip
+        # through "Take Photo" on a phone ADDS to this widget's own
+        # accumulated file list rather than replacing it (that's how
+        # Streamlit's multi-file uploader already behaves), so nothing
+        # needs to be reset for the next shot to be accepted. Bumping the
+        # key to reset it after each capture — the previous approach —
+        # remounts the widget, and a photo submitted in the split second
+        # before that remount finishes silently never reaches the app
+        # (confirmed: three rapid-fire uploads, only two arrived). Content
+        # hashes below dedupe against reprocessing the same files on every
+        # rerun instead.
         uploaded = st.file_uploader(
             "Take a photo or choose from library",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
-            key=f"uploader_{st.session_state.photo_widget_seq}",
+            key="photo_uploader",
             label_visibility="collapsed",
         )
         if uploaded:
-            if not st.session_state.captured_photos:
-                st.session_state.photo0_low_res_warning = False
-            with st.spinner(f"Processing {len(uploaded)} photo(s)..."):
-                for f in uploaded:
-                    st.session_state.captured_photos.append(_normalize_captured_photo(f.getvalue()))
-            st.session_state.photo_widget_seq += 1
-            st.rerun()
+            executor = _photo_executor()
+            for f in uploaded:
+                raw = f.getvalue()
+                file_hash = hashlib.sha256(raw).hexdigest()
+                if file_hash in st.session_state.seen_photo_hashes:
+                    continue
+                st.session_state.seen_photo_hashes.add(file_hash)
+                if not st.session_state.captured_photos and not st.session_state.pending_photos:
+                    st.session_state.photo0_low_res_warning = False
+                job_id = uuid.uuid4().hex
+                st.session_state.pending_photos[job_id] = executor.submit(_normalize_captured_photo, raw)
 
-        photos = st.session_state.captured_photos
-        if photos:
-            st.write(f"**{len(photos)} photo(s) captured**")
-            cols = st.columns(4)
-            for i, img_bytes in enumerate(photos):
-                with cols[i % 4]:
-                    st.image(img_bytes, use_container_width=True)
-                    if i == 0:
-                        # Only the first (main listing) photo — this is the
-                        # one shown in search results/thumbnails, so it's
-                        # the one worth a clean white e-commerce background.
-                        if st.button("🧼 Clean background", key="clean_bg_0", use_container_width=True):
-                            with st.spinner("Removing background — first run downloads the model (~170MB) and may take a minute..."):
-                                try:
-                                    cleaned, low_res = background_removal.clean_product_photo(img_bytes)
-                                except Exception as e:
-                                    st.error(f"Background removal failed: {e}")
-                                else:
-                                    st.session_state.captured_photos[0] = cleaned
-                                    if low_res:
-                                        st.session_state.photo0_low_res_warning = True
-                                    st.rerun()
-                        if st.session_state.get("photo0_low_res_warning"):
-                            st.caption(
-                                "⚠️ Source photo resolution was too low to fill the "
-                                "frame without blurring — the product was kept at its "
-                                "native sharpness instead. For a bigger, crisper result, "
-                                "retake this photo closer up and in better focus."
-                            )
-                    if st.button("🗑️", key=f"del_photo_{i}"):
-                        if i == 0:
-                            st.session_state.photo0_low_res_warning = False
-                        st.session_state.captured_photos.pop(i)
-                        st.rerun()
-
-        st.divider()
-        if product.sku:
-            # Already assigned (manifest import auto-assigns SKU on import) —
-            # nothing to enter here, never changed or generated by AI.
-            st.write(f"**SKU:** {product.sku}")
-            st.caption("Assigned automatically from the manifest import.")
-            sku_input = product.sku
-            sku_missing = False
-        else:
-            sku_spacer, sku_col = st.columns([1, 1])
-            with sku_col:
-                sku_input = st.text_input(
-                    "SKU *",
-                    value=product.sku,
-                    placeholder="Enter SKU before continuing",
-                    help="Entered manually — never changed or generated by AI. "
-                    "This SKU will be linked to all AI analysis results and the Excel record for this item.",
-                )
-                sku_missing = not sku_input.strip()
-                if sku_missing:
-                    st.warning("⚠️ SKU is required before you can continue to analysis.")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("⬅ Back", use_container_width=True):
-                st.session_state.wizard_step = 1
-                st.rerun()
-        with col3:
-            if st.button("Next ➜", type="primary", use_container_width=True, disabled=not photos or sku_missing):
-                product.sku = sku_input.strip()
-                st.session_state.wizard_step = 3
-                st.rerun()
+        _render_photo_gallery(product)
 
     # ---- Step 3: Web spec lookup ----
     elif st.session_state.wizard_step == 3:
