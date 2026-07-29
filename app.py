@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import pandas as pd
 
 from modules import (
+    background_removal,
     barcode_scanner,
     baselinker_client,
     description_gen,
@@ -452,6 +453,19 @@ if page == "🆕 New Item":
             for i, img_bytes in enumerate(photos):
                 with cols[i % 4]:
                     st.image(img_bytes, use_container_width=True)
+                    if i == 0:
+                        # Only the first (main listing) photo — this is the
+                        # one shown in search results/thumbnails, so it's
+                        # the one worth a clean white e-commerce background.
+                        if st.button("🧼 Clean background", key="clean_bg_0", use_container_width=True):
+                            with st.spinner("Removing background — first run downloads the model (~170MB) and may take a minute..."):
+                                try:
+                                    cleaned = background_removal.clean_product_photo(img_bytes)
+                                except Exception as e:
+                                    st.error(f"Background removal failed: {e}")
+                                else:
+                                    st.session_state.captured_photos[0] = cleaned
+                                    st.rerun()
                     if st.button("🗑️", key=f"del_photo_{i}"):
                         st.session_state.captured_photos.pop(i)
                         st.rerun()

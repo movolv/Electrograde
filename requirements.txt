@@ -8,3 +8,5 @@ beautifulsoup4>=4.12
 ddgs>=9.0
 python-dotenv>=1.0
 pyzbar>=0.1.9
+rembg>=2.0.59
+onnxruntime>=1.16  # rembg's inference backend — not pulled in automatically by rembg itself
