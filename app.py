@@ -144,6 +144,62 @@ def _enlarge_camera_preview():
     )
 
 
+def _style_photo_uploader():
+    """Restyles Step 2's st.file_uploader into a single big branded
+    "Take a Photo" button instead of Streamlit's default dashed dropzone +
+    small grey "Browse files" button + drag-and-drop/size-limit text — none
+    of that reads as an inviting call-to-action on a phone, and drag-and-
+    drop is meaningless on a touchscreen anyway.
+
+    Same technique as `_enlarge_camera_preview`'s shutter button: the
+    native button label is collapsed to font-size 0 and a `::after`
+    pseudo-element draws our own label instead, since the button's text
+    isn't a Python-settable parameter on this widget.
+    """
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stFileUploaderDropzoneInstructions"] {
+            display: none !important;
+        }
+        div[data-testid="stFileUploaderDropzone"] {
+            background: transparent !important;
+            border: none !important;
+            padding: 0 !important;
+            justify-content: center !important;
+        }
+        div[data-testid="stFileUploaderDropzone"] button {
+            width: 100% !important;
+            padding: 1.15rem !important;
+            background: #38bdf8 !important;
+            border: none !important;
+            border-radius: 0.75rem !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+            position: relative !important;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
+        }
+        div[data-testid="stFileUploaderDropzone"] button svg {
+            display: none !important;
+        }
+        div[data-testid="stFileUploaderDropzone"] button::after {
+            content: "📷  Take a Photo or Choose from Library" !important;
+            position: absolute !important;
+            top: 50% !important;
+            left: 50% !important;
+            transform: translate(-50%, -50%) !important;
+            font-size: 1rem !important;
+            line-height: 1.2 !important;
+            color: #0b1120 !important;
+            font-weight: 700 !important;
+            white-space: nowrap !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def sku_folder_name(sku: str, product_id: str) -> str:
     """Filesystem-safe folder name built from the user-entered SKU.
 
@@ -423,11 +479,13 @@ if page == "🆕 New Item":
         # video stream — a few hundred px on the long side, not enough to
         # background-remove or grade defects from without visible blur) and
         # the rear camera opens automatically every time, no manual switch.
+        _style_photo_uploader()
         uploaded = st.file_uploader(
             "Take a photo or choose from library",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.photo_widget_seq}",
+            label_visibility="collapsed",
         )
         if uploaded:
             if not st.session_state.captured_photos:
