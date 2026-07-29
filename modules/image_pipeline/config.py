@@ -26,7 +26,7 @@ class PipelineConfig:
     quality_threshold: int = 70
 
     reflection_reduction_strength: float = 0.5  # 0=off, 1=maximum
-    sharpening_strength: float = 0.3  # 0=off, 1=maximum
+    sharpening_strength: float = 0.5  # 0=off, 1=maximum
     denoise: bool = True
 
     # Modest color-intensity lift (1.0 = untouched, matching PIL's

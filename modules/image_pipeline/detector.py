@@ -20,7 +20,10 @@ from .hardware import select_device
 # — a plain boolean threshold on rembg's alpha (even though it keeps
 # rembg's own antialiased 11-254 values inside the mask) still clips
 # anything at/below the threshold to hard zero right at the boundary.
-_EDGE_FEATHER_PX = 2
+# Kept small deliberately: verified this session that feathering too much
+# reads as "blurry edges" rather than "smooth edges" — anti-aliasing, not
+# a visible blur ring.
+_EDGE_FEATHER_PX = 0.8
 
 # isnet-general-use trades a bit of speed for noticeably cleaner edges than
 # the default u2net model on glossy/reflective product photography (steel,
