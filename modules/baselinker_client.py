@@ -14,11 +14,12 @@ Design notes:
     Export tab, mirroring this project's "review before anything leaves the
     app" philosophy (same as spec lookup / grading / EAN-ASIN lookup all
     surfacing results before anything is saved).
-  - Idempotent: a product's `baselinker_product_id` (see modules/models.py)
-    is set after the first successful push; subsequent pushes UPDATE that
-    same BaseLinker product instead of creating a duplicate. As a safety
-    net for a reset/fresh local DB, an unsynced product is first checked
-    against BaseLinker by SKU (`filter_sku`) before creating anything new.
+  - Idempotent: a `marketplace_listings` row (modules/marketplace_store.py,
+    marketplace="baselinker") records the external product_id after the
+    first successful push; subsequent pushes UPDATE that same BaseLinker
+    product instead of creating a duplicate. As a safety net for a reset/
+    fresh local DB, an unsynced product is first checked against BaseLinker
+    by SKU (`filter_sku`) before creating anything new.
   - Images are sent as inline base64 (BaseLinker's `images` parameter also
     accepts a public URL, but our photos are local-only) capped at the
     documented 2MB post-encoding limit; oversized photos are progressively
@@ -39,6 +40,9 @@ from typing import Optional
 import requests
 from PIL import Image
 
+from modules import marketplace_store
+
+MARKETPLACE = "baselinker"
 API_URL = "https://api.baselinker.com/connector.php"
 MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024  # BaseLinker's documented cap
 _MIN_CALL_INTERVAL = 60.0 / 90  # stay safely under the 100 req/min limit
@@ -157,10 +161,15 @@ def find_existing_product_id_by_sku(sku: str, config: dict) -> Optional[str]:
     return None
 
 
-def build_payload(product, config: dict, include_images: bool = True) -> dict:
-    """Builds the addInventoryProduct parameters for one Product. A pure
-    function (no network calls) so it's fully unit-testable, and reused by
-    the Export tab's "preview what will be sent" display before pushing."""
+def build_payload(
+    product, config: dict, include_images: bool = True, existing_listing_id: Optional[str] = None
+) -> dict:
+    """Builds the addInventoryProduct parameters for one Product. No network
+    calls of its own (aside from the marketplace_store lookup below), so
+    it's fully unit-testable. `existing_listing_id`, when the caller already
+    resolved one (push_product does, after its SKU-fallback check), takes
+    priority over looking it up fresh — this avoids a stale/missing lookup
+    right after a SKU-fallback match that hasn't been persisted yet."""
     payload = {
         "inventory_id": config["inventory_id"],
         "sku": product.sku,
@@ -177,8 +186,11 @@ def build_payload(product, config: dict, include_images: bool = True) -> dict:
         },
     }
 
-    if product.baselinker_product_id:
-        payload["product_id"] = int(product.baselinker_product_id)
+    if existing_listing_id is None:
+        existing = marketplace_store.get_listing(product.id, MARKETPLACE)
+        existing_listing_id = existing.external_listing_id if existing else ""
+    if existing_listing_id:
+        payload["product_id"] = int(existing_listing_id)
 
     ean = product.ean or product.manifest_barcode or product.scanned_barcode
     if ean:
@@ -212,33 +224,43 @@ def build_payload(product, config: dict, include_images: bool = True) -> dict:
 def push_product(product) -> PushResult:
     """Creates or updates one product in BaseLinker. Never called
     automatically — always an explicit user action (see app.py's Export
-    tab). Mutates product.baselinker_product_id/baselinker_synced_at on
-    success; the caller is responsible for persisting that via
-    inventory_store.save_product."""
+    tab). Persists the resulting listing itself (via marketplace_store) on
+    success — the caller does not need to separately save the product."""
     try:
         config = get_config()
     except BaseLinkerConfigError as e:
         return PushResult(success=False, message=str(e))
 
-    if not product.baselinker_product_id:
-        existing_id = find_existing_product_id_by_sku(product.sku, config)
-        if existing_id:
-            product.baselinker_product_id = existing_id
+    existing = marketplace_store.get_listing(product.id, MARKETPLACE)
+    existing_id = existing.external_listing_id if existing else ""
+    if not existing_id:
+        found_id = find_existing_product_id_by_sku(product.sku, config)
+        if found_id:
+            existing_id = found_id
 
     try:
-        payload = build_payload(product, config)
+        payload = build_payload(product, config, existing_listing_id=existing_id)
         data = _call("addInventoryProduct", payload, config["token"])
     except BaseLinkerAPIError as e:
         return PushResult(success=False, message=str(e))
     except Exception as e:
         return PushResult(success=False, message=f"Unexpected error: {e}")
 
-    product.baselinker_product_id = str(data.get("product_id", product.baselinker_product_id))
-    product.baselinker_synced_at = time.time()
+    listing_id = str(data.get("product_id", existing_id))
+    marketplace_store.upsert_listing(
+        marketplace_store.MarketplaceListing(
+            product_id=product.id,
+            marketplace=MARKETPLACE,
+            external_listing_id=listing_id,
+            status=marketplace_store.STATUS_LISTED,
+            price=product.price,
+            last_synced_at=time.time(),
+        )
+    )
 
     return PushResult(
         success=True,
-        baselinker_product_id=product.baselinker_product_id,
+        baselinker_product_id=listing_id,
         message="Pushed successfully.",
         warnings=data.get("warnings", {}) or {},
     )

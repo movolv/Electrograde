@@ -56,6 +56,9 @@ def _connect() -> sqlite3.Connection:
         "name": "TEXT",
         "sku": "TEXT",
         "manifest_import_id": "TEXT",
+        "triage_status": "TEXT",
+        "grade": "TEXT",
+        "location": "TEXT",
     }
     added_any = False
     for col, decl in new_cols.items():
@@ -68,17 +71,24 @@ def _connect() -> sqlite3.Connection:
         rows = conn.execute(
             "SELECT id, data FROM products WHERE ean IS NULL OR asin IS NULL "
             "OR model_number IS NULL OR model IS NULL OR brand IS NULL OR name IS NULL "
-            "OR sku IS NULL OR manifest_import_id IS NULL"
+            "OR sku IS NULL OR manifest_import_id IS NULL OR triage_status IS NULL "
+            "OR grade IS NULL OR location IS NULL"
         ).fetchall()
         for rid, data_json in rows:
             d = json.loads(data_json)
+            # Product.from_dict() carries the triage_status backward-compat
+            # default (old completed records -> "ready_for_sale") — reuse it
+            # here so the denormalized column matches what the JSON blob
+            # would resolve to, instead of duplicating that inference logic.
+            triage_status = Product.from_dict(d).triage_status
             conn.execute(
                 "UPDATE products SET ean=?, asin=?, model_number=?, model=?, brand=?, name=?, "
-                "sku=?, manifest_import_id=? WHERE id=?",
+                "sku=?, manifest_import_id=?, triage_status=?, grade=?, location=? WHERE id=?",
                 (
                     d.get("ean", ""), d.get("asin", ""), d.get("model_number", ""),
                     d.get("model", ""), d.get("brand", ""), d.get("name", ""),
-                    d.get("sku", ""), d.get("manifest_import_id", ""), rid,
+                    d.get("sku", ""), d.get("manifest_import_id", ""), triage_status,
+                    d.get("grade", ""), d.get("location", ""), rid,
                 ),
             )
         conn.commit()
@@ -89,11 +99,17 @@ def _connect() -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_model_number ON products(model_number)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_manifest_import_id ON products(manifest_import_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_triage_status ON products(triage_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_grade ON products(grade)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
     return conn
 
 
 def _search_columns(p: Product) -> tuple:
-    return (p.ean, p.asin, p.model_number, p.model, p.brand, p.name, p.sku, p.manifest_import_id)
+    return (
+        p.ean, p.asin, p.model_number, p.model, p.brand, p.name, p.sku, p.manifest_import_id,
+        p.triage_status, p.grade, p.location,
+    )
 
 
 def save_product(product: Product) -> Optional[str]:
@@ -107,8 +123,9 @@ def save_product(product: Product) -> Optional[str]:
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO products
-               (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku, manifest_import_id, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
+                manifest_import_id, triage_status, grade, location, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (product.id, product.company_id, product.created_at, *_search_columns(product),
              json.dumps(product.to_dict())),
         )
@@ -125,8 +142,9 @@ def save_products_bulk(products: List[Product]) -> Optional[str]:
     with conn:
         conn.executemany(
             """INSERT OR REPLACE INTO products
-               (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku, manifest_import_id, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
+                manifest_import_id, triage_status, grade, location, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(p.to_dict()))
                 for p in products
@@ -294,3 +312,89 @@ def next_sku_batch(
     numeric_skus = [int(r[0]) for r in rows if r[0] and r[0].isdigit()]
     next_start = (max(numeric_skus) + 1) if numeric_skus else start_if_empty
     return [str(next_start + i) for i in range(count)]
+
+
+def list_products_paginated(
+    company_id: Optional[str] = None,
+    triage_status: Optional[str] = None,
+    manifest_import_id: Optional[str] = None,
+    location: Optional[str] = None,
+    grade: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> Tuple[List[Product], int]:
+    """The default Inventory-tab query: filtered on indexed columns, and
+    always bounded by LIMIT/OFFSET so at most one page of rows is ever
+    loaded into Python/the browser — the thing the plain list_products()
+    loop-per-row rendering can't do at 1,000-20,000 rows.
+
+    `search` is a lightweight substring match (sku/name/brand/model/ean/
+    asin) for narrowing within the current filters — for a single specific
+    lookup by exact SKU/EAN/ASIN across the *whole* inventory regardless of
+    filters, use search_products() instead.
+
+    Filters combine with AND; any left as None is skipped entirely (not
+    turned into an "IS NULL" or "= ''" clause). Returns (rows_for_this_page,
+    total_matching_row_count) so the caller can render "page X of Y".
+    """
+    where_clauses = []
+    params: list = []
+
+    if company_id:
+        where_clauses.append("company_id = ?")
+        params.append(company_id)
+    if triage_status:
+        where_clauses.append("triage_status = ?")
+        params.append(triage_status)
+    if manifest_import_id:
+        where_clauses.append("manifest_import_id = ?")
+        params.append(manifest_import_id)
+    if location:
+        where_clauses.append("location = ?")
+        params.append(location)
+    if grade:
+        where_clauses.append("grade = ?")
+        params.append(grade)
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        where_clauses.append(
+            "(sku LIKE ? COLLATE NOCASE OR name LIKE ? COLLATE NOCASE OR brand LIKE ? COLLATE NOCASE "
+            "OR model LIKE ? COLLATE NOCASE OR model_number LIKE ? COLLATE NOCASE "
+            "OR ean = ? OR UPPER(asin) = UPPER(?))"
+        )
+        params.extend([like, like, like, like, like, search.strip(), search.strip()])
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    conn = _connect()
+    total = conn.execute(f"SELECT COUNT(*) FROM products {where_sql}", params).fetchone()[0]
+
+    page = max(1, page)
+    offset = (page - 1) * page_size
+    rows = conn.execute(
+        f"SELECT data FROM products {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params + [page_size, offset],
+    ).fetchall()
+    conn.close()
+
+    products = [Product.from_dict(json.loads(r[0])) for r in rows]
+    return products, total
+
+
+def distinct_locations(company_id: Optional[str] = None) -> List[str]:
+    """Non-empty distinct location values currently in use, for populating
+    a filter dropdown — cheap thanks to the indexed `location` column."""
+    conn = _connect()
+    if company_id:
+        rows = conn.execute(
+            "SELECT DISTINCT location FROM products WHERE company_id = ? AND location IS NOT NULL AND location != '' "
+            "ORDER BY location ASC",
+            (company_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT location FROM products WHERE location IS NOT NULL AND location != '' ORDER BY location ASC"
+        ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]

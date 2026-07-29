@@ -84,12 +84,19 @@ class Product:
     match_confidence: int = 0
     match_notes: str = ""
 
+    # -- TRIAGE (disposition after testing — manual-only, distinct from
+    # `status` which tracks pipeline stage, and from `grade` which is
+    # cosmetic condition A-D) --
+    triage_status: str = "testing_pending"
+    # "testing_pending" | "ready_for_sale" | "needs_repair" | "for_parts" | "written_off"
+
     # -- MANUAL-ONLY (AI cannot reliably determine these) --
     location: str = ""
     functional_test_result: str = ""  # "Working" | "Not Working" | "Not Tested"
     box_length_cm: float = 0.0
     box_width_cm: float = 0.0
     box_height_cm: float = 0.0
+    purchase_price_allocated: float = 0.0  # this item's share of the manifest/lot cost, for profit calc
 
     # -- media / bookkeeping --
     image_paths: List[str] = field(default_factory=list)
@@ -110,4 +117,9 @@ class Product:
             # concept existed (pre manifest-import feature) were always
             # fully processed items — never default them to "draft".
             known["status"] = "completed"
+        if "triage_status" not in known and known.get("status") == "completed":
+            # Records saved before triage_status existed but already fully
+            # processed were, by definition, treated as sellable at the time
+            # — never default a real completed item to "testing_pending".
+            known["triage_status"] = "ready_for_sale"
         return Product(**known)

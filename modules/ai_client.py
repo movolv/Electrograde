@@ -57,12 +57,27 @@ def ask_text(system: str, user: str, max_tokens: int = 800) -> str:
     return "".join(block.text for block in resp.content if block.type == "text").strip()
 
 
-def _image_block(image_bytes: bytes, media_type: str = "image/jpeg") -> dict:
+def _detect_media_type(image_bytes: bytes) -> str:
+    """Sniffs the real format from the file's magic bytes rather than
+    trusting a filename/caller-supplied default — camera_input always
+    produces JPEG, but st.file_uploader also accepts PNG from a user's
+    photo library, and Claude's API rejects a mismatched media_type/content
+    combination outright rather than transcoding for you."""
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _image_block(image_bytes: bytes, media_type: Optional[str] = None) -> dict:
     return {
         "type": "image",
         "source": {
             "type": "base64",
-            "media_type": media_type,
+            "media_type": media_type or _detect_media_type(image_bytes),
             "data": base64.standard_b64encode(image_bytes).decode("utf-8"),
         },
     }

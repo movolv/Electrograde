@@ -3,6 +3,7 @@ inventory management and Baselinker-ready export.
 
 Run with:  streamlit run app.py
 """
+import math
 import os
 import re
 import time
@@ -22,8 +23,10 @@ from modules import (
     inventory_store,
     manifest_import,
     manifest_store,
+    marketplace_store,
     pricing,
     pwa,
+    repair_store,
     spec_lookup,
     vision_grading,
 )
@@ -38,6 +41,106 @@ _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
 
 # Below this, a manifest-vs-photo match is flagged to the user as suspect.
 MATCH_CONFIDENCE_WARNING_THRESHOLD = 60
+
+
+def _enlarge_camera_preview():
+    """st.camera_input's default layout is a short preview box with plain
+    controls stacked below it — on a phone, other page content above it
+    pushes the live view down to where the product often isn't fully
+    visible before the shot is taken. This turns it into a near-fullscreen,
+    camera-app-style view: the live preview fills almost the whole
+    viewport, the switch-camera control sits top-right over the image, and
+    the shutter is a plain circle overlaid near the bottom of the image
+    itself — instead of ordinary widget controls stacked below a small
+    preview.
+
+    Deliberately NOT `position: fixed` covering the entire viewport: this
+    wizard step has no dedicated "Back" control other than the sidebar nav
+    and (on step 1) a manual-entry fallback below the preview — a truly
+    fullscreen fixed overlay would visually bury both with no way out
+    except taking a photo. Keeping the preview a very tall block in normal
+    page flow means it's still just a scroll away, while looking and
+    behaving like a fullscreen camera at a glance.
+
+    Targets the widget's own data-testid hooks (stable across Streamlit's
+    internal class-name changes), since camera_input's DOM structure isn't
+    ours to control directly. Height is set in both `vh` and `dvh` (the
+    latter wins where supported, ignored where not) because iOS Safari's
+    address bar resizes the plain viewport — `dvh` tracks the actual
+    visible area instead of pushing the shutter button off-screen.
+    """
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stCameraInput"] { position: relative !important; }
+        div[data-testid="stCameraInput"] > label { display: none !important; }
+
+        div[data-testid="stCameraInputWebcamStyledBox"] {
+            width: 100% !important;
+            height: 88vh !important;
+            height: 88dvh !important;
+            max-height: 88vh !important;
+            max-height: 88dvh !important;
+        }
+        div[data-testid="stCameraInputWebcamComponent"] video {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+        }
+
+        /* Switch-camera control: pinned top-right, over the live image */
+        div[data-testid="stCameraInputSwitchButton"] {
+            position: absolute !important;
+            top: 1rem !important;
+            right: 1rem !important;
+            z-index: 10 !important;
+        }
+        div[data-testid="stCameraInputSwitchButton"] button {
+            background: rgba(0, 0, 0, 0.45) !important;
+            border-radius: 50% !important;
+            width: 3rem !important;
+            height: 3rem !important;
+        }
+
+        /* Shutter: Streamlit puts data-testid directly on the <button>
+        itself here (unlike the other hooks above, which are on a wrapping
+        <div>) — no nested "button" descendant exists, so the selector
+        targets the button element directly. Reused by Streamlit for both
+        "Take Photo" and, after a capture, "Clear Photo" (its label isn't
+        something a Python parameter can rename); font-size: 0 collapses
+        the native label/icon to nothing regardless of color, and the
+        ::after below draws our own label instead, the same for both
+        states. */
+        button[data-testid="stCameraInputButton"] {
+            position: absolute !important;
+            bottom: 1.25rem !important;
+            left: 50% !important;
+            transform: translateX(-50%) !important;
+            z-index: 10 !important;
+            width: 4.5rem !important;
+            height: 4.5rem !important;
+            border-radius: 50% !important;
+            border: 4px solid white !important;
+            background: rgba(255, 255, 255, 0.25) !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+        }
+        button[data-testid="stCameraInputButton"]::after {
+            content: "Take Photo" !important;
+            position: absolute !important;
+            top: 50% !important;
+            left: 50% !important;
+            transform: translate(-50%, -50%) !important;
+            font-size: 0.7rem !important;
+            line-height: 1.1 !important;
+            color: white !important;
+            font-weight: 600 !important;
+            white-space: nowrap !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def sku_folder_name(sku: str, product_id: str) -> str:
@@ -66,7 +169,13 @@ def _init_state():
         "wizard_step": 1,
         "product": Product(),
         "captured_photos": [],       # list of raw bytes
-        "photo_widget_seq": 0,       # bumped to reset st.camera_input
+        "photo_widget_seq": 0,       # bumped to reset st.file_uploader after use
+        "camera_session_id": 0,      # bumped only on reset_wizard(); kept stable
+                                     # across shots within a session so the
+                                     # user's chosen facing mode (front/rear)
+                                     # survives between photos
+        "last_camera_shot_hash": None,  # dedupes a still-displayed capture
+                                         # from a genuinely new one
         "spec_result": None,
         "grading_result": None,
         "price_estimate": None,
@@ -87,6 +196,8 @@ def reset_wizard():
     st.session_state.product = Product(company_id=st.session_state.company_id)
     st.session_state.captured_photos = []
     st.session_state.photo_widget_seq += 1
+    st.session_state.camera_session_id += 1
+    st.session_state.last_camera_shot_hash = None
     st.session_state.spec_result = None
     st.session_state.grading_result = None
     st.session_state.price_estimate = None
@@ -255,7 +366,8 @@ if page == "🆕 New Item":
                 "On phones, tap the switch-camera icon in the widget to use "
                 "the rear camera if it opens on the front camera."
             )
-            shot = st.camera_input("Scan label", key=f"barcode_cam_{st.session_state.photo_widget_seq}")
+            _enlarge_camera_preview()
+            shot = st.camera_input("Scan label", key=f"barcode_cam_{st.session_state.camera_session_id}")
 
             decoded = []
             if shot is not None:
@@ -297,15 +409,29 @@ if page == "🆕 New Item":
             "Take front, back, sides, and close-ups of any scratches/defects. "
             "If a barcode/label is visible in any photo, it will also be used "
             "to cross-check against the manifest during grading. On phones, "
-            "tap the switch-camera icon in the widget for the rear camera if "
-            "it opens on the front camera."
+            "switch to the rear camera once at the start (top-right icon) — "
+            "it'll stay on the rear camera for every shot. After each photo, "
+            "tap the circle again to return to the live view for the next one."
         )
 
-        shot = st.camera_input("Take a photo", key=f"photo_cam_{st.session_state.photo_widget_seq}")
+        _enlarge_camera_preview()
+        # A stable key (not bumped per shot) is what keeps the camera on the
+        # facing mode the user picked — bumping the key to reset for the
+        # next photo, as this used to do, fully remounts the widget and
+        # Streamlit's camera_input always restarts on the front camera with
+        # no way to request the rear one from Python. Since the same widget
+        # instance now persists, its returned value doesn't clear itself
+        # after a capture (there's no way to do that from Python either) —
+        # so a content hash tells a still-displayed old capture apart from
+        # an actual new one instead of relying on the key change to do it.
+        shot = st.camera_input("Take a photo", key=f"photo_cam_{st.session_state.camera_session_id}")
         if shot is not None:
-            st.session_state.captured_photos.append(shot.getvalue())
-            st.session_state.photo_widget_seq += 1
-            st.rerun()
+            shot_bytes = shot.getvalue()
+            shot_hash = hash(shot_bytes)
+            if shot_hash != st.session_state.last_camera_shot_hash:
+                st.session_state.captured_photos.append(shot_bytes)
+                st.session_state.last_camera_shot_hash = shot_hash
+                st.rerun()
 
         uploaded = st.file_uploader(
             "Or add photos from library",
@@ -930,20 +1056,16 @@ elif page == "📥 Import Manifest":
 # ============================================================ INVENTORY ==
 elif page == "📦 Inventory":
     st.title("📦 Inventory")
-    all_products = inventory_store.list_products(st.session_state.company_id)
-    drafts = [p for p in all_products if p.status == "draft"]
-    processed = [p for p in all_products if p.status != "draft"]
 
-    st.caption(
-        f"{len(processed)} processed item(s)  •  {len(drafts)} pending manifest draft(s) "
-        f"for company '{st.session_state.company_id}'"
-    )
-
-    if not processed and not drafts:
-        st.info("No items yet — add one from 'New Item' or '📥 Import Manifest'.")
-
-    show_drafts = st.checkbox("Show pending manifest drafts too", value=False)
-    products = processed + drafts if show_drafts else processed
+    TRIAGE_LABELS = {
+        "": "All",
+        "testing_pending": "🔍 Testing pending",
+        "ready_for_sale": "✅ Ready for sale",
+        "needs_repair": "🔧 Needs repair",
+        "for_parts": "♻️ For parts",
+        "written_off": "❌ Written off",
+    }
+    INVENTORY_PAGE_SIZE = 50
 
     def _render_images(p: Product):
         cols = st.columns(4)
@@ -959,102 +1081,307 @@ elif page == "📦 Inventory":
                 st.warning(excel_warning)
             st.rerun()
 
-    def _render_compact(p: Product):
+    def _render_full_detail(p: Product, tier_label: str = ""):
         badge = "📥 DRAFT" if p.status == "draft" else f"{p.grade or '?'} ({p.grade_confidence}%)"
         title = p.name or p.manifest_item_description or p.model_number or p.asin or p.id
-        with st.expander(f"{badge}  •  {title}  —  ${p.price:.2f}"):
-            _render_images(p)
-            st.write(f"**SKU:** {p.sku or '(not yet assigned)'}")
-            st.write(f"**Brand / Model:** {p.brand or '—'} / {p.model or '—'}")
-            st.write(f"**Category / Condition:** {p.category or '—'} / {p.condition_type or '—'}")
-            st.write(f"**ASIN / EAN:** {p.asin or '—'} / {p.ean or p.manifest_barcode or p.scanned_barcode or '—'}")
+        header = f"🎯 Exact {tier_label} match — {badge} • {title}" if tier_label else f"{badge} • {title}"
+        st.markdown(f"### {header}")
+        _render_images(p)
+
+        # -- Header: quick actions (triage status / location are the two
+        # things someone changes constantly during daily work, so they're
+        # editable right here rather than buried in a section below) --
+        triage_keys = [k for k in TRIAGE_LABELS if k]
+        qa1, qa2, qa3 = st.columns([2, 2, 1])
+        with qa1:
+            new_triage = st.selectbox(
+                "Triage status", options=triage_keys,
+                index=triage_keys.index(p.triage_status) if p.triage_status in triage_keys else 0,
+                format_func=lambda k: TRIAGE_LABELS[k],
+                key=f"triage_{p.id}",
+            )
+            if new_triage != p.triage_status:
+                p.triage_status = new_triage
+                inventory_store.save_product(p)
+                st.rerun()
+        with qa2:
+            new_location = st.text_input("Location", value=p.location, key=f"loc_{p.id}")
+            if new_location != p.location:
+                p.location = new_location
+                inventory_store.save_product(p)
+                st.rerun()
+        with qa3:
+            st.write("")
+            _delete_button(p)
+
+        with st.expander("📋 Manifest info", expanded=False):
+            if p.manifest_import_id:
+                st.write("**Manifest item description:**", p.manifest_item_description or "—")
+                st.write(
+                    f"**Manifest Target #:** {p.manifest_target_no or '—'}  •  "
+                    f"**Subcategory:** {p.manifest_subcategory or '—'}"
+                )
+                st.write(f"**Manifest ASIN:** {p.asin or '—'}  •  **Manifest barcode:** {p.manifest_barcode or '—'}")
+                st.write(f"**Qty:** {p.manifest_qty}  •  **Weight:** {p.manifest_weight_kg} kg")
+                st.caption(f"Batch: {p.manifest_import_id}")
+            else:
+                st.caption("Manually entered — no manifest origin.")
+
+        with st.expander("🏷️ Product Info", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.write(f"**SKU:** {p.sku or '(not yet assigned)'}")
+                st.write(f"**Brand:** {p.brand or '—'}")
+                st.write(f"**Model:** {p.model or p.model_number or '—'}")
+                st.write(f"**Category:** {p.category or '—'}")
+            with c2:
+                st.write(f"**EAN:** {p.ean or '—'}  ({p.ean_status or 'not checked'})")
+                st.write(f"**ASIN:** {p.asin or '—'}  ({p.asin_status or 'not checked'})")
+                if p.asin_candidates:
+                    st.caption(f"Other possible ASINs: {', '.join(p.asin_candidates)}")
+                st.write(f"**Condition:** {p.condition_type or '—'}")
+            with c3:
+                st.write(f"**Grade:** {p.grade or '—'} ({p.grade_confidence}%)")
+                st.write(f"**Functional test:** {p.functional_test_result or '—'}")
+                box_dims = ", ".join(
+                    f"{v:g} cm" for v in (p.box_length_cm, p.box_width_cm, p.box_height_cm) if v
+                )
+                st.write(f"**Box dimensions:** {box_dims or '—'}")
+
+        with st.expander("🔍 Testing & Defects", expanded=(p.status != "draft")):
             if p.status != "draft":
                 st.write(f"**Product match:** {p.product_match or 'UNKNOWN'} ({p.match_confidence}%)")
                 if p.match_notes:
                     st.caption(p.match_notes)
-                st.write(f"**Location:** {p.location or '—'}  •  **Functional test:** {p.functional_test_result or '—'}")
-                st.write(f"**Product Description:** {p.product_description}")
-                st.write(f"**Condition & Scratches Details:** {p.condition_description}")
+                st.write("**Spec summary:**", p.spec_summary or "—")
+                st.write("**Box contents:**", ", ".join(p.box_contents) or "—")
+                st.write("**Missing components:**", ", ".join(p.missing_components) or "—")
+                st.write("**Defects:**", ", ".join(p.defects) or "—")
+                st.write("**Functional test checklist:**", ", ".join(p.functional_checklist) or "—")
             else:
-                st.write(f"**Manifest item description:** {p.manifest_item_description}")
-                st.write(f"**Qty:** {p.manifest_qty}  •  **Weight:** {p.manifest_weight_kg} kg")
-            _delete_button(p)
+                st.caption("Not yet tested — still a pending manifest draft.")
 
-    def _render_full_detail(p: Product, tier_label: str):
-        badge = "📥 DRAFT" if p.status == "draft" else f"{p.grade or '?'} ({p.grade_confidence}%)"
-        title = p.name or p.manifest_item_description or p.model_number or p.asin or p.id
-        st.markdown(f"### 🎯 Exact {tier_label} match — {badge} • {title}")
-        _render_images(p)
+        events = repair_store.list_repair_events(p.id)
+        repair_total = repair_store.total_repair_cost(p.id)
+        with st.expander(f"🛠️ Repair History ({len(events)}) — ${repair_total:.2f} total"):
+            for e in events:
+                rc1, rc2 = st.columns([5, 1])
+                with rc1:
+                    when = time.strftime("%Y-%m-%d", time.localtime(e.occurred_at))
+                    st.write(f"**{when}** — {e.description or '(no description)'} — ${e.cost:.2f}"
+                             + (f" — {e.technician}" if e.technician else ""))
+                with rc2:
+                    if st.button("🗑️", key=f"delrepair_{e.id}"):
+                        repair_store.delete_repair_event(e.id)
+                        st.rerun()
+            with st.form(key=f"addrepair_{p.id}", clear_on_submit=True):
+                rf1, rf2, rf3 = st.columns([3, 1, 1])
+                with rf1:
+                    r_desc = st.text_input("Description", key=f"rdesc_{p.id}")
+                with rf2:
+                    r_cost = st.number_input("Cost", min_value=0.0, step=0.5, key=f"rcost_{p.id}")
+                with rf3:
+                    r_tech = st.text_input("Technician", key=f"rtech_{p.id}")
+                if st.form_submit_button("➕ Add repair entry"):
+                    if r_desc.strip():
+                        repair_store.add_repair_event(
+                            repair_store.RepairEvent(
+                                product_id=p.id, description=r_desc.strip(),
+                                cost=r_cost, technician=r_tech.strip(),
+                            )
+                        )
+                        st.rerun()
+                    else:
+                        st.warning("Description is required.")
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.write(f"**SKU:** {p.sku or '(not yet assigned)'}")
-            st.write(f"**Brand:** {p.brand or '—'}")
-            st.write(f"**Model:** {p.model or p.model_number or '—'}")
-            st.write(f"**Category:** {p.category or '—'}")
-        with c2:
-            st.write(f"**EAN:** {p.ean or '—'}  ({p.ean_status or 'not checked'})")
-            st.write(f"**ASIN:** {p.asin or '—'}  ({p.asin_status or 'not checked'})")
-            if p.asin_candidates:
-                st.caption(f"Other possible ASINs: {', '.join(p.asin_candidates)}")
-            st.write(f"**Condition:** {p.condition_type or '—'}")
-        with c3:
-            st.write(f"**Grade:** {p.grade or '—'} ({p.grade_confidence}%)")
-            st.write(f"**Price:** ${p.price:.2f}")
-            st.write(f"**Location:** {p.location or '—'}")
-            st.write(f"**Functional test:** {p.functional_test_result or '—'}")
-
-        if p.status != "draft":
-            st.write(f"**Product match:** {p.product_match or 'UNKNOWN'} ({p.match_confidence}%)")
-            if p.match_notes:
-                st.caption(p.match_notes)
-            st.write("**Spec summary:**", p.spec_summary or "—")
-            st.write("**Box contents:**", ", ".join(p.box_contents) or "—")
-            st.write("**Missing components:**", ", ".join(p.missing_components) or "—")
-            st.write("**Defects:**", ", ".join(p.defects) or "—")
-            st.write("**Functional test checklist:**", ", ".join(p.functional_checklist) or "—")
+        with st.expander("🛒 Sales & Listings", expanded=False):
             st.write("**Product Description:**", p.product_description or "—")
             st.write("**Condition & Scratches Details:**", p.condition_description or "—")
-            box_dims = ", ".join(
-                f"{v:g} cm" for v in (p.box_length_cm, p.box_width_cm, p.box_height_cm) if v
-            )
-            st.write("**Box dimensions:**", box_dims or "—")
-        else:
-            st.write("**Manifest item description:**", p.manifest_item_description or "—")
-            st.write(f"**Manifest Target #:** {p.manifest_target_no or '—'}  •  **Subcategory:** {p.manifest_subcategory or '—'}")
-            st.write(f"**Qty:** {p.manifest_qty}  •  **Weight:** {p.manifest_weight_kg} kg")
+            st.write(f"**Price:** ${p.price:.2f}")
+            if p.price_reasoning:
+                st.caption(p.price_reasoning)
 
-        _delete_button(p)
+            listings = marketplace_store.list_listings(p.id)
+            if listings:
+                for listing in listings:
+                    st.write(
+                        f"**{listing.marketplace}:** {listing.status}"
+                        + (f" — #{listing.external_listing_id}" if listing.external_listing_id else "")
+                        + (f" — {listing.url}" if listing.url else "")
+                    )
+            else:
+                st.caption("Not listed on any marketplace yet.")
+
+            if baselinker_client.is_configured():
+                if st.button("📤 Push to BaseLinker", key=f"push_{p.id}"):
+                    result = baselinker_client.push_product(p)
+                    if result.success:
+                        st.success(f"Pushed — BaseLinker product_id: {result.baselinker_product_id}")
+                        st.rerun()
+                    else:
+                        st.error(result.message)
+
+        with st.expander("💰 Financials", expanded=False):
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                new_purchase = st.number_input(
+                    "Purchase price (allocated)", min_value=0.0, step=0.5,
+                    value=p.purchase_price_allocated, key=f"purchase_{p.id}",
+                )
+                if new_purchase != p.purchase_price_allocated:
+                    p.purchase_price_allocated = new_purchase
+                    inventory_store.save_product(p)
+                    st.rerun()
+            with fc2:
+                st.metric("Repair cost", f"${repair_total:.2f}")
+            with fc3:
+                profit = p.price - p.purchase_price_allocated - repair_total
+                st.metric("Profit (selling − purchase − repairs)", f"${profit:.2f}")
+
         st.divider()
 
     search_query = st.text_input(
-        "🔍 Search by EAN, ASIN, Product Name, Brand, or Model",
-        placeholder="e.g. 0194252057338, B08ASIN123, iPhone 12, Apple, A2172",
-        help="Priority: exact EAN match, then exact ASIN match, then model number, "
-        "then brand/product name. Works for manifest-imported and manually-added "
-        "items alike.",
+        "🔍 Exact lookup by SKU, EAN, ASIN, Product Name, Brand, or Model",
+        placeholder="e.g. 2001, 0194252057338, B08ASIN123, iPhone 12, Apple, A2172",
+        help="Searches the WHOLE inventory regardless of the filters below. "
+        "Priority: exact SKU match, then exact EAN, then exact ASIN, then "
+        "model number, then brand/product name. Works for manifest-imported "
+        "and manually-added items alike.",
     )
 
     if search_query.strip():
         results = inventory_store.search_products(search_query.strip(), st.session_state.company_id)
-        if not show_drafts:
-            results = [(p, tier) for p, tier in results if p.status != "draft"]
         st.caption(f"{len(results)} match(es) for '{search_query.strip()}'")
 
         tier_labels = {
+            inventory_store.MATCH_TIER_SKU: "SKU",
             inventory_store.MATCH_TIER_EAN: "EAN",
             inventory_store.MATCH_TIER_ASIN: "ASIN",
             inventory_store.MATCH_TIER_MODEL: "model",
             inventory_store.MATCH_TIER_BRAND_NAME: "brand/name",
         }
         for p, tier in results:
-            if tier in (inventory_store.MATCH_TIER_EAN, inventory_store.MATCH_TIER_ASIN):
-                _render_full_detail(p, tier_labels[tier])
-            else:
-                _render_compact(p)
+            _render_full_detail(p, tier_labels.get(tier, ""))
     else:
-        for p in products:
-            _render_compact(p)
+        st.divider()
+
+        batches = manifest_store.list_batches(st.session_state.company_id)
+        batch_options = {"": "All batches"}
+        batch_options.update({b.id: f"{b.filename} ({b.id})" for b in batches})
+        locations = inventory_store.distinct_locations(st.session_state.company_id)
+
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            triage_filter = st.selectbox(
+                "Triage status", options=list(TRIAGE_LABELS.keys()),
+                format_func=lambda k: TRIAGE_LABELS[k], key="inv_filter_triage",
+            )
+        with f2:
+            batch_filter = st.selectbox(
+                "Manifest batch", options=list(batch_options.keys()),
+                format_func=lambda k: batch_options[k], key="inv_filter_batch",
+            )
+        with f3:
+            location_filter = st.selectbox(
+                "Location", options=[""] + locations,
+                format_func=lambda k: k or "All", key="inv_filter_location",
+            )
+        with f4:
+            grade_filter = st.selectbox(
+                "Grade", options=["", "A", "B", "C", "D"],
+                format_func=lambda k: k or "All", key="inv_filter_grade",
+            )
+
+        table_search = st.text_input(
+            "Filter within results (substring match on SKU / name / brand / model)",
+            placeholder="e.g. iPhone, Bosch, Test...",
+            key="inv_filter_search",
+        )
+
+        # Any filter change resets to page 1 — otherwise a narrower filter
+        # could land on a now-nonexistent page.
+        filter_key = (triage_filter, batch_filter, location_filter, grade_filter, table_search)
+        if st.session_state.get("inv_filter_key") != filter_key:
+            st.session_state.inv_filter_key = filter_key
+            st.session_state.inv_page = 1
+        inv_page = st.session_state.get("inv_page", 1)
+
+        products, total = inventory_store.list_products_paginated(
+            company_id=st.session_state.company_id,
+            triage_status=triage_filter or None,
+            manifest_import_id=batch_filter or None,
+            location=location_filter or None,
+            grade=grade_filter or None,
+            search=table_search or None,
+            page=inv_page,
+            page_size=INVENTORY_PAGE_SIZE,
+        )
+        total_pages = max(1, math.ceil(total / INVENTORY_PAGE_SIZE))
+        inv_page = min(inv_page, total_pages)
+
+        st.caption(f"{total} item(s) match — page {inv_page} of {total_pages}")
+
+        if not products:
+            st.info(
+                "No items match these filters. Try widening them, or add "
+                "one from 'New Item' / '📥 Import Manifest'."
+            )
+        else:
+            table_rows = []
+            for p in products:
+                listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE)
+                table_rows.append({
+                    "SKU": p.sku or "(none)",
+                    "Title": p.name or p.manifest_item_description or p.model_number or p.id,
+                    "Triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
+                    "Grade": p.grade or "—",
+                    "Location": p.location or "—",
+                    "Price": p.price,
+                    "BaseLinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
+                })
+            table_df = pd.DataFrame(table_rows)
+
+            event = st.dataframe(
+                table_df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=f"inv_table_page{inv_page}",
+            )
+
+            nav1, nav2, nav3 = st.columns([1, 2, 1])
+            with nav1:
+                if st.button("⬅️ Previous", disabled=(inv_page <= 1), use_container_width=True):
+                    st.session_state.inv_page = inv_page - 1
+                    st.rerun()
+            with nav2:
+                st.write(f"Page {inv_page} of {total_pages}")
+            with nav3:
+                if st.button("Next ➡️", disabled=(inv_page >= total_pages), use_container_width=True):
+                    st.session_state.inv_page = inv_page + 1
+                    st.rerun()
+
+            selected_rows = event.selection["rows"] if event is not None else []
+            if selected_rows:
+                # Track by product id, not row position: a change made in the
+                # detail view below (e.g. triage status) can move the item
+                # out of the current filter/page on rerun, which would leave
+                # a row *index* pointing at a different product entirely (or
+                # out of range). Re-fetching fresh by id sidesteps that.
+                st.session_state.inv_selected_id = products[selected_rows[0]].id
+
+        selected_id = st.session_state.get("inv_selected_id")
+        if selected_id:
+            selected_product = inventory_store.get_product(selected_id)
+            if selected_product:
+                st.divider()
+                if st.button("✖ Close detail view"):
+                    del st.session_state["inv_selected_id"]
+                    st.rerun()
+                _render_full_detail(selected_product)
+            else:
+                del st.session_state["inv_selected_id"]
 
 # =============================================================== EXPORT ==
 else:
@@ -1120,7 +1447,8 @@ else:
                 with st.expander("Preview what will be sent"):
                     config = baselinker_client.get_config()
                     for p in selected_products:
-                        action = "UPDATE existing" if p.baselinker_product_id else "CREATE new"
+                        listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE)
+                        action = "UPDATE existing" if (listing and listing.external_listing_id) else "CREATE new"
                         st.write(
                             f"**{p.sku}** ({action}) — {p.name or p.model_number or '(no name)'} — "
                             f"${p.price:.2f} — {len(p.image_paths)} photo(s) — "
@@ -1141,7 +1469,6 @@ else:
                         )
                         result = baselinker_client.push_product(p)
                         if result.success:
-                            inventory_store.save_product(p)
                             results_box.success(
                                 f"✅ {p.sku}: {result.message} "
                                 f"(BaseLinker product_id: {result.baselinker_product_id})"
