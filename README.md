@@ -29,7 +29,7 @@ electro-grader-pwa/
 │   ├── ai_client.py            # Anthropic Claude wrapper (text + vision)
 │   ├── vision_grading.py       # Claude vision -> grade/defects/checklist + identity verification
 │   ├── pricing.py              # Web price search + grade multiplier
-│   ├── description_gen.py      # AI listing copy (2 separate English columns)
+│   ├── description_gen.py      # AI listing copy: marketplace product name + 2 English description columns
 │   ├── export.py                # Baselinker Excel/CSV export
 │   ├── baselinker_client.py     # Optional: direct BaseLinker API push (create/update + photos)
 │   └── pwa.py                    # Injects manifest/meta tags into page <head>

@@ -976,22 +976,31 @@ if page == "🆕 New Item":
                     st.session_state.descriptions = description_gen.generate_descriptions(
                         name=product.name,
                         brand=product.brand,
+                        model=product.model,
                         category=product.category,
                         spec_summary=product.spec_summary,
                         box_contents=product.box_contents,
                         grade=product.grade,
+                        condition_type=product.condition_type,
                         defects=product.defects,
                         missing_components=product.missing_components,
                     )
                 st.rerun()
-            st.caption("Or write both descriptions manually below.")
+            st.caption("Or write everything manually below.")
 
         desc = st.session_state.descriptions
+        product_name_val = desc.product_name if desc else product.name
         product_desc_val = desc.product_description if desc else product.product_description
         condition_desc_val = desc.condition_description if desc else product.condition_description
 
+        product_name_in = st.text_input("Product Name (listing title)", value=product_name_val)
         product_desc_in = st.text_area("Product Description (general overview)", value=product_desc_val, height=150)
-        condition_desc_in = st.text_area("Condition & Scratches Details", value=condition_desc_val, height=150)
+        condition_desc_in = st.text_area(
+            "Additional Description (Condition & Scratches Details)",
+            value=condition_desc_val,
+            height=150,
+            max_chars=description_gen.MAX_CONDITION_DESCRIPTION_LEN,
+        )
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1002,6 +1011,8 @@ if page == "🆕 New Item":
             if st.button("Next ➜", type="primary", use_container_width=True):
                 product.price = float(price_in)
                 product.price_reasoning = pe.reasoning if pe else ""
+                if product_name_in.strip():
+                    product.name = product_name_in.strip()
                 product.product_description = product_desc_in.strip()
                 product.condition_description = condition_desc_in.strip()
                 st.session_state.wizard_step = 6
