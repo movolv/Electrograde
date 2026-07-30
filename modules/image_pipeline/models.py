@@ -16,11 +16,39 @@ class EnhancedImage:
 
 @dataclass
 class QualityScore:
-    overall: int  # 0-100, weighted combination of the four below
+    overall: int  # 0-100, weighted combination of the sub-scores below
     sharpness: int
     exposure: int
     centering: int
     occupancy: int
+    # Added for the adaptive-engine quality evaluation. All are classical-
+    # CV proxies, same honesty caveat as the original four: there is no
+    # ML quality model running locally, so each measures the closest
+    # thing actually computable, not the literal named concept.
+    noise: int = 100  # inverse of measured sensor/compression noise
+    color_cast: int = 100  # proxy for "color accuracy": absence of a residual uncorrected tint
+    background_quality: int = 100  # how close the finished canvas background is to the target color
+    edge_quality: int = 100  # mask-boundary cleanliness (thin antialiasing vs. wide/ragged halo)
+
+
+@dataclass
+class ProcessingLog:
+    """Structured record of what the adaptive engine actually decided for
+    one photo — not shown to end users, but useful for debugging a
+    specific bad result (e.g. "why did this one come out dark?") without
+    re-running the pipeline with print statements added back in."""
+    material_profile: str = "neutral"
+    specular_coverage: float = 0.0
+    exposure_gamma: float = 1.0
+    exposure_compressed: bool = False
+    denoise_h: float = 0.0
+    sharpen_strength: float = 0.0
+    defringe_strength: float = 0.0
+    detail_similarity: float = 1.0
+    score_before_reoptimize: int = 0
+    reoptimized: bool = False
+    processing_time_seconds: float = 0.0
+    notes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -28,6 +56,7 @@ class DiagnosticReport:
     passed: bool
     issues: List[str] = field(default_factory=list)  # reasons that would fail the quality gate
     warnings: List[str] = field(default_factory=list)  # non-blocking notes (e.g. "low_resolution")
+    log: ProcessingLog = None  # populated by pipeline.py; None only if never wired up by a caller
 
 
 class LowQualityImageError(RuntimeError):

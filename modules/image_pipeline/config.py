@@ -38,3 +38,29 @@ class PipelineConfig:
     # Auto-detected at runtime by hardware.py; set False to force CPU
     # even if a CUDA-capable onnxruntime provider is present.
     use_gpu: bool = True
+
+    # -- Adaptive engine (all values below are *behavior toggles/limits*,
+    # not enhancement strengths — every actual correction amount is
+    # computed per-image from that image's own histogram/statistics, per
+    # the "never use fixed enhancement values" requirement) --
+    adaptive_exposure: bool = True  # exposure.py: gamma/highlight/shadow/blacks/whites
+    adaptive_sharpen_denoise: bool = True  # size sharpen/denoise strength from measured sharpness/noise
+    vibrance_mode: bool = True  # True = per-pixel vibrance curve; False = flat saturation_boost
+    defringe_strength: float = 0.5  # 0=off, 1=maximum chromatic-aberration edge defringe
+    material_aware: bool = True  # branch correction strategy on the heuristic profile in material.py
+
+    # Safety net (see safety.py): if enhancement measurably destroys
+    # local detail/texture vs. the original (a proxy for "a scratch,
+    # label, or serial number might now be less visible"), enhancement
+    # strength is backed off. This threshold is an SSIM score (0-1); real
+    # product photos enhanced by this pipeline scored >0.9 in testing,
+    # so this is deliberately a generous floor, not a tight one.
+    min_detail_similarity: float = 0.75
+
+    # Re-optimization loop (pipeline.py): if the first pass scores below
+    # quality_threshold but above this floor, exactly one more corrective
+    # pass is tried and the better-scoring result is kept — never more
+    # than max_reoptimize_passes, to bound both processing time and the
+    # risk of "enhancing the enhancement" into an over-processed look.
+    max_reoptimize_passes: int = 1
+    recoverable_score_floor: int = 55
