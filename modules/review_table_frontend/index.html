@@ -39,6 +39,17 @@
   }
   #columns-panel.open { display: flex; }
   #columns-panel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #f3f4f6; cursor: pointer; }
+  .select-all-menu {
+    position: fixed; z-index: 20; display: none; flex-direction: column;
+    min-width: 240px; padding: 4px; background: #1f2937; border: 1px solid #293548;
+    border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .select-all-menu.open { display: flex; }
+  .select-all-menu button {
+    text-align: left; padding: 8px 10px; border: none; background: transparent;
+    color: #f3f4f6; font-size: 13px; cursor: pointer; border-radius: 4px; white-space: nowrap;
+  }
+  .select-all-menu button:hover { background: #293548; }
 </style>
 </head>
 <body>
@@ -129,6 +140,130 @@ function openRow(data) {
   setComponentValue({ selected_ids: getSelectedIds(), open_id: data.id });
 }
 
+/* Custom header component for the auto-generated selection column: instead
+   of AG Grid's default header checkbox (which just toggles the current
+   page's rows), clicking it opens a small menu asking whether to select
+   all rows on this page only, or all rows across every page (matching the
+   current filter). Clicking again once everything is already selected just
+   clears the selection — no menu needed for that direction. */
+function SelectAllHeaderComponent() {}
+
+SelectAllHeaderComponent.prototype.init = function (params) {
+  var self = this;
+  this.params = params;
+
+  this.eGui = document.createElement("div");
+  this.eGui.style.cssText = "display:flex;align-items:center;justify-content:center;height:100%;width:100%;cursor:pointer;";
+
+  this.checkbox = document.createElement("input");
+  this.checkbox.type = "checkbox";
+  this.checkbox.style.cursor = "pointer";
+  this.checkbox.tabIndex = -1;
+  // Purely visual: real checkboxes silently clear their own `.indeterminate`
+  // flag as part of the browser's native pre-click handling, even when the
+  // click event is preventDefault()-ed — that stale-state quirk broke the
+  // second click after a "this page only" selection. Disabling pointer
+  // events on the input means every click is instead handled by eGui
+  // below, and `.checked`/`.indeterminate` are only ever set by our own
+  // updateCheckboxState(), never touched by the browser.
+  this.checkbox.style.pointerEvents = "none";
+  this.eGui.appendChild(this.checkbox);
+
+  this.menu = document.createElement("div");
+  this.menu.className = "select-all-menu";
+  this.pageOption = document.createElement("button");
+  this.pageOption.type = "button";
+  this.allOption = document.createElement("button");
+  this.allOption.type = "button";
+  this.menu.appendChild(this.pageOption);
+  this.menu.appendChild(this.allOption);
+  document.body.appendChild(this.menu);
+
+  this.pageOption.addEventListener("click", function (e) {
+    e.stopPropagation();
+    self.params.api.selectAllOnCurrentPage();
+    self.closeMenu();
+  });
+  this.allOption.addEventListener("click", function (e) {
+    e.stopPropagation();
+    self.params.api.selectAllFiltered();
+    self.closeMenu();
+  });
+
+  this.onGuiClick = function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var stats = self.computeStats();
+    // Anything already selected (this page only, or all pages) -> a click
+    // just clears it, same as a normal checkbox. The menu is only for
+    // starting a new selection from empty; it's not offered again as a way
+    // to "escape" an indeterminate state, since users expect clicking a
+    // ticked/dashed box to untick it, not to see the same prompt again.
+    if (stats.selected > 0) {
+      self.params.api.deselectAllFiltered();
+      return;
+    }
+    self.openMenu(stats);
+  };
+  this.eGui.addEventListener("click", this.onGuiClick);
+
+  this.onOutsideClick = function (e) {
+    if (self.menu.classList.contains("open") && !self.menu.contains(e.target) && !self.eGui.contains(e.target)) {
+      self.closeMenu();
+    }
+  };
+  document.addEventListener("click", this.onOutsideClick);
+
+  this.onStateEvent = function () { self.updateCheckboxState(); };
+  params.api.addEventListener("selectionChanged", this.onStateEvent);
+  params.api.addEventListener("modelUpdated", this.onStateEvent);
+  params.api.addEventListener("paginationChanged", this.onStateEvent);
+
+  this.updateCheckboxState();
+};
+
+SelectAllHeaderComponent.prototype.computeStats = function () {
+  var total = 0, selected = 0;
+  this.params.api.forEachNodeAfterFilter(function (node) {
+    total++;
+    if (node.isSelected()) { selected++; }
+  });
+  var pageSize = this.params.api.paginationGetPageSize();
+  var currentPage = this.params.api.paginationGetCurrentPage();
+  var onPage = Math.max(0, Math.min(pageSize, total - currentPage * pageSize));
+  return { total: total, selected: selected, onPage: onPage };
+};
+
+SelectAllHeaderComponent.prototype.updateCheckboxState = function () {
+  var stats = this.computeStats();
+  this.checkbox.checked = stats.total > 0 && stats.selected === stats.total;
+  this.checkbox.indeterminate = stats.selected > 0 && stats.selected < stats.total;
+};
+
+SelectAllHeaderComponent.prototype.openMenu = function (stats) {
+  this.pageOption.textContent = "Select all on this page (" + stats.onPage + ")";
+  this.allOption.textContent = "Select all across all pages (" + stats.total + ")";
+  var rect = this.eGui.getBoundingClientRect();
+  this.menu.style.top = rect.bottom + "px";
+  this.menu.style.left = rect.left + "px";
+  this.menu.classList.add("open");
+};
+
+SelectAllHeaderComponent.prototype.closeMenu = function () {
+  this.menu.classList.remove("open");
+};
+
+SelectAllHeaderComponent.prototype.getGui = function () { return this.eGui; };
+SelectAllHeaderComponent.prototype.refresh = function () { return true; };
+
+SelectAllHeaderComponent.prototype.destroy = function () {
+  this.params.api.removeEventListener("selectionChanged", this.onStateEvent);
+  this.params.api.removeEventListener("modelUpdated", this.onStateEvent);
+  this.params.api.removeEventListener("paginationChanged", this.onStateEvent);
+  document.removeEventListener("click", this.onOutsideClick);
+  if (this.menu.parentNode) { this.menu.parentNode.removeChild(this.menu); }
+};
+
 var defaultColDef = { sortable: true, resizable: true, filter: true };
 
 var columnDefs = [
@@ -192,8 +327,12 @@ var gridOptions = {
   rowSelection: {
     mode: "multiRow",
     checkboxes: true,           // own dedicated (narrow, fixed) selection column, separate from Photo
-    headerCheckbox: true,
+    headerCheckbox: false,      // replaced by SelectAllHeaderComponent (this-page vs all-pages choice)
     enableClickSelection: true, // single click anywhere on the row also selects it
+  },
+  selectionColumnDef: {
+    headerComponent: SelectAllHeaderComponent,
+    sortable: false,
   },
   pagination: true,
   paginationPageSize: 20,
