@@ -90,6 +90,12 @@ class Product:
     triage_status: str = "testing_pending"
     # "testing_pending" | "ready_for_sale" | "needs_repair" | "for_parts" | "written_off"
 
+    # -- REVIEW WORKFLOW (Review & Export screen gate — distinct from
+    # `status`/`triage_status` above and from marketplace_store, which
+    # tracks per-marketplace listing state, not this app's review gate) --
+    review_status: str = ""  # "" | "ready" | "edited" | "exported" | "failed"
+    exported_at: float = 0.0  # last successful BaseLinker export timestamp
+
     # -- MANUAL-ONLY (AI cannot reliably determine these) --
     location: str = ""
     functional_test_result: str = ""  # "Working" | "Not Working" | "Not Tested"
@@ -122,4 +128,8 @@ class Product:
             # processed were, by definition, treated as sellable at the time
             # — never default a real completed item to "testing_pending".
             known["triage_status"] = "ready_for_sale"
+        if not known.get("review_status") and known.get("status") == "completed":
+            # Records saved before the Review & Export gate existed but
+            # already fully processed are ready for that screen now.
+            known["review_status"] = "ready"
         return Product(**known)

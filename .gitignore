@@ -2,6 +2,7 @@
 data/inventory.db
 data/inventory.xlsx
 data/uploads/
+static/thumbnails/
 __pycache__/
 *.pyc
 .venv/

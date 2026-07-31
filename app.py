@@ -43,6 +43,52 @@ load_dotenv()
 UPLOAD_DIR = Path(__file__).resolve().parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+THUMBS_DIR = STATIC_DIR / "thumbnails"
+THUMB_MAX_DIM = 96
+
+
+def _ensure_thumbnail(image_path: str) -> Path | None:
+    """Generates (and disk-caches) a small JPEG thumbnail for the given
+    photo, written *inside* static/ so st.column_config.ImageColumn can load
+    it over HTTP (it needs a fetchable URL; local disk paths / file:// URLs
+    are blocked by browsers). An OS-level link from static/ pointing at
+    data/uploads was tried first and rejected: Streamlit's static file
+    server resolves symlinks/junctions and checks the *resolved* path is
+    still under static/, so a link pointing outside it 400s. Writing a real
+    (small, resized) file under static/thumbnails/ sidesteps that entirely.
+    Returns None if the source is missing or generation fails — the Photo
+    column then just renders blank for that row, never a hard error."""
+    src = Path(image_path)
+    if not src.exists():
+        return None
+    try:
+        rel = src.resolve().relative_to(UPLOAD_DIR)
+    except (ValueError, OSError):
+        return None
+    thumb = THUMBS_DIR / rel.parent / f"{rel.stem}_thumb.jpg"
+    try:
+        if thumb.exists() and thumb.stat().st_mtime >= src.stat().st_mtime:
+            return thumb
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.open(src)
+        img = ImageOps.exif_transpose(img) or img
+        img.thumbnail((THUMB_MAX_DIM, THUMB_MAX_DIM))
+        img.convert("RGB").save(thumb, "JPEG", quality=70)
+        return thumb
+    except Exception:
+        return None
+
+
+def _image_static_url(path: Path) -> str | None:
+    """Converts a path under STATIC_DIR into the URL it's servable at."""
+    try:
+        rel = path.resolve().relative_to(STATIC_DIR)
+    except (ValueError, OSError):
+        return None
+    return f"app/static/{rel.as_posix()}"
+
+
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
 
 # Below this, a manifest-vs-photo match is flagged to the user as suspect.
@@ -458,6 +504,11 @@ def _init_state():
         "descriptions": None,
         "manifest_df": None,
         "manifest_uploaded_name": None,
+        "review_selected_ids": set(),   # product ids checked for bulk export
+        "review_open_product_id": None,  # product id whose card is open, or None for list view
+        "review_filtered_ids_cache": [],  # last-rendered filtered/search order, for Previous/Next
+        "review_table_key_seed": 0,     # bumped to force the selection grid to remount (clear checkboxes)
+        "review_export_requested": False,  # set inside the fragment, consumed outside it to open the dialog
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -554,7 +605,7 @@ st.sidebar.text_input(
 )
 page = st.sidebar.radio(
     "Navigate",
-    ["🆕 New Item", "📥 Import Manifest", "📦 Inventory", "📤 Export"],
+    ["🆕 New Item", "📥 Import Manifest", "📦 Inventory", "🔍 Review & Export", "📤 CSV/Excel Export"],
     label_visibility="collapsed",
 )
 
@@ -1086,6 +1137,7 @@ if page == "🆕 New Item":
                 product.box_height_cm = float(height_in)
                 product.price = float(price_override_in)
                 product.status = "completed"
+                product.review_status = "ready"
                 product.company_id = st.session_state.company_id
 
                 item_dir = UPLOAD_DIR / sku_folder_name(product.sku, product.id)
@@ -1637,9 +1689,365 @@ elif page == "📦 Inventory":
             else:
                 del st.session_state["inv_selected_id"]
 
+# ================================================== REVIEW & EXPORT =====
+elif page == "🔍 Review & Export":
+    st.title("🔍 Review & Export")
+    st.caption(
+        "The mandatory checkpoint before anything reaches BaseLinker — "
+        "review AI-generated info, fix anything needed, then export only "
+        "what you've selected."
+    )
+
+    REVIEW_STATUS_LABELS = {
+        "": "All",
+        "ready": "✅ Ready",
+        "edited": "✏️ Edited",
+        "exported": "📤 Exported",
+        "failed": "❌ Failed",
+    }
+    GRADE_OPTIONS = ["A", "B", "C", "D"]
+
+    def _review_status_of(p: Product) -> str:
+        return p.review_status or "ready"
+
+    all_products = inventory_store.list_products(st.session_state.company_id)
+    review_products = [p for p in all_products if p.status == "completed"]
+    review_by_id = {p.id: p for p in review_products}
+
+    @st.dialog("Export selected products to BaseLinker?")
+    def _confirm_export_dialog(selected_products):
+        st.write(f"Export **{len(selected_products)}** selected product(s) to BaseLinker?")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Cancel", use_container_width=True, key="review_export_cancel"):
+                st.rerun()
+        with col2:
+            confirmed = st.button(
+                "📤 Export", type="primary", use_container_width=True, key="review_export_confirm"
+            )
+        if confirmed:
+            results_box = st.container()
+            progress = st.progress(0.0, text="Starting...")
+            ok_count, fail_count = 0, 0
+            for i, p in enumerate(selected_products):
+                progress.progress(
+                    i / len(selected_products),
+                    text=f"Exporting {p.sku} ({i + 1}/{len(selected_products)})...",
+                )
+                result = baselinker_client.push_product(p)
+                if result.success:
+                    p.review_status = "exported"
+                    p.exported_at = time.time()
+                    ok_count += 1
+                    results_box.success(f"✅ {p.sku}: {result.message}")
+                else:
+                    p.review_status = "failed"
+                    fail_count += 1
+                    results_box.error(f"❌ {p.sku}: {result.message}")
+                inventory_store.save_product(p)
+                st.session_state.review_selected_ids.discard(p.id)
+            progress.progress(1.0, text="Done.")
+            st.markdown(f"**{ok_count} products exported successfully**")
+            if fail_count:
+                st.markdown(f"**{fail_count} product(s) failed**")
+            if st.button("Close", use_container_width=True, key="review_export_done"):
+                st.session_state.review_table_key_seed += 1  # remount the grid so its checkboxes reflect the new state
+                st.rerun()
+
+    @st.dialog("Photo", width="large")
+    def _photo_lightbox_dialog(image_paths, start_index: int):
+        idx = st.session_state.get("review_lightbox_index", start_index)
+        idx = max(0, min(idx, len(image_paths) - 1))
+        img_path = image_paths[idx]
+        if os.path.exists(img_path):
+            st.image(img_path, use_container_width=True)
+        st.caption(f"Photo {idx + 1} / {len(image_paths)}")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("◀ Prev photo", disabled=idx <= 0, use_container_width=True, key="review_lb_prev"):
+                st.session_state.review_lightbox_index = idx - 1
+                st.rerun()
+        with c2:
+            if st.button("Close", use_container_width=True, key="review_lb_close"):
+                st.rerun()
+        with c3:
+            if st.button(
+                "Next photo ▶", disabled=idx >= len(image_paths) - 1,
+                use_container_width=True, key="review_lb_next",
+            ):
+                st.session_state.review_lightbox_index = idx + 1
+                st.rerun()
+
+    if not review_products:
+        st.info("No completed items yet — finish some in 🆕 New Item first.")
+
+    elif st.session_state.review_open_product_id is None:
+        # -------------------------------------------------------- LIST VIEW --
+
+        @st.fragment
+        def _review_list_fragment():
+            status_filter = st.radio(
+                "Status",
+                options=list(REVIEW_STATUS_LABELS.keys()),
+                format_func=lambda k: REVIEW_STATUS_LABELS[k],
+                horizontal=True,
+                key="review_status_filter",
+            )
+            search_q = st.text_input(
+                "🔍 Search by SKU, Product Name, Brand, Model, or Barcode",
+                key="review_search",
+            )
+
+            filtered = review_products
+            if status_filter:
+                filtered = [p for p in filtered if _review_status_of(p) == status_filter]
+            if search_q.strip():
+                q = search_q.strip().lower()
+                def _matches(p: Product) -> bool:
+                    haystack = " ".join([
+                        p.sku, p.name, p.brand, p.model,
+                        p.ean, p.manifest_barcode, p.scanned_barcode,
+                    ]).lower()
+                    return q in haystack
+                filtered = [p for p in filtered if _matches(p)]
+
+            st.session_state.review_filtered_ids_cache = [p.id for p in filtered]
+            st.caption(f"{len(filtered)} product(s)")
+
+            if not filtered:
+                st.session_state.review_selected_ids = set()
+                return
+
+            table_rows = []
+            for p in filtered:
+                photo_url = None
+                if p.image_paths:
+                    thumb = _ensure_thumbnail(p.image_paths[0])
+                    if thumb:
+                        photo_url = _image_static_url(thumb)
+                table_rows.append({
+                    "id": p.id,
+                    "Photo": photo_url,
+                    "SKU": p.sku,
+                    "Product Name": p.name,
+                    "Grade": p.grade or "—",
+                    "Status": REVIEW_STATUS_LABELS[_review_status_of(p)],
+                    "Date": (
+                        time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
+                        if p.exported_at else "—"
+                    ),
+                })
+            table_df = pd.DataFrame(table_rows)
+
+            table_key = f"review_table_{st.session_state.review_table_key_seed}"
+            event = st.dataframe(
+                table_df,
+                column_config={
+                    "id": None,
+                    "Photo": st.column_config.ImageColumn("Photo"),
+                    "SKU": st.column_config.TextColumn("SKU"),
+                    "Product Name": st.column_config.TextColumn("Product Name"),
+                    "Grade": st.column_config.TextColumn("Grade"),
+                    "Status": st.column_config.TextColumn("Status"),
+                    "Date": st.column_config.TextColumn("Date"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key=table_key,
+            )
+
+            selected_rows = list(event.selection["rows"]) if event and event.selection else []
+            st.session_state.review_selected_ids = {
+                table_df.iloc[i]["id"] for i in selected_rows
+            }
+
+            n_selected = len(st.session_state.review_selected_ids)
+            st.caption(f"Selected: {n_selected} product(s)")
+
+            action_col1, action_col2 = st.columns([2, 1])
+            with action_col1:
+                if st.button(
+                    f"📤 Export Selected ({n_selected})",
+                    type="primary",
+                    disabled=n_selected == 0,
+                    use_container_width=True,
+                    key="review_export_selected_btn",
+                ):
+                    st.session_state.review_export_requested = True
+                    st.rerun()  # escape fragment scope so the dialog (below, outside the fragment) opens
+            with action_col2:
+                if n_selected > 0:
+                    if st.button("✖ Clear Selection", use_container_width=True, key="review_clear_selection"):
+                        st.session_state.review_selected_ids = set()
+                        st.session_state.review_table_key_seed += 1  # remount the grid so checkboxes visually clear
+                        st.rerun()
+
+        _review_list_fragment()
+
+        if st.session_state.review_filtered_ids_cache:
+            st.divider()
+            open_col1, open_col2 = st.columns([3, 1])
+            with open_col1:
+                open_options = {
+                    f"{p.sku} — {p.name or '(no name)'}": p.id
+                    for p in review_products if p.id in st.session_state.review_filtered_ids_cache
+                }
+                open_label = st.selectbox("Open a product card", list(open_options.keys()), key="review_open_pick")
+            with open_col2:
+                st.write("")
+                if st.button("✏️ Open", use_container_width=True):
+                    st.session_state.review_open_product_id = open_options[open_label]
+                    st.rerun()
+
+        if st.session_state.review_export_requested:
+            st.session_state.review_export_requested = False
+            selected_products = [
+                review_by_id[pid] for pid in st.session_state.review_selected_ids
+                if pid in review_by_id
+            ]
+            if selected_products:
+                _confirm_export_dialog(selected_products)
+
+    else:
+        # -------------------------------------------------------- CARD VIEW --
+        pid = st.session_state.review_open_product_id
+        p = review_by_id.get(pid)
+        if p is None:
+            st.warning("Product not found — it may have been deleted.")
+            if st.button("← Back to list"):
+                st.session_state.review_open_product_id = None
+                st.rerun()
+        else:
+            ordered_ids = st.session_state.review_filtered_ids_cache or [x.id for x in review_products]
+            if pid not in ordered_ids:
+                ordered_ids = [pid] + ordered_ids
+            cur_idx = ordered_ids.index(pid)
+
+            nav1, nav2, nav3, nav4 = st.columns([1.3, 1, 1, 1])
+            with nav1:
+                if st.button("← Back to list", use_container_width=True):
+                    st.session_state.review_open_product_id = None
+                    st.rerun()
+            with nav2:
+                if st.button("◀ Previous Product", disabled=cur_idx <= 0, use_container_width=True):
+                    st.session_state.review_open_product_id = ordered_ids[cur_idx - 1]
+                    st.rerun()
+            with nav3:
+                if st.button("Next Product ▶", disabled=cur_idx >= len(ordered_ids) - 1, use_container_width=True):
+                    st.session_state.review_open_product_id = ordered_ids[cur_idx + 1]
+                    st.rerun()
+            with nav4:
+                st.caption(f"{cur_idx + 1} / {len(ordered_ids)}")
+
+            st.subheader(f"{p.sku} — {p.name or '(no name)'}")
+            st.caption(REVIEW_STATUS_LABELS[_review_status_of(p)])
+
+            st.markdown("**Photos**")
+            if p.image_paths:
+                photo_cols = st.columns(4)
+                for i, img_path in enumerate(p.image_paths):
+                    if os.path.exists(img_path):
+                        with photo_cols[i % 4]:
+                            st.image(img_path, use_container_width=True)
+                            if st.button("🔍 Enlarge", key=f"review_enlarge_{p.id}_{i}", use_container_width=True):
+                                st.session_state.review_lightbox_index = i
+                                _photo_lightbox_dialog(p.image_paths, i)
+            else:
+                st.caption("No photos.")
+
+            st.divider()
+
+            with st.form(key=f"review_form_{p.id}"):
+                st.markdown("**Product Information**")
+                name_in = st.text_input("Product Name", value=p.name)
+                pi1, pi2 = st.columns(2)
+                with pi1:
+                    st.text_input("Brand", value=p.brand, disabled=True)
+                    st.text_input("Barcode", value=p.ean or p.manifest_barcode or p.scanned_barcode, disabled=True)
+                with pi2:
+                    st.text_input("Model", value=p.model, disabled=True)
+                    st.text_input("Category", value=p.category, disabled=True)
+                grade_in = st.selectbox(
+                    "Grade", GRADE_OPTIONS,
+                    index=GRADE_OPTIONS.index(p.grade) if p.grade in GRADE_OPTIONS else 1,
+                )
+
+                st.markdown("**Pricing**")
+                price_in = st.number_input("Price ($)", min_value=0.0, value=float(p.price), step=1.0)
+
+                st.markdown("**Product Description**")
+                desc_in = st.text_area("Product Description", value=p.product_description, height=120)
+
+                st.markdown("**Additional Description**")
+                extra_in = st.text_area(
+                    "Additional Description (Condition & Scratches Details)",
+                    value=p.condition_description, height=100,
+                )
+
+                st.markdown("**Defects**")
+                defects_in = st.text_area("Defects (one per line)", value="\n".join(p.defects), height=80)
+
+                st.markdown("**Missing Components**")
+                missing_in = st.text_area(
+                    "Missing Components (one per line)", value="\n".join(p.missing_components), height=60,
+                )
+
+                st.markdown("**Box Contents**")
+                box_in = st.text_area("Box Contents (one per line)", value="\n".join(p.box_contents), height=60)
+
+                st.markdown("**Functional Checklist**")
+                checklist_in = st.text_area(
+                    "Functional Checklist (one per line)", value="\n".join(p.functional_checklist), height=80,
+                )
+
+                if p.grade_reasoning:
+                    st.caption(f"Grade reasoning: {p.grade_reasoning}")
+                if p.price_reasoning:
+                    st.caption(f"Price reasoning: {p.price_reasoning}")
+
+                if st.form_submit_button("💾 Save", type="primary", use_container_width=True):
+                    new_defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
+                    new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
+                    new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
+                    new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
+
+                    changed = (
+                        name_in.strip() != p.name
+                        or grade_in != p.grade
+                        or float(price_in) != float(p.price)
+                        or desc_in.strip() != p.product_description
+                        or extra_in.strip() != p.condition_description
+                        or new_defects != p.defects
+                        or new_missing != p.missing_components
+                        or new_box != p.box_contents
+                        or new_checklist != p.functional_checklist
+                    )
+
+                    p.name = name_in.strip()
+                    p.grade = grade_in
+                    p.price = float(price_in)
+                    p.product_description = desc_in.strip()
+                    p.condition_description = extra_in.strip()
+                    p.defects = new_defects
+                    p.missing_components = new_missing
+                    p.box_contents = new_box
+                    p.functional_checklist = new_checklist
+                    if changed:
+                        p.review_status = "edited"
+
+                    inventory_store.save_product(p)
+                    st.success("Saved.")
+                    st.rerun()
+
 # =============================================================== EXPORT ==
-else:
-    st.title("📤 Baselinker Export")
+elif page == "📤 CSV/Excel Export":
+    st.title("📤 CSV/Excel Export")
+    st.caption(
+        "Spreadsheet export for manual/CSV import into other tools. To push "
+        "directly to BaseLinker, use 🔍 Review & Export instead."
+    )
     all_products = inventory_store.list_products(st.session_state.company_id)
     exportable = [p for p in all_products if p.status != "draft"]
 
@@ -1680,55 +2088,3 @@ else:
                 "substitute the URLs, or attach photos manually per listing "
                 "after import."
             )
-
-            st.divider()
-            st.subheader("📤 Push directly to BaseLinker via API")
-            st.caption(
-                "An additional option alongside the CSV/Excel export above — "
-                "not a replacement. Creates or updates each selected product "
-                "directly in your BaseLinker catalog, including photos, with "
-                "no CSV/column mapping step. Test with just a few products "
-                "before relying on this as your main workflow."
-            )
-
-            if not baselinker_client.is_configured():
-                st.info(
-                    "Not set up yet — add BASELINKER_API_TOKEN, "
-                    "BASELINKER_INVENTORY_ID and BASELINKER_CATEGORY_ID to "
-                    "your .env file to enable this (see .env.example)."
-                )
-            else:
-                with st.expander("Preview what will be sent"):
-                    config = baselinker_client.get_config()
-                    for p in selected_products:
-                        listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE)
-                        action = "UPDATE existing" if (listing and listing.external_listing_id) else "CREATE new"
-                        st.write(
-                            f"**{p.sku}** ({action}) — {p.name or p.model_number or '(no name)'} — "
-                            f"${p.price:.2f} — {len(p.image_paths)} photo(s) — "
-                            f"EAN: {p.ean or p.manifest_barcode or '—'}"
-                        )
-
-                if st.button(
-                    f"📤 Push {len(selected_products)} item(s) to BaseLinker",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    results_box = st.container()
-                    progress = st.progress(0.0, text="Starting...")
-                    for i, p in enumerate(selected_products):
-                        progress.progress(
-                            i / len(selected_products),
-                            text=f"Pushing {p.sku} ({i + 1}/{len(selected_products)})...",
-                        )
-                        result = baselinker_client.push_product(p)
-                        if result.success:
-                            results_box.success(
-                                f"✅ {p.sku}: {result.message} "
-                                f"(BaseLinker product_id: {result.baselinker_product_id})"
-                            )
-                            if result.warnings:
-                                results_box.warning(f"{p.sku} warnings: {result.warnings}")
-                        else:
-                            results_box.error(f"❌ {p.sku}: {result.message}")
-                    progress.progress(1.0, text="Done.")
