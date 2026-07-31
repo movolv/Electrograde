@@ -48,6 +48,7 @@ COLUMNS = [
     "match_confidence",
     "match_notes",
     "price",
+    "quantity",
     "price_reasoning",
     "product_description",
     "condition_description",

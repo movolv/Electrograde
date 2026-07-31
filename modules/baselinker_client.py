@@ -200,7 +200,7 @@ def build_payload(
         payload["prices"] = {config["price_group_id"]: product.price}
 
     if config.get("warehouse_id"):
-        payload["stock"] = {config["warehouse_id"]: product.manifest_qty or 1}
+        payload["stock"] = {config["warehouse_id"]: product.quantity or 1}
 
     for api_field, product_attr in (
         ("length", "box_length_cm"),

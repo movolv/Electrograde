@@ -103,6 +103,9 @@ class Product:
     box_width_cm: float = 0.0
     box_height_cm: float = 0.0
     purchase_price_allocated: float = 0.0  # this item's share of the manifest/lot cost, for profit calc
+    quantity: int = 1  # unit count this record represents; always >= 1, editable everywhere. Not
+    # the same as `manifest_qty` above (an unverified manifest claim) — this is the
+    # authoritative, human-confirmed count used by every export/API path.
 
     # -- media / bookkeeping --
     image_paths: List[str] = field(default_factory=list)

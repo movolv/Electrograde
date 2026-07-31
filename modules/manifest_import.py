@@ -169,6 +169,14 @@ def rows_to_draft_products(
     for row in rows:
         p = Product(company_id=company_id, status="draft", manifest_import_id=import_id)
         _apply_manifest_fields(p, row)
+        # Seed the authoritative `quantity` from the manifest's claimed qty,
+        # once, at creation — falls back to the dataclass default (1) if the
+        # manifest didn't specify one. Only done here (not inside
+        # _apply_manifest_fields, which sync_rows_to_products() also calls on
+        # already-in-progress products) so a later re-sync of the same batch
+        # never clobbers a quantity a human has since corrected.
+        if p.manifest_qty > 0:
+            p.quantity = p.manifest_qty
         products.append(p)
     return products
 

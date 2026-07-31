@@ -1093,6 +1093,10 @@ if page == "🆕 New Item":
         test_options = ["Not Tested", "Working", "Not Working"]
         default_test = product.functional_test_result if product.functional_test_result in test_options else "Not Tested"
         test_in = st.selectbox("Functional test result", test_options, index=test_options.index(default_test))
+        quantity_in = st.number_input(
+            "Quantity", min_value=1, value=int(product.quantity or 1), step=1,
+            help="Number of units this listing represents. Defaults to 1.",
+        )
 
         st.caption("Box dimensions (for courier/shipping calculations)")
         dim_cols = st.columns(3)
@@ -1134,6 +1138,7 @@ if page == "🆕 New Item":
                 "Product Match": product.product_match,
                 "Match Confidence %": product.match_confidence,
                 "Price": product.price,
+                "Quantity": int(quantity_in),
                 "Photos": len(st.session_state.captured_photos),
             }
         )
@@ -1151,6 +1156,7 @@ if page == "🆕 New Item":
                 product.box_width_cm = float(width_in)
                 product.box_height_cm = float(height_in)
                 product.price = float(price_override_in)
+                product.quantity = int(quantity_in)
                 product.status = "completed"
                 product.review_status = "ready"
                 product.company_id = st.session_state.company_id
@@ -1413,7 +1419,7 @@ elif page == "📦 Inventory":
         # things someone changes constantly during daily work, so they're
         # editable right here rather than buried in a section below) --
         triage_keys = [k for k in TRIAGE_LABELS if k]
-        qa1, qa2, qa3 = st.columns([2, 2, 1])
+        qa1, qa2, qa3, qa4 = st.columns([2, 2, 1, 1])
         with qa1:
             new_triage = st.selectbox(
                 "Triage status", options=triage_keys,
@@ -1432,6 +1438,14 @@ elif page == "📦 Inventory":
                 inventory_store.save_product(p)
                 st.rerun()
         with qa3:
+            new_quantity = st.number_input(
+                "Quantity", min_value=1, value=int(p.quantity or 1), step=1, key=f"qty_{p.id}",
+            )
+            if int(new_quantity) != p.quantity:
+                p.quantity = int(new_quantity)
+                inventory_store.save_product(p)
+                st.rerun()
+        with qa4:
             st.write("")
             _delete_button(p)
 
@@ -1825,6 +1839,7 @@ elif page == "🔍 Review & Export":
                     "sku": p.sku,
                     "name": p.name,
                     "grade": p.grade or "—",
+                    "quantity": p.quantity or 1,
                     "status": REVIEW_STATUS_LABELS[_review_status_of(p)],
                     "date": (
                         time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
@@ -1950,7 +1965,13 @@ elif page == "🔍 Review & Export":
                 )
 
                 st.markdown("**Pricing**")
-                price_in = st.number_input("Price ($)", min_value=0.0, value=float(p.price), step=1.0)
+                pr1, pr2 = st.columns(2)
+                with pr1:
+                    price_in = st.number_input("Price ($)", min_value=0.0, value=float(p.price), step=1.0)
+                with pr2:
+                    quantity_in = st.number_input(
+                        "Quantity", min_value=1, value=int(p.quantity or 1), step=1,
+                    )
 
                 st.markdown("**Product Description**")
                 desc_in = st.text_area("Product Description", value=p.product_description, height=120)
@@ -1992,6 +2013,7 @@ elif page == "🔍 Review & Export":
                         name_in.strip() != p.name
                         or grade_in != p.grade
                         or float(price_in) != float(p.price)
+                        or int(quantity_in) != p.quantity
                         or desc_in.strip() != p.product_description
                         or extra_in.strip() != p.condition_description
                         or new_defects != p.defects
@@ -2003,6 +2025,7 @@ elif page == "🔍 Review & Export":
                     p.name = name_in.strip()
                     p.grade = grade_in
                     p.price = float(price_in)
+                    p.quantity = int(quantity_in)
                     p.product_description = desc_in.strip()
                     p.condition_description = extra_in.strip()
                     p.defects = new_defects
