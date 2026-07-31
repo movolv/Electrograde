@@ -3,6 +3,7 @@ data/inventory.db
 data/inventory.xlsx
 data/uploads/
 static/thumbnails/
+static/card_photos/
 __pycache__/
 *.pyc
 .venv/

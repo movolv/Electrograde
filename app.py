@@ -82,6 +82,37 @@ def _ensure_thumbnail(image_path: str) -> Path | None:
         return None
 
 
+CARD_PHOTOS_DIR = STATIC_DIR / "card_photos"
+CARD_PHOTO_MAX_DIM = 480  # worth actually looking at, unlike the 96px grid icon above
+
+
+def _ensure_card_photo(image_path: str) -> Path | None:
+    """Same disk-caching pattern as _ensure_thumbnail (see its docstring for
+    why this writes into static/ rather than linking to data/uploads), but
+    at a size meant to be looked at in the Review & Export product card
+    rather than a tiny grid-row icon — kept in its own cache directory since
+    it targets a different resolution than THUMBS_DIR."""
+    src = Path(image_path)
+    if not src.exists():
+        return None
+    try:
+        rel = src.resolve().relative_to(UPLOAD_DIR)
+    except (ValueError, OSError):
+        return None
+    thumb = CARD_PHOTOS_DIR / rel.parent / f"{rel.stem}_card.jpg"
+    try:
+        if thumb.exists() and thumb.stat().st_mtime >= src.stat().st_mtime:
+            return thumb
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.open(src)
+        img = ImageOps.exif_transpose(img) or img
+        img.thumbnail((CARD_PHOTO_MAX_DIM, CARD_PHOTO_MAX_DIM))
+        img.convert("RGB").save(thumb, "JPEG", quality=85)
+        return thumb
+    except Exception:
+        return None
+
+
 def _image_static_url(path: Path) -> str | None:
     """Converts a path under STATIC_DIR into the URL it's servable at.
     Leading slash matters: this URL is used from inside the review_table
@@ -98,6 +129,8 @@ _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
 
 # Below this, a manifest-vs-photo match is flagged to the user as suspect.
 MATCH_CONFIDENCE_WARNING_THRESHOLD = 60
+
+REVIEW_CARD_MAX_PHOTOS = 16
 
 
 def _enlarge_camera_preview():
@@ -1934,113 +1967,198 @@ elif page == "🔍 Review & Export":
 
             st.subheader(f"{p.sku} — {p.name or '(no name)'}")
             st.caption(REVIEW_STATUS_LABELS[_review_status_of(p)])
+            st.divider()
 
-            st.markdown("**Photos**")
+            # Not wrapped in st.form: the Photos section below (per-photo
+            # "Enlarge" buttons, its own upload control) needs regular
+            # widgets, which st.form forbids — and it belongs right above
+            # Save, not above these fields. Every widget gets an explicit
+            # per-product key so Previous/Next don't leave a stale typed
+            # value behind when the label text is identical across products.
+            st.markdown("**Product Information**")
+            name_in = st.text_input("Product Name", value=p.name, key=f"review_name_{p.id}")
+            pi1, pi2 = st.columns(2)
+            with pi1:
+                brand_in = st.text_input("Brand", value=p.brand, key=f"review_brand_{p.id}")
+                barcode_in = st.text_input(
+                    "Barcode", value=p.ean or p.manifest_barcode or p.scanned_barcode,
+                    key=f"review_barcode_{p.id}",
+                )
+            with pi2:
+                model_in = st.text_input("Model", value=p.model, key=f"review_model_{p.id}")
+                category_in = st.text_input("Category", value=p.category, key=f"review_category_{p.id}")
+            grade_in = st.selectbox(
+                "Grade", GRADE_OPTIONS,
+                index=GRADE_OPTIONS.index(p.grade) if p.grade in GRADE_OPTIONS else 1,
+                key=f"review_grade_{p.id}",
+            )
+
+            st.markdown("**Pricing**")
+            pr1, pr2 = st.columns(2)
+            with pr1:
+                price_in = st.number_input(
+                    "Price ($)", min_value=0.0, value=float(p.price), step=1.0, key=f"review_price_{p.id}",
+                )
+            with pr2:
+                quantity_in = st.number_input(
+                    "Quantity", min_value=1, value=int(p.quantity or 1), step=1, key=f"review_qty_{p.id}",
+                )
+
+            st.markdown("**Product Description**")
+            desc_in = st.text_area(
+                "Product Description", value=p.product_description, height=120, key=f"review_desc_{p.id}",
+            )
+
+            st.markdown("**Additional Description**")
+            extra_in = st.text_area(
+                "Additional Description (Condition & Scratches Details)",
+                value=p.condition_description, height=100, key=f"review_extra_{p.id}",
+            )
+
+            st.markdown("**Defects**")
+            defects_in = st.text_area(
+                "Defects (one per line)", value="\n".join(p.defects), height=80, key=f"review_defects_{p.id}",
+            )
+
+            st.markdown("**Missing Components**")
+            missing_in = st.text_area(
+                "Missing Components (one per line)", value="\n".join(p.missing_components), height=60,
+                key=f"review_missing_{p.id}",
+            )
+
+            st.markdown("**Box Contents**")
+            box_in = st.text_area(
+                "Box Contents (one per line)", value="\n".join(p.box_contents), height=60,
+                key=f"review_box_{p.id}",
+            )
+
+            st.markdown("**Functional Checklist**")
+            checklist_in = st.text_area(
+                "Functional Checklist (one per line)", value="\n".join(p.functional_checklist), height=80,
+                key=f"review_checklist_{p.id}",
+            )
+
+            if p.grade_reasoning:
+                st.caption(f"Grade reasoning: {p.grade_reasoning}")
+            if p.price_reasoning:
+                st.caption(f"Price reasoning: {p.price_reasoning}")
+
+            st.divider()
+            st.markdown(f"**Photos** ({len(p.image_paths)}/{REVIEW_CARD_MAX_PHOTOS})")
             if p.image_paths:
                 photo_cols = st.columns(4)
                 for i, img_path in enumerate(p.image_paths):
                     if os.path.exists(img_path):
                         with photo_cols[i % 4]:
-                            st.image(img_path, use_container_width=True)
+                            # Fixed square box + object-fit:cover (via a plain
+                            # <img>, not st.image — which just scales to the
+                            # column width and leaves each photo's own aspect
+                            # ratio intact) so every tile is the same size
+                            # regardless of the source photo's shape, instead
+                            # of a ragged grid of different-height images.
+                            card_thumb = _ensure_card_photo(img_path)
+                            thumb_url = _image_static_url(card_thumb) if card_thumb else None
+                            if thumb_url:
+                                st.markdown(
+                                    f'<img src="{thumb_url}" style="width:100%;aspect-ratio:1/1;'
+                                    f'object-fit:cover;border-radius:8px;display:block;" />',
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                st.image(img_path, use_container_width=True)
                             if st.button("🔍 Enlarge", key=f"review_enlarge_{p.id}_{i}", use_container_width=True):
                                 st.session_state.review_lightbox_index = i
                                 _photo_lightbox_dialog(p.image_paths, i)
             else:
                 st.caption("No photos.")
 
+            remaining_slots = REVIEW_CARD_MAX_PHOTOS - len(p.image_paths)
+            if remaining_slots > 0:
+                with st.form(key=f"review_photo_upload_{p.id}", clear_on_submit=True):
+                    new_photo_files = st.file_uploader(
+                        f"➕ Add photos (up to {remaining_slots} more)",
+                        type=["jpg", "jpeg", "png"], accept_multiple_files=True,
+                    )
+                    if st.form_submit_button("Add photos"):
+                        if not new_photo_files:
+                            st.warning("No photos selected.")
+                        else:
+                            to_add = new_photo_files[:remaining_slots]
+                            if len(new_photo_files) > remaining_slots:
+                                st.warning(
+                                    f"Only added {remaining_slots} photo(s) — "
+                                    f"{REVIEW_CARD_MAX_PHOTOS} photo maximum reached."
+                                )
+                            item_dir = UPLOAD_DIR / sku_folder_name(p.sku, p.id)
+                            item_dir.mkdir(parents=True, exist_ok=True)
+                            existing_nums = [
+                                int(m.group(1)) for f in item_dir.glob("photo_*.jpg")
+                                if (m := re.match(r"photo_(\d+)\.jpg$", f.name))
+                            ]
+                            next_num = (max(existing_nums) + 1) if existing_nums else 1
+                            added_paths = []
+                            for j, uf in enumerate(to_add):
+                                norm = _normalize_captured_photo(uf.read())
+                                fp = item_dir / f"photo_{next_num + j}.jpg"
+                                fp.write_bytes(norm)
+                                added_paths.append(str(fp))
+                            p.image_paths = p.image_paths + added_paths
+                            inventory_store.save_product(p)
+                            st.success(f"Added {len(to_add)} photo(s).")
+                            st.rerun()
+            else:
+                st.caption(f"Maximum of {REVIEW_CARD_MAX_PHOTOS} photos reached.")
+
             st.divider()
+            if st.button("💾 Save", type="primary", use_container_width=True, key=f"review_save_{p.id}"):
+                new_defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
+                new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
+                new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
+                new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
 
-            with st.form(key=f"review_form_{p.id}"):
-                st.markdown("**Product Information**")
-                name_in = st.text_input("Product Name", value=p.name)
-                pi1, pi2 = st.columns(2)
-                with pi1:
-                    st.text_input("Brand", value=p.brand, disabled=True)
-                    st.text_input("Barcode", value=p.ean or p.manifest_barcode or p.scanned_barcode, disabled=True)
-                with pi2:
-                    st.text_input("Model", value=p.model, disabled=True)
-                    st.text_input("Category", value=p.category, disabled=True)
-                grade_in = st.selectbox(
-                    "Grade", GRADE_OPTIONS,
-                    index=GRADE_OPTIONS.index(p.grade) if p.grade in GRADE_OPTIONS else 1,
+                current_barcode = p.ean or p.manifest_barcode or p.scanned_barcode
+                changed = (
+                    name_in.strip() != p.name
+                    or brand_in.strip() != p.brand
+                    or model_in.strip() != p.model
+                    or category_in.strip() != p.category
+                    or barcode_in.strip() != current_barcode
+                    or grade_in != p.grade
+                    or float(price_in) != float(p.price)
+                    or int(quantity_in) != p.quantity
+                    or desc_in.strip() != p.product_description
+                    or extra_in.strip() != p.condition_description
+                    or new_defects != p.defects
+                    or new_missing != p.missing_components
+                    or new_box != p.box_contents
+                    or new_checklist != p.functional_checklist
                 )
 
-                st.markdown("**Pricing**")
-                pr1, pr2 = st.columns(2)
-                with pr1:
-                    price_in = st.number_input("Price ($)", min_value=0.0, value=float(p.price), step=1.0)
-                with pr2:
-                    quantity_in = st.number_input(
-                        "Quantity", min_value=1, value=int(p.quantity or 1), step=1,
-                    )
+                p.name = name_in.strip()
+                p.brand = brand_in.strip()
+                p.model = model_in.strip()
+                p.category = category_in.strip()
+                if barcode_in.strip() != current_barcode:
+                    p.ean = barcode_in.strip()
+                    p.ean_source = "manual"
+                    p.ean_status = "Found" if barcode_in.strip() else ""
+                p.grade = grade_in
+                p.price = float(price_in)
+                p.quantity = int(quantity_in)
+                p.product_description = desc_in.strip()
+                p.condition_description = extra_in.strip()
+                p.defects = new_defects
+                p.missing_components = new_missing
+                p.box_contents = new_box
+                p.functional_checklist = new_checklist
+                if changed:
+                    p.review_status = "edited"
 
-                st.markdown("**Product Description**")
-                desc_in = st.text_area("Product Description", value=p.product_description, height=120)
-
-                st.markdown("**Additional Description**")
-                extra_in = st.text_area(
-                    "Additional Description (Condition & Scratches Details)",
-                    value=p.condition_description, height=100,
-                )
-
-                st.markdown("**Defects**")
-                defects_in = st.text_area("Defects (one per line)", value="\n".join(p.defects), height=80)
-
-                st.markdown("**Missing Components**")
-                missing_in = st.text_area(
-                    "Missing Components (one per line)", value="\n".join(p.missing_components), height=60,
-                )
-
-                st.markdown("**Box Contents**")
-                box_in = st.text_area("Box Contents (one per line)", value="\n".join(p.box_contents), height=60)
-
-                st.markdown("**Functional Checklist**")
-                checklist_in = st.text_area(
-                    "Functional Checklist (one per line)", value="\n".join(p.functional_checklist), height=80,
-                )
-
-                if p.grade_reasoning:
-                    st.caption(f"Grade reasoning: {p.grade_reasoning}")
-                if p.price_reasoning:
-                    st.caption(f"Price reasoning: {p.price_reasoning}")
-
-                if st.form_submit_button("💾 Save", type="primary", use_container_width=True):
-                    new_defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
-                    new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
-                    new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
-                    new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
-
-                    changed = (
-                        name_in.strip() != p.name
-                        or grade_in != p.grade
-                        or float(price_in) != float(p.price)
-                        or int(quantity_in) != p.quantity
-                        or desc_in.strip() != p.product_description
-                        or extra_in.strip() != p.condition_description
-                        or new_defects != p.defects
-                        or new_missing != p.missing_components
-                        or new_box != p.box_contents
-                        or new_checklist != p.functional_checklist
-                    )
-
-                    p.name = name_in.strip()
-                    p.grade = grade_in
-                    p.price = float(price_in)
-                    p.quantity = int(quantity_in)
-                    p.product_description = desc_in.strip()
-                    p.condition_description = extra_in.strip()
-                    p.defects = new_defects
-                    p.missing_components = new_missing
-                    p.box_contents = new_box
-                    p.functional_checklist = new_checklist
-                    if changed:
-                        p.review_status = "edited"
-
-                    inventory_store.save_product(p)
-                    st.session_state.review_open_product_id = None
-                    st.session_state.review_focus_id = p.id  # scroll/highlight this row back in the list
-                    st.success("Saved.")
-                    st.rerun()
+                inventory_store.save_product(p)
+                st.session_state.review_open_product_id = None
+                st.session_state.review_focus_id = p.id  # scroll/highlight this row back in the list
+                st.success("Saved.")
+                st.rerun()
 
 # =============================================================== EXPORT ==
 elif page == "📤 CSV/Excel Export":
