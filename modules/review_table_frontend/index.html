@@ -12,7 +12,21 @@
     background: #1f2937; color: #f3f4f6; font-size: 14px;
   }
   #quick-filter:focus { outline: 2px solid #38bdf8; }
-  #grid { width: 100%; height: 480px; }
+  #grid { width: 100%; height: 600px; }
+  #pagination-bar {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    margin-bottom: 8px; color: #f3f4f6; font-size: 13px;
+  }
+  #pagination-bar select {
+    padding: 4px 8px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px;
+  }
+  #pagination-bar button {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer;
+  }
+  #pagination-bar button:hover:not(:disabled) { background: #293548; }
+  #pagination-bar button:disabled { opacity: 0.4; cursor: default; }
   #columns-btn {
     padding: 6px 12px; border-radius: 6px; border: 1px solid #293548;
     background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer; white-space: nowrap;
@@ -34,6 +48,19 @@
     <button id="columns-btn" type="button">☰ Columns</button>
     <div id="columns-panel"></div>
   </div>
+</div>
+<div id="pagination-bar">
+  <label>Show
+    <select id="page-size-select">
+      <option value="10">10</option>
+      <option value="20" selected>20</option>
+      <option value="50">50</option>
+    </select>
+    per page
+  </label>
+  <button id="prev-page-btn" type="button">◀ Previous</button>
+  <span id="page-indicator">Page 1 of 1</span>
+  <button id="next-page-btn" type="button">Next ▶</button>
 </div>
 <div id="grid"></div>
 <script>
@@ -155,7 +182,11 @@ var gridOptions = {
   defaultColDef: defaultColDef,
   rowData: [],
   getRowId: function (params) { return params.data.id; },
-  domLayout: "autoHeight",
+  // Fixed height + AG Grid's own internal (virtualized) scrolling — NOT
+  // "autoHeight" — so the mouse wheel scrolls rows inside the grid itself.
+  // autoHeight instead grows the grid to fit every row and relies on the
+  // page scrolling, which fought with a leftover fixed-height CSS rule and
+  // left some rows unreachable.
   animateRows: true,
   rowHeight: 52,  // a bit taller than AG Grid's default so the Photo thumbnail is actually visible
   rowSelection: {
@@ -164,17 +195,29 @@ var gridOptions = {
     headerCheckbox: true,
     enableClickSelection: true, // single click anywhere on the row also selects it
   },
+  pagination: true,
+  paginationPageSize: 20,
+  paginationPageSizeSelector: [10, 20, 50],
+  suppressPaginationPanel: true,  // using our own top, centered pagination bar instead
   onSelectionChanged: reportSelection,
   onRowDoubleClicked: function (event) { openRow(event.data); },
   onCellKeyDown: function (event) {
     var key = event.event ? event.event.key : null;
     if (key === "Enter") { openRow(event.data); }
   },
-  onGridSizeChanged: setFrameHeight,
-  onRowDataUpdated: function () { setTimeout(setFrameHeight, 30); },
+  onPaginationChanged: updatePaginationBar,
   onColumnMoved: function (event) { if (event.finished) { saveColumnState(); } },
   onColumnResized: function (event) { if (event.finished) { saveColumnState(); } },
 };
+
+function updatePaginationBar() {
+  if (!gridApi) { return; }
+  var current = gridApi.paginationGetCurrentPage();     // 0-indexed
+  var total = Math.max(1, gridApi.paginationGetTotalPages());
+  document.getElementById("page-indicator").textContent = "Page " + (current + 1) + " of " + total;
+  document.getElementById("prev-page-btn").disabled = current <= 0;
+  document.getElementById("next-page-btn").disabled = current >= total - 1;
+}
 
 document.addEventListener("DOMContentLoaded", function () {
   gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
@@ -195,7 +238,18 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   });
 
+  document.getElementById("page-size-select").addEventListener("change", function (e) {
+    gridApi.setGridOption("paginationPageSize", parseInt(e.target.value, 10));
+  });
+  document.getElementById("prev-page-btn").addEventListener("click", function () {
+    gridApi.paginationGoToPreviousPage();
+  });
+  document.getElementById("next-page-btn").addEventListener("click", function () {
+    gridApi.paginationGoToNextPage();
+  });
+
   sendToStreamlit({ type: "streamlit:componentReady", apiVersion: 1 });
+  setTimeout(setFrameHeight, 100);
 });
 
 window.addEventListener("message", function (event) {
