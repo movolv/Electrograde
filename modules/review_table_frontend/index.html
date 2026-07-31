@@ -75,11 +75,17 @@ function photoCellRenderer(params) {
   if (!params.value) { return ""; }
   var img = document.createElement("img");
   img.src = params.value;
-  img.style.height = "36px";
-  img.style.width = "36px";
+  // Percentage/max-based sizing (not a fixed px square) so the thumbnail
+  // actually grows when the user drags the column wider, instead of
+  // leaving new empty space next to a still-tiny fixed-size image.
+  img.style.height = "90%";
+  img.style.maxHeight = "72px";
+  img.style.width = "auto";
+  img.style.maxWidth = "95%";
   img.style.objectFit = "cover";
   img.style.borderRadius = "4px";
-  img.style.marginTop = "4px";
+  img.style.display = "block";
+  img.style.margin = "3px auto";
   return img;
 }
 
@@ -101,8 +107,7 @@ var defaultColDef = { sortable: true, resizable: true, filter: true };
 var columnDefs = [
   {
     field: "photo_url", headerName: "Photo", cellRenderer: photoCellRenderer,
-    width: 70, sortable: false, filter: false, resizable: false,
-    checkboxSelection: true, headerCheckboxSelection: true,
+    width: 110, minWidth: 60, maxWidth: 400, sortable: false, filter: false, resizable: true,
   },
   { field: "sku", headerName: "SKU", width: 110 },
   { field: "name", headerName: "Product Name", flex: 1, minWidth: 200 },
@@ -152,11 +157,12 @@ var gridOptions = {
   getRowId: function (params) { return params.data.id; },
   domLayout: "autoHeight",
   animateRows: true,
+  rowHeight: 52,  // a bit taller than AG Grid's default so the Photo thumbnail is actually visible
   rowSelection: {
     mode: "multiRow",
-    checkboxes: false,          // handled by the Photo column's checkboxSelection above
-    headerCheckbox: false,
-    enableClickSelection: true, // single click anywhere on the row selects it
+    checkboxes: true,           // own dedicated (narrow, fixed) selection column, separate from Photo
+    headerCheckbox: true,
+    enableClickSelection: true, // single click anywhere on the row also selects it
   },
   onSelectionChanged: reportSelection,
   onRowDoubleClicked: function (event) { openRow(event.data); },
