@@ -6,7 +6,6 @@ Run with:  streamlit run app.py
 import concurrent.futures
 import hashlib
 import io
-import math
 import os
 import re
 import time
@@ -38,6 +37,8 @@ from modules import (
 )
 from modules.models import Product
 from modules.review_table_component import review_table
+from modules.inventory_table_component import inventory_table
+from modules.export_table_component import export_table
 from modules.esc_listener_component import esc_listener
 
 load_dotenv()
@@ -506,13 +507,16 @@ st.set_page_config(
     page_title="ElectroGrader",
     page_icon="📱",
     # Every other page is deliberately narrow/mobile-first (photo capture,
-    # single-column forms) — Review & Export is the one desktop-oriented,
-    # data-grid-heavy page, so it alone gets the wide layout. st.session_state
-    # already holds last run's sidebar radio value (via its key="page" below)
-    # before the radio widget itself re-renders, which is what makes a
-    # per-page layout possible at all — set_page_config must be the first
-    # Streamlit call, before the radio exists to read from directly.
-    layout="wide" if st.session_state.get("page") == "🔍 Review & Export" else "centered",
+    # single-column forms) — Review & Export, Inventory, and CSV/Excel
+    # Export are the three desktop-oriented, data-grid-heavy pages, so they
+    # get the wide layout. st.session_state already holds last run's
+    # sidebar radio value (via its key="page" below) before the radio
+    # widget itself re-renders, which is what makes a per-page layout
+    # possible at all — set_page_config must be the first Streamlit call,
+    # before the radio exists to read from directly.
+    layout="wide" if st.session_state.get("page") in (
+        "🔍 Review & Export", "📦 Inventory", "📤 CSV/Excel Export",
+    ) else "centered",
     initial_sidebar_state="collapsed",
 )
 pwa.inject_pwa_head()
@@ -556,6 +560,11 @@ def _init_state():
         "review_clear_seq": 0,          # bumped to tell the grid to deselect all (no remount needed)
         "review_focus_id": "",          # product id the grid should scroll to/highlight on next render
         "review_last_esc_value": None,  # last value seen from esc_listener(), to detect a new Escape press
+        "export_selected_ids": set(),   # product ids checked for CSV/Excel export
+        "export_open_product_id": None,  # product id whose read-only detail view is open, or None for list view
+        "export_filtered_ids_cache": [],  # ids currently eligible for the list, for Previous/Next
+        "export_clear_seq": 0,          # bumped to tell the grid to deselect all (no remount needed)
+        "export_last_esc_value": None,  # last value seen from esc_listener(), to detect a new Escape press
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1425,7 +1434,6 @@ elif page == "📦 Inventory":
         "for_parts": "♻️ For parts",
         "written_off": "❌ Written off",
     }
-    INVENTORY_PAGE_SIZE = 50
 
     def _render_images(p: Product):
         cols = st.columns(4)
@@ -1633,61 +1641,26 @@ elif page == "📦 Inventory":
     else:
         st.divider()
 
+        # Manifest batch is the one filter left on the Python side — it's
+        # not a displayed column, so there's nothing for the grid itself to
+        # filter on. Triage/Grade/Location used to be separate dropdowns
+        # here too; now that they're real grid columns, the grid's own
+        # per-column filters (and the quick-search box) cover that,
+        # matching how Review & Export's grid works.
         batches = manifest_store.list_batches(st.session_state.company_id)
         batch_options = {"": "All batches"}
         batch_options.update({b.id: f"{b.filename} ({b.id})" for b in batches})
-        locations = inventory_store.distinct_locations(st.session_state.company_id)
-
-        f1, f2, f3, f4 = st.columns(4)
-        with f1:
-            triage_filter = st.selectbox(
-                "Triage status", options=list(TRIAGE_LABELS.keys()),
-                format_func=lambda k: TRIAGE_LABELS[k], key="inv_filter_triage",
-            )
-        with f2:
-            batch_filter = st.selectbox(
-                "Manifest batch", options=list(batch_options.keys()),
-                format_func=lambda k: batch_options[k], key="inv_filter_batch",
-            )
-        with f3:
-            location_filter = st.selectbox(
-                "Location", options=[""] + locations,
-                format_func=lambda k: k or "All", key="inv_filter_location",
-            )
-        with f4:
-            grade_filter = st.selectbox(
-                "Grade", options=["", "A", "B", "C", "D"],
-                format_func=lambda k: k or "All", key="inv_filter_grade",
-            )
-
-        table_search = st.text_input(
-            "Filter within results (substring match on SKU / name / brand / model)",
-            placeholder="e.g. iPhone, Bosch, Test...",
-            key="inv_filter_search",
+        batch_filter = st.selectbox(
+            "Manifest batch", options=list(batch_options.keys()),
+            format_func=lambda k: batch_options[k], key="inv_filter_batch",
         )
 
-        # Any filter change resets to page 1 — otherwise a narrower filter
-        # could land on a now-nonexistent page.
-        filter_key = (triage_filter, batch_filter, location_filter, grade_filter, table_search)
-        if st.session_state.get("inv_filter_key") != filter_key:
-            st.session_state.inv_filter_key = filter_key
-            st.session_state.inv_page = 1
-        inv_page = st.session_state.get("inv_page", 1)
+        if batch_filter:
+            products = inventory_store.list_products_by_manifest(batch_filter, st.session_state.company_id)
+        else:
+            products = inventory_store.list_products(st.session_state.company_id)
 
-        products, total = inventory_store.list_products_paginated(
-            company_id=st.session_state.company_id,
-            triage_status=triage_filter or None,
-            manifest_import_id=batch_filter or None,
-            location=location_filter or None,
-            grade=grade_filter or None,
-            search=table_search or None,
-            page=inv_page,
-            page_size=INVENTORY_PAGE_SIZE,
-        )
-        total_pages = max(1, math.ceil(total / INVENTORY_PAGE_SIZE))
-        inv_page = min(inv_page, total_pages)
-
-        st.caption(f"{total} item(s) match — page {inv_page} of {total_pages}")
+        st.caption(f"{len(products)} item(s)")
 
         if not products:
             st.info(
@@ -1699,45 +1672,29 @@ elif page == "📦 Inventory":
             for p in products:
                 listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE)
                 table_rows.append({
-                    "SKU": p.sku or "(none)",
-                    "Title": p.name or p.manifest_item_description or p.model_number or p.id,
-                    "Triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
-                    "Grade": p.grade or "—",
-                    "Location": p.location or "—",
-                    "Price": p.price,
-                    "BaseLinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
+                    "id": p.id,
+                    "sku": p.sku or "(none)",
+                    "title": p.name or p.manifest_item_description or p.model_number or p.id,
+                    "triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
+                    "grade": p.grade or "—",
+                    "location": p.location or "—",
+                    "price": p.price,
+                    "baselinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
                 })
-            table_df = pd.DataFrame(table_rows)
 
-            event = st.dataframe(
-                table_df,
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key=f"inv_table_page{inv_page}",
+            result = inventory_table(
+                rows=table_rows,
+                selected_id=st.session_state.get("inv_selected_id", ""),
+                key="inventory_table",
             )
-
-            nav1, nav2, nav3 = st.columns([1, 2, 1])
-            with nav1:
-                if st.button("⬅️ Previous", disabled=(inv_page <= 1), use_container_width=True):
-                    st.session_state.inv_page = inv_page - 1
-                    st.rerun()
-            with nav2:
-                st.write(f"Page {inv_page} of {total_pages}")
-            with nav3:
-                if st.button("Next ➡️", disabled=(inv_page >= total_pages), use_container_width=True):
-                    st.session_state.inv_page = inv_page + 1
-                    st.rerun()
-
-            selected_rows = event.selection["rows"] if event is not None else []
-            if selected_rows:
-                # Track by product id, not row position: a change made in the
-                # detail view below (e.g. triage status) can move the item
-                # out of the current filter/page on rerun, which would leave
-                # a row *index* pointing at a different product entirely (or
-                # out of range). Re-fetching fresh by id sidesteps that.
-                st.session_state.inv_selected_id = products[selected_rows[0]].id
+            if result and result.get("open_id") and result["open_id"] != st.session_state.get("inv_selected_id"):
+                # Without the rerun, this render already passed the *old*
+                # selected_id into the grid (computed above before this
+                # click's result was known) — the row highlight would always
+                # lag one click behind. Rerunning immediately means the very
+                # next render carries the freshly updated id.
+                st.session_state.inv_selected_id = result["open_id"]
+                st.rerun()
 
         selected_id = st.session_state.get("inv_selected_id")
         if selected_id:
@@ -2169,36 +2126,73 @@ elif page == "📤 CSV/Excel Export":
     )
     all_products = inventory_store.list_products(st.session_state.company_id)
     exportable = [p for p in all_products if p.status != "draft"]
+    exportable_by_id = {p.id: p for p in exportable}
 
     if not exportable:
         st.info("No completed items to export yet (pending manifest drafts are excluded).")
-    else:
-        options = {f"{p.sku or p.id} — {p.name or p.model_number}": p.id for p in exportable}
-        selected_labels = st.multiselect("Items to export", list(options.keys()), default=list(options.keys()))
-        selected_ids = {options[l] for l in selected_labels}
-        selected_products = [p for p in exportable if p.id in selected_ids]
 
-        if selected_products:
-            df = export.products_to_dataframe(selected_products)
-            st.dataframe(df, use_container_width=True)
+    elif st.session_state.export_open_product_id is None:
+        # -------------------------------------------------------- LIST VIEW --
 
-            col1, col2 = st.columns(2)
-            with col1:
+        @st.fragment
+        def _export_list_fragment():
+            st.session_state.export_filtered_ids_cache = [p.id for p in exportable]
+
+            table_rows = []
+            for p in exportable:
+                table_rows.append({
+                    "id": p.id,
+                    "sku": p.sku or "(none)",
+                    "name": p.name or p.manifest_item_description or p.model_number or p.id,
+                    "brand": p.brand or "—",
+                    "grade": p.grade or "—",
+                    "price": p.price,
+                    "quantity": p.quantity or 1,
+                })
+
+            result = export_table(
+                rows=table_rows,
+                clear_seq=st.session_state.export_clear_seq,
+                key="export_table",
+            )
+            if result:
+                st.session_state.export_selected_ids = set(result.get("selected_ids") or [])
+                if result.get("open_id"):
+                    st.session_state.export_open_product_id = result["open_id"]
+                    st.rerun()  # escape fragment scope so the detail view (below) renders
+
+            n_selected = len(st.session_state.export_selected_ids)
+            st.caption(f"Selected: {n_selected} product(s)")
+            selected_products = [
+                exportable_by_id[pid] for pid in st.session_state.export_selected_ids
+                if pid in exportable_by_id
+            ]
+
+            dl1, dl2, dl3 = st.columns([1, 1, 1])
+            with dl1:
                 st.download_button(
                     "⬇️ Download Excel (.xlsx)",
-                    data=export.to_excel_bytes(selected_products),
+                    data=export.to_excel_bytes(selected_products) if selected_products else b"",
                     file_name="baselinker_export.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    disabled=n_selected == 0,
                     use_container_width=True,
                 )
-            with col2:
+            with dl2:
                 st.download_button(
                     "⬇️ Download CSV",
-                    data=export.to_csv_bytes(selected_products),
+                    data=export.to_csv_bytes(selected_products) if selected_products else b"",
                     file_name="baselinker_export.csv",
                     mime="text/csv",
+                    disabled=n_selected == 0,
                     use_container_width=True,
                 )
+            with dl3:
+                if n_selected > 0:
+                    if st.button("✖ Clear Selection", use_container_width=True, key="export_clear_selection"):
+                        st.session_state.export_selected_ids = set()
+                        st.session_state.export_clear_seq += 1  # tell the grid to deselect all rows
+                        st.rerun()
 
             st.caption(
                 "Note: 'Image Links' currently contains local file paths. "
@@ -2207,3 +2201,70 @@ elif page == "📤 CSV/Excel Export":
                 "substitute the URLs, or attach photos manually per listing "
                 "after import."
             )
+
+        _export_list_fragment()
+
+    else:
+        # -------------------------------------------------------- DETAIL VIEW --
+        # Read-only — editing already lives on 🔍 Review & Export; this page
+        # is purely for picking which products go into the downloaded file,
+        # with a way to inspect any one of them in full before deciding.
+        esc_value = esc_listener(key="export_esc")
+        if esc_value is not None and esc_value != st.session_state.export_last_esc_value:
+            st.session_state.export_last_esc_value = esc_value
+            st.session_state.export_open_product_id = None
+            st.rerun()
+
+        pid = st.session_state.export_open_product_id
+        p = exportable_by_id.get(pid)
+        if p is None:
+            st.warning("Product not found — it may have been deleted.")
+            if st.button("← Back to list"):
+                st.session_state.export_open_product_id = None
+                st.rerun()
+        else:
+            ordered_ids = st.session_state.export_filtered_ids_cache or [x.id for x in exportable]
+            if pid not in ordered_ids:
+                ordered_ids = [pid] + ordered_ids
+            cur_idx = ordered_ids.index(pid)
+
+            nav1, nav2, nav3, nav4 = st.columns([1.3, 1, 1, 1])
+            with nav1:
+                if st.button("← Back to list", use_container_width=True):
+                    st.session_state.export_open_product_id = None
+                    st.rerun()
+            with nav2:
+                if st.button("◀ Previous Product", disabled=cur_idx <= 0, use_container_width=True):
+                    st.session_state.export_open_product_id = ordered_ids[cur_idx - 1]
+                    st.rerun()
+            with nav3:
+                if st.button("Next Product ▶", disabled=cur_idx >= len(ordered_ids) - 1, use_container_width=True):
+                    st.session_state.export_open_product_id = ordered_ids[cur_idx + 1]
+                    st.rerun()
+            with nav4:
+                st.caption(f"{cur_idx + 1} / {len(ordered_ids)}")
+
+            st.subheader(f"{p.sku} — {p.name or '(no name)'}")
+            st.caption("Read-only preview of everything that goes into the exported file.")
+            st.divider()
+
+            # Built from the exact same function that generates the actual
+            # download, so this view can never drift out of sync with what
+            # really ends up in the file.
+            row = export.products_to_dataframe([p]).iloc[0].to_dict()
+
+            LONG_FIELDS = {
+                "Image Links", "Product Description", "Condition & Scratches Details",
+                "Functional Test Checklist", "Missing Components",
+            }
+            short_fields = [c for c in export.COLUMNS if c not in LONG_FIELDS]
+            sf_cols = st.columns(2)
+            for i, field in enumerate(short_fields):
+                with sf_cols[i % 2]:
+                    st.write(f"**{field}:** {row.get(field) or '—'}")
+
+            st.divider()
+            for field in export.COLUMNS:
+                if field in LONG_FIELDS:
+                    st.markdown(f"**{field}**")
+                    st.text(row.get(field) or "—")

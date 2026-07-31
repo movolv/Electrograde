@@ -1,0 +1,445 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.0.2/dist/ag-grid-community.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+               font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  #quick-filter {
+    flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 14px;
+  }
+  #quick-filter:focus { outline: 2px solid #38bdf8; }
+  #grid { width: 100%; height: 600px; }
+  #pagination-bar {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    margin-bottom: 8px; color: #f3f4f6; font-size: 13px; flex-wrap: wrap;
+  }
+  #pagination-bar select {
+    padding: 4px 8px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px;
+  }
+  #pagination-bar button {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer;
+  }
+  #pagination-bar button:hover:not(:disabled) { background: #293548; }
+  #pagination-bar button:disabled { opacity: 0.4; cursor: default; }
+  #columns-btn {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  #columns-btn:hover { background: #293548; }
+  #columns-panel {
+    position: absolute; z-index: 10; margin-top: 4px; padding: 8px;
+    background: #1f2937; border: 1px solid #293548; border-radius: 6px;
+    display: none; flex-direction: column; gap: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  #columns-panel.open { display: flex; }
+  #columns-panel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #f3f4f6; cursor: pointer; }
+  .select-all-menu {
+    position: fixed; z-index: 20; display: none; flex-direction: column;
+    min-width: 240px; padding: 4px; background: #1f2937; border: 1px solid #293548;
+    border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .select-all-menu.open { display: flex; }
+  .select-all-menu button {
+    text-align: left; padding: 8px 10px; border: none; background: transparent;
+    color: #f3f4f6; font-size: 13px; cursor: pointer; border-radius: 4px; white-space: nowrap;
+  }
+  .select-all-menu button:hover { background: #293548; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Name, Brand, or Grade" />
+  <div id="columns-btn-wrap" style="position: relative;">
+    <button id="columns-btn" type="button">☰ Columns</button>
+    <div id="columns-panel"></div>
+  </div>
+</div>
+<div id="pagination-bar">
+  <label>Show
+    <select id="page-size-select">
+      <option value="10">10</option>
+      <option value="20" selected>20</option>
+      <option value="50">50</option>
+    </select>
+    per page
+  </label>
+  <button id="prev-page-btn" type="button">◀ Previous</button>
+  <span id="page-indicator">Page 1 of 1</span>
+  <button id="next-page-btn" type="button">Next ▶</button>
+</div>
+<div id="grid"></div>
+<script>
+/* Same hand-rolled Streamlit component wire protocol as
+   review_table_frontend/index.html and inventory_table_frontend/index.html
+   — see review_table_frontend for the protocol details. Interaction model:
+   checkbox multi-select (this page's job is picking which products to
+   export) with the same this-page/all-pages "select all" menu as Review &
+   Export, plus double-click/Enter to open a read-only detail view. */
+function sendToStreamlit(msg) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), "*");
+}
+function setComponentValue(value) {
+  sendToStreamlit({ type: "streamlit:setComponentValue", value: value });
+}
+function setFrameHeight() {
+  var h = document.body.scrollHeight;
+  sendToStreamlit({ type: "streamlit:setFrameHeight", height: h });
+}
+
+var gridApi = null;
+var lastClearSeq = null;
+
+var THEME = agGrid.themeQuartz.withParams({
+  backgroundColor: "#111827",
+  foregroundColor: "#f3f4f6",
+  headerBackgroundColor: "#1f2937",
+  headerTextColor: "#f3f4f6",
+  oddRowBackgroundColor: "#161f2e",
+  rowHoverColor: "#1f2937",
+  selectedRowBackgroundColor: "#1e3a5f",
+  borderColor: "#293548",
+  accentColor: "#38bdf8",
+  chromeBackgroundColor: "#111827",
+});
+
+function priceCellFormatter(params) {
+  var v = params.value;
+  return (v === null || v === undefined || v === "") ? "" : "$" + Number(v).toFixed(2);
+}
+
+function getSelectedIds() {
+  return gridApi.getSelectedRows().map(function (r) { return r.id; });
+}
+
+function reportSelection() {
+  setComponentValue({ selected_ids: getSelectedIds(), open_id: null });
+}
+
+function openRow(data) {
+  if (!data) { return; }
+  setComponentValue({ selected_ids: getSelectedIds(), open_id: data.id });
+}
+
+/* Custom header component for the auto-generated selection column — see
+   review_table_frontend/index.html for the full history of why this
+   exists instead of AG Grid's default header checkbox (this-page vs.
+   all-pages choice, plus two fixed bugs: a real checkbox silently clears
+   its own indeterminate state on click regardless of preventDefault(), and
+   clicking a partially-selected header used to reopen the menu instead of
+   just clearing — both fixed below from the start this time). */
+function SelectAllHeaderComponent() {}
+
+SelectAllHeaderComponent.prototype.init = function (params) {
+  var self = this;
+  this.params = params;
+
+  this.eGui = document.createElement("div");
+  this.eGui.style.cssText = "display:flex;align-items:center;justify-content:center;height:100%;width:100%;cursor:pointer;";
+
+  this.checkbox = document.createElement("input");
+  this.checkbox.type = "checkbox";
+  this.checkbox.style.cursor = "pointer";
+  this.checkbox.tabIndex = -1;
+  // Purely visual — see review_table_frontend/index.html's history for why
+  // this must not receive real pointer events itself.
+  this.checkbox.style.pointerEvents = "none";
+  this.eGui.appendChild(this.checkbox);
+
+  this.menu = document.createElement("div");
+  this.menu.className = "select-all-menu";
+  this.pageOption = document.createElement("button");
+  this.pageOption.type = "button";
+  this.allOption = document.createElement("button");
+  this.allOption.type = "button";
+  this.menu.appendChild(this.pageOption);
+  this.menu.appendChild(this.allOption);
+  document.body.appendChild(this.menu);
+
+  this.pageOption.addEventListener("click", function (e) {
+    e.stopPropagation();
+    self.params.api.selectAllOnCurrentPage();
+    self.closeMenu();
+  });
+  this.allOption.addEventListener("click", function (e) {
+    e.stopPropagation();
+    self.params.api.selectAllFiltered();
+    self.closeMenu();
+  });
+
+  this.onGuiClick = function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var stats = self.computeStats();
+    // Anything already selected (this page only, or all pages) -> a click
+    // just clears it, same as a normal checkbox.
+    if (stats.selected > 0) {
+      self.params.api.deselectAllFiltered();
+      return;
+    }
+    self.openMenu(stats);
+  };
+  this.eGui.addEventListener("click", this.onGuiClick);
+
+  this.onOutsideClick = function (e) {
+    if (self.menu.classList.contains("open") && !self.menu.contains(e.target) && !self.eGui.contains(e.target)) {
+      self.closeMenu();
+    }
+  };
+  document.addEventListener("click", this.onOutsideClick);
+
+  this.onStateEvent = function () { self.updateCheckboxState(); };
+  params.api.addEventListener("selectionChanged", this.onStateEvent);
+  params.api.addEventListener("modelUpdated", this.onStateEvent);
+  params.api.addEventListener("paginationChanged", this.onStateEvent);
+
+  this.updateCheckboxState();
+};
+
+SelectAllHeaderComponent.prototype.computeStats = function () {
+  var total = 0, selected = 0;
+  this.params.api.forEachNodeAfterFilter(function (node) {
+    total++;
+    if (node.isSelected()) { selected++; }
+  });
+  var pageSize = this.params.api.paginationGetPageSize();
+  var currentPage = this.params.api.paginationGetCurrentPage();
+  var onPage = Math.max(0, Math.min(pageSize, total - currentPage * pageSize));
+  return { total: total, selected: selected, onPage: onPage };
+};
+
+SelectAllHeaderComponent.prototype.updateCheckboxState = function () {
+  var stats = this.computeStats();
+  this.checkbox.checked = stats.total > 0 && stats.selected === stats.total;
+  this.checkbox.indeterminate = stats.selected > 0 && stats.selected < stats.total;
+};
+
+SelectAllHeaderComponent.prototype.openMenu = function (stats) {
+  this.pageOption.textContent = "Select all on this page (" + stats.onPage + ")";
+  this.allOption.textContent = "Select all across all pages (" + stats.total + ")";
+  var rect = this.eGui.getBoundingClientRect();
+  this.menu.style.top = rect.bottom + "px";
+  this.menu.style.left = rect.left + "px";
+  this.menu.classList.add("open");
+};
+
+SelectAllHeaderComponent.prototype.closeMenu = function () {
+  this.menu.classList.remove("open");
+};
+
+SelectAllHeaderComponent.prototype.getGui = function () { return this.eGui; };
+SelectAllHeaderComponent.prototype.refresh = function () { return true; };
+
+SelectAllHeaderComponent.prototype.destroy = function () {
+  this.params.api.removeEventListener("selectionChanged", this.onStateEvent);
+  this.params.api.removeEventListener("modelUpdated", this.onStateEvent);
+  this.params.api.removeEventListener("paginationChanged", this.onStateEvent);
+  document.removeEventListener("click", this.onOutsideClick);
+  if (this.menu.parentNode) { this.menu.parentNode.removeChild(this.menu); }
+};
+
+var defaultColDef = { sortable: true, resizable: true, filter: true };
+
+var columnDefs = [
+  { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
+  { field: "name", headerName: "Name", flex: 1, minWidth: 180 },
+  { field: "brand", headerName: "Brand", width: 130, minWidth: 100 },
+  { field: "grade", headerName: "Grade", width: 90, minWidth: 70 },
+  { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
+  { field: "quantity", headerName: "Qty", width: 90, minWidth: 70, type: "numericColumn" },
+];
+
+// Mobile: name + price are the essentials (checkbox stays visible at every
+// size — selection is this page's whole purpose). Everything else
+// collapses away rather than needing a distinct card-view layout, same
+// approach as the Review & Export and Inventory grids.
+var MOBILE_VISIBLE_FIELDS = ["name", "price"];
+var MOBILE_BREAKPOINT_PX = 700;
+var wasMobile = false;
+
+// Both variants set `hide` explicitly (true AND false) on every column —
+// setGridOption("columnDefs", ...) merges new defs against AG Grid's
+// existing internal column state rather than fully resetting it, so a
+// colDef that never mentions `hide` at all does NOT clear a column that a
+// previous columnDefs swap had hidden; it silently stays hidden.
+var DESKTOP_COLUMN_DEFS = columnDefs.map(function (col) {
+  return Object.assign({}, col, { hide: false });
+});
+var MOBILE_COLUMN_DEFS = columnDefs.map(function (col) {
+  var c = Object.assign({}, col);
+  c.hide = MOBILE_VISIBLE_FIELDS.indexOf(col.field) === -1;
+  return c;
+});
+
+var COLUMN_STATE_KEY = "export_table_column_state_v1";
+
+function saveColumnState() {
+  try {
+    localStorage.setItem(COLUMN_STATE_KEY, JSON.stringify(gridApi.getColumnState()));
+  } catch (e) { /* localStorage unavailable — persistence just won't work this session */ }
+}
+function restoreColumnState() {
+  try {
+    var raw = localStorage.getItem(COLUMN_STATE_KEY);
+    if (raw) { gridApi.applyColumnState({ state: JSON.parse(raw), applyOrder: true }); }
+  } catch (e) { /* ignore malformed/missing saved state */ }
+}
+
+function buildColumnsPanel() {
+  var panel = document.getElementById("columns-panel");
+  panel.innerHTML = "";
+  columnDefs.forEach(function (col) {
+    var label = document.createElement("label");
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.addEventListener("change", function () {
+      gridApi.setColumnsVisible([col.field], cb.checked);
+      saveColumnState();
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(col.headerName));
+    panel.appendChild(label);
+  });
+}
+
+function applyResponsiveColumns() {
+  if (!gridApi) { return; }
+  // A width of 0 (or anything implausibly small) means the iframe hasn't
+  // actually been laid out by the parent page yet — not a real "mobile"
+  // reading.
+  if (window.innerWidth < 50) { return; }
+  var mobile = window.innerWidth < MOBILE_BREAKPOINT_PX;
+  if (mobile && !wasMobile) {
+    gridApi.setGridOption("columnDefs", MOBILE_COLUMN_DEFS);
+  } else if (!mobile && wasMobile) {
+    gridApi.setGridOption("columnDefs", DESKTOP_COLUMN_DEFS);
+    restoreColumnState(); // reapply any real saved user preference on top
+  }
+  wasMobile = mobile;
+  document.getElementById("columns-btn-wrap").style.display = mobile ? "none" : "";
+  if (mobile) { document.getElementById("columns-panel").classList.remove("open"); }
+}
+
+var _responsiveResizeTimer = null;
+function scheduleResponsiveColumnsCheck() {
+  if (_responsiveResizeTimer) { clearTimeout(_responsiveResizeTimer); }
+  _responsiveResizeTimer = setTimeout(applyResponsiveColumns, 150);
+}
+
+var gridOptions = {
+  theme: THEME,
+  columnDefs: columnDefs,
+  defaultColDef: defaultColDef,
+  rowData: [],
+  getRowId: function (params) { return params.data.id; },
+  animateRows: true,
+  rowHeight: 44,
+  rowSelection: {
+    mode: "multiRow",
+    checkboxes: true,
+    headerCheckbox: false,      // replaced by SelectAllHeaderComponent (this-page vs all-pages choice)
+    // Deliberately false, unlike Review & Export's grid: a normal click is
+    // part of every double-click, so "click anywhere selects" would
+    // collapse a multi-row selection down to just one row the instant you
+    // double-click it open to preview — exactly backwards for a page whose
+    // whole point is picking several products at once. Checkbox-only
+    // selection avoids that; double-click/Enter still opens the preview.
+    enableClickSelection: false,
+  },
+  selectionColumnDef: {
+    headerComponent: SelectAllHeaderComponent,
+    sortable: false,
+  },
+  pagination: true,
+  paginationPageSize: 20,
+  paginationPageSizeSelector: [10, 20, 50],
+  suppressPaginationPanel: true,  // using our own top, centered pagination bar instead
+  onSelectionChanged: reportSelection,
+  onRowDoubleClicked: function (event) { openRow(event.data); },
+  onCellKeyDown: function (event) {
+    var key = event.event ? event.event.key : null;
+    if (key === "Enter") { openRow(event.data); }
+  },
+  onPaginationChanged: updatePaginationBar,
+  // event.source guards against saving programmatic changes (responsive
+  // column hiding, applyColumnState()'s own internal flex-width
+  // recalculation, etc.) as if they were a real user preference — only
+  // "ui*" sources are an actual drag by the user's mouse.
+  onColumnMoved: function (event) { if (event.finished && event.source === "uiColumnMoved") { saveColumnState(); } },
+  onColumnResized: function (event) { if (event.finished && event.source === "uiColumnResized") { saveColumnState(); } },
+};
+
+function updatePaginationBar() {
+  if (!gridApi) { return; }
+  var current = gridApi.paginationGetCurrentPage();     // 0-indexed
+  var total = Math.max(1, gridApi.paginationGetTotalPages());
+  document.getElementById("page-indicator").textContent = "Page " + (current + 1) + " of " + total;
+  document.getElementById("prev-page-btn").disabled = current <= 0;
+  document.getElementById("next-page-btn").disabled = current >= total - 1;
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
+  restoreColumnState();
+  buildColumnsPanel();
+  applyResponsiveColumns();
+  if (window.ResizeObserver) {
+    new ResizeObserver(scheduleResponsiveColumnsCheck).observe(document.documentElement);
+  } else {
+    window.addEventListener("resize", scheduleResponsiveColumnsCheck);
+  }
+
+  document.getElementById("quick-filter").addEventListener("input", function (e) {
+    gridApi.setGridOption("quickFilterText", e.target.value);
+  });
+  document.getElementById("columns-btn").addEventListener("click", function () {
+    document.getElementById("columns-panel").classList.toggle("open");
+  });
+  document.addEventListener("click", function (e) {
+    var panel = document.getElementById("columns-panel");
+    var btn = document.getElementById("columns-btn");
+    if (panel.classList.contains("open") && e.target !== btn && !panel.contains(e.target)) {
+      panel.classList.remove("open");
+    }
+  });
+
+  document.getElementById("page-size-select").addEventListener("change", function (e) {
+    gridApi.setGridOption("paginationPageSize", parseInt(e.target.value, 10));
+  });
+  document.getElementById("prev-page-btn").addEventListener("click", function () {
+    gridApi.paginationGoToPreviousPage();
+  });
+  document.getElementById("next-page-btn").addEventListener("click", function () {
+    gridApi.paginationGoToNextPage();
+  });
+
+  sendToStreamlit({ type: "streamlit:componentReady", apiVersion: 1 });
+  setTimeout(setFrameHeight, 100);
+});
+
+window.addEventListener("message", function (event) {
+  var data = event.data;
+  if (!data || data.type !== "streamlit:render") { return; }
+  var args = data.args || {};
+  var rows = args.rows || [];
+  if (!gridApi) { return; }
+  gridApi.setGridOption("rowData", rows);
+
+  if (lastClearSeq === null) {
+    lastClearSeq = args.clear_seq;
+  } else if (args.clear_seq !== lastClearSeq) {
+    lastClearSeq = args.clear_seq;
+    gridApi.deselectAll();
+  }
+
+  setTimeout(setFrameHeight, 50);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,304 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.0.2/dist/ag-grid-community.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+               font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  #quick-filter {
+    flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 14px;
+  }
+  #quick-filter:focus { outline: 2px solid #38bdf8; }
+  #grid { width: 100%; height: 780px; }
+  .ag-row-selected-detail { background-color: #1e3a5f !important; }
+  #pagination-bar {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    margin-bottom: 8px; color: #f3f4f6; font-size: 13px; flex-wrap: wrap;
+  }
+  #pagination-bar select {
+    padding: 4px 8px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px;
+  }
+  #pagination-bar button {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer;
+  }
+  #pagination-bar button:hover:not(:disabled) { background: #293548; }
+  #pagination-bar button:disabled { opacity: 0.4; cursor: default; }
+  #columns-btn {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  #columns-btn:hover { background: #293548; }
+  #columns-panel {
+    position: absolute; z-index: 10; margin-top: 4px; padding: 8px;
+    background: #1f2937; border: 1px solid #293548; border-radius: 6px;
+    display: none; flex-direction: column; gap: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  #columns-panel.open { display: flex; }
+  #columns-panel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #f3f4f6; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Title, Triage, Grade, or Location" />
+  <div id="columns-btn-wrap" style="position: relative;">
+    <button id="columns-btn" type="button">☰ Columns</button>
+    <div id="columns-panel"></div>
+  </div>
+</div>
+<div id="pagination-bar">
+  <label>Show
+    <select id="page-size-select">
+      <option value="10">10</option>
+      <option value="20" selected>20</option>
+      <option value="50">50</option>
+    </select>
+    per page
+  </label>
+  <button id="prev-page-btn" type="button">◀ Previous</button>
+  <span id="page-indicator">Page 1 of 1</span>
+  <button id="next-page-btn" type="button">Next ▶</button>
+</div>
+<div id="grid"></div>
+<script>
+/* Same hand-rolled Streamlit component wire protocol as
+   review_table_frontend/index.html — see that file for the protocol
+   details. This is a deliberately separate (not shared) AG Grid instance:
+   Inventory's interaction is single-click-to-open-detail, with no bulk
+   selection, unlike Review & Export's checkbox multi-select. */
+function sendToStreamlit(msg) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), "*");
+}
+function setComponentValue(value) {
+  sendToStreamlit({ type: "streamlit:setComponentValue", value: value });
+}
+function setFrameHeight() {
+  var h = document.body.scrollHeight;
+  sendToStreamlit({ type: "streamlit:setFrameHeight", height: h });
+}
+
+var gridApi = null;
+var lastSelectedId = null;
+
+var THEME = agGrid.themeQuartz.withParams({
+  backgroundColor: "#111827",
+  foregroundColor: "#f3f4f6",
+  headerBackgroundColor: "#1f2937",
+  headerTextColor: "#f3f4f6",
+  oddRowBackgroundColor: "#161f2e",
+  rowHoverColor: "#1f2937",
+  selectedRowBackgroundColor: "#1e3a5f",
+  borderColor: "#293548",
+  accentColor: "#38bdf8",
+  chromeBackgroundColor: "#111827",
+});
+
+function priceCellFormatter(params) {
+  var v = params.value;
+  return (v === null || v === undefined || v === "") ? "" : "$" + Number(v).toFixed(2);
+}
+
+function openRow(data) {
+  if (!data) { return; }
+  setComponentValue({ open_id: data.id });
+}
+
+var defaultColDef = { sortable: true, resizable: true, filter: true };
+
+// Order matches the priority given in the spec for this table: SKU, Title,
+// Triage, Grade, Location, Price, BaseLinker — the same columns the old
+// st.dataframe-based table had, just rendered through AG Grid now.
+var columnDefs = [
+  { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
+  { field: "title", headerName: "Title", flex: 1, minWidth: 180 },
+  { field: "triage", headerName: "Triage", width: 170, minWidth: 130 },
+  { field: "grade", headerName: "Grade", width: 90, minWidth: 70 },
+  { field: "location", headerName: "Location", width: 130, minWidth: 100 },
+  { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
+  { field: "baselinker", headerName: "BaseLinker", width: 140, minWidth: 110 },
+];
+
+// Mobile: title + grade + price are the essentials — everything else
+// collapses away rather than needing a distinct card-view layout, same
+// approach as the Review & Export grid.
+var MOBILE_VISIBLE_FIELDS = ["title", "grade", "price"];
+var MOBILE_BREAKPOINT_PX = 700;
+var wasMobile = false;
+
+// Both variants set `hide` explicitly (true AND false) on every column —
+// setGridOption("columnDefs", ...) merges new defs against AG Grid's
+// existing internal column state rather than fully resetting it, so a
+// colDef that never mentions `hide` at all does NOT clear a column that a
+// previous columnDefs swap had hidden; it silently stays hidden. (Learned
+// the hard way building the Review & Export grid's responsive columns.)
+var DESKTOP_COLUMN_DEFS = columnDefs.map(function (col) {
+  return Object.assign({}, col, { hide: false });
+});
+var MOBILE_COLUMN_DEFS = columnDefs.map(function (col) {
+  var c = Object.assign({}, col);
+  c.hide = MOBILE_VISIBLE_FIELDS.indexOf(col.field) === -1;
+  return c;
+});
+
+var COLUMN_STATE_KEY = "inventory_table_column_state_v1";
+
+function saveColumnState() {
+  try {
+    localStorage.setItem(COLUMN_STATE_KEY, JSON.stringify(gridApi.getColumnState()));
+  } catch (e) { /* localStorage unavailable — persistence just won't work this session */ }
+}
+function restoreColumnState() {
+  try {
+    var raw = localStorage.getItem(COLUMN_STATE_KEY);
+    if (raw) { gridApi.applyColumnState({ state: JSON.parse(raw), applyOrder: true }); }
+  } catch (e) { /* ignore malformed/missing saved state */ }
+}
+
+function buildColumnsPanel() {
+  var panel = document.getElementById("columns-panel");
+  panel.innerHTML = "";
+  columnDefs.forEach(function (col) {
+    var label = document.createElement("label");
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.addEventListener("change", function () {
+      gridApi.setColumnsVisible([col.field], cb.checked);
+      saveColumnState();
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(col.headerName));
+    panel.appendChild(label);
+  });
+}
+
+function applyResponsiveColumns() {
+  if (!gridApi) { return; }
+  // A width of 0 (or anything implausibly small) means the iframe hasn't
+  // actually been laid out by the parent page yet — not a real "mobile"
+  // reading; trusting it caused a bogus lock into mobile mode on desktop
+  // loads in the Review & Export grid, fixed the same way here.
+  if (window.innerWidth < 50) { return; }
+  var mobile = window.innerWidth < MOBILE_BREAKPOINT_PX;
+  if (mobile && !wasMobile) {
+    gridApi.setGridOption("columnDefs", MOBILE_COLUMN_DEFS);
+  } else if (!mobile && wasMobile) {
+    gridApi.setGridOption("columnDefs", DESKTOP_COLUMN_DEFS);
+    restoreColumnState(); // reapply any real saved user preference on top
+  }
+  wasMobile = mobile;
+  document.getElementById("columns-btn-wrap").style.display = mobile ? "none" : "";
+  if (mobile) { document.getElementById("columns-panel").classList.remove("open"); }
+}
+
+var _responsiveResizeTimer = null;
+function scheduleResponsiveColumnsCheck() {
+  if (_responsiveResizeTimer) { clearTimeout(_responsiveResizeTimer); }
+  _responsiveResizeTimer = setTimeout(applyResponsiveColumns, 150);
+}
+
+var gridOptions = {
+  theme: THEME,
+  columnDefs: columnDefs,
+  defaultColDef: defaultColDef,
+  rowData: [],
+  getRowId: function (params) { return params.data.id; },
+  getRowClass: function (params) {
+    return params.data && params.data.id === lastSelectedId ? "ag-row-selected-detail" : "";
+  },
+  animateRows: true,
+  rowHeight: 44,
+  pagination: true,
+  paginationPageSize: 20,
+  paginationPageSizeSelector: [10, 20, 50],
+  suppressPaginationPanel: true,  // using our own top, centered pagination bar instead
+  onRowClicked: function (event) { openRow(event.data); },
+  onCellKeyDown: function (event) {
+    var key = event.event ? event.event.key : null;
+    if (key === "Enter") { openRow(event.data); }
+  },
+  onPaginationChanged: updatePaginationBar,
+  // event.source guards against saving programmatic changes (responsive
+  // column hiding, applyColumnState()'s own internal flex-width
+  // recalculation, etc.) as if they were a real user preference — only
+  // "ui*" sources are an actual drag by the user's mouse.
+  onColumnMoved: function (event) { if (event.finished && event.source === "uiColumnMoved") { saveColumnState(); } },
+  onColumnResized: function (event) { if (event.finished && event.source === "uiColumnResized") { saveColumnState(); } },
+};
+
+function updatePaginationBar() {
+  if (!gridApi) { return; }
+  var current = gridApi.paginationGetCurrentPage();     // 0-indexed
+  var total = Math.max(1, gridApi.paginationGetTotalPages());
+  document.getElementById("page-indicator").textContent = "Page " + (current + 1) + " of " + total;
+  document.getElementById("prev-page-btn").disabled = current <= 0;
+  document.getElementById("next-page-btn").disabled = current >= total - 1;
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
+  restoreColumnState();
+  buildColumnsPanel();
+  applyResponsiveColumns();
+  // ResizeObserver, not window's own "resize" event: at DOMContentLoaded
+  // time Streamlit hasn't necessarily finished sizing this iframe to match
+  // its final container width yet, so a single window-resize-only check
+  // can miss the real width entirely. See the Review & Export grid for the
+  // full story on why this matters.
+  if (window.ResizeObserver) {
+    new ResizeObserver(scheduleResponsiveColumnsCheck).observe(document.documentElement);
+  } else {
+    window.addEventListener("resize", scheduleResponsiveColumnsCheck);
+  }
+
+  document.getElementById("quick-filter").addEventListener("input", function (e) {
+    gridApi.setGridOption("quickFilterText", e.target.value);
+  });
+  document.getElementById("columns-btn").addEventListener("click", function () {
+    document.getElementById("columns-panel").classList.toggle("open");
+  });
+  document.addEventListener("click", function (e) {
+    var panel = document.getElementById("columns-panel");
+    var btn = document.getElementById("columns-btn");
+    if (panel.classList.contains("open") && e.target !== btn && !panel.contains(e.target)) {
+      panel.classList.remove("open");
+    }
+  });
+
+  document.getElementById("page-size-select").addEventListener("change", function (e) {
+    gridApi.setGridOption("paginationPageSize", parseInt(e.target.value, 10));
+  });
+  document.getElementById("prev-page-btn").addEventListener("click", function () {
+    gridApi.paginationGoToPreviousPage();
+  });
+  document.getElementById("next-page-btn").addEventListener("click", function () {
+    gridApi.paginationGoToNextPage();
+  });
+
+  sendToStreamlit({ type: "streamlit:componentReady", apiVersion: 1 });
+  setTimeout(setFrameHeight, 100);
+});
+
+window.addEventListener("message", function (event) {
+  var data = event.data;
+  if (!data || data.type !== "streamlit:render") { return; }
+  var args = data.args || {};
+  var rows = args.rows || [];
+  if (!gridApi) { return; }
+  gridApi.setGridOption("rowData", rows);
+
+  var selectedId = args.selected_id || null;
+  if (selectedId !== lastSelectedId) {
+    lastSelectedId = selectedId;
+    gridApi.redrawRows(); // re-run getRowClass so the highlighted row updates
+  }
+
+  setTimeout(setFrameHeight, 50);
+});
+</script>
+</body>
+</html>
