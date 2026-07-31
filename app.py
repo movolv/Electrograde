@@ -1862,21 +1862,6 @@ elif page == "🔍 Review & Export":
 
         _review_list_fragment()
 
-        if st.session_state.review_filtered_ids_cache:
-            st.divider()
-            open_col1, open_col2 = st.columns([3, 1])
-            with open_col1:
-                open_options = {
-                    f"{p.sku} — {p.name or '(no name)'}": p.id
-                    for p in review_products if p.id in st.session_state.review_filtered_ids_cache
-                }
-                open_label = st.selectbox("Open a product card", list(open_options.keys()), key="review_open_pick")
-            with open_col2:
-                st.write("")
-                if st.button("✏️ Open", use_container_width=True):
-                    st.session_state.review_open_product_id = open_options[open_label]
-                    st.rerun()
-
         if st.session_state.review_export_requested:
             st.session_state.review_export_requested = False
             selected_products = [
