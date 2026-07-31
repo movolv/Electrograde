@@ -37,6 +37,8 @@ from modules import (
     vision_grading,
 )
 from modules.models import Product
+from modules.review_table_component import review_table
+from modules.esc_listener_component import esc_listener
 
 load_dotenv()
 
@@ -81,12 +83,15 @@ def _ensure_thumbnail(image_path: str) -> Path | None:
 
 
 def _image_static_url(path: Path) -> str | None:
-    """Converts a path under STATIC_DIR into the URL it's servable at."""
+    """Converts a path under STATIC_DIR into the URL it's servable at.
+    Leading slash matters: this URL is used from inside the review_table
+    custom component's own iframe (a different path than the main page), so
+    a relative URL would resolve against the wrong base and 404."""
     try:
         rel = path.resolve().relative_to(STATIC_DIR)
     except (ValueError, OSError):
         return None
-    return f"app/static/{rel.as_posix()}"
+    return f"/app/static/{rel.as_posix()}"
 
 
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
@@ -506,9 +511,11 @@ def _init_state():
         "manifest_uploaded_name": None,
         "review_selected_ids": set(),   # product ids checked for bulk export
         "review_open_product_id": None,  # product id whose card is open, or None for list view
-        "review_filtered_ids_cache": [],  # last-rendered filtered/search order, for Previous/Next
-        "review_table_key_seed": 0,     # bumped to force the selection grid to remount (clear checkboxes)
+        "review_filtered_ids_cache": [],  # ids currently eligible for the list, for Previous/Next
         "review_export_requested": False,  # set inside the fragment, consumed outside it to open the dialog
+        "review_clear_seq": 0,          # bumped to tell the grid to deselect all (no remount needed)
+        "review_focus_id": "",          # product id the grid should scroll to/highlight on next render
+        "review_last_esc_value": None,  # last value seen from esc_listener(), to detect a new Escape press
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1751,7 +1758,7 @@ elif page == "🔍 Review & Export":
             if fail_count:
                 st.markdown(f"**{fail_count} product(s) failed**")
             if st.button("Close", use_container_width=True, key="review_export_done"):
-                st.session_state.review_table_key_seed += 1  # remount the grid so its checkboxes reflect the new state
+                st.session_state.review_clear_seq += 1  # tell the grid to deselect all rows
                 st.rerun()
 
     @st.dialog("Photo", width="large")
@@ -1786,33 +1793,12 @@ elif page == "🔍 Review & Export":
 
         @st.fragment
         def _review_list_fragment():
-            status_filter = st.radio(
-                "Status",
-                options=list(REVIEW_STATUS_LABELS.keys()),
-                format_func=lambda k: REVIEW_STATUS_LABELS[k],
-                horizontal=True,
-                key="review_status_filter",
-            )
-            search_q = st.text_input(
-                "🔍 Search by SKU, Product Name, Brand, Model, or Barcode",
-                key="review_search",
-            )
-
+            # Sorting/filtering/search are handled inside the grid itself now
+            # (quick-filter box + per-column filters/sort) — Python only
+            # decides which products are *eligible* to appear at all.
             filtered = review_products
-            if status_filter:
-                filtered = [p for p in filtered if _review_status_of(p) == status_filter]
-            if search_q.strip():
-                q = search_q.strip().lower()
-                def _matches(p: Product) -> bool:
-                    haystack = " ".join([
-                        p.sku, p.name, p.brand, p.model,
-                        p.ean, p.manifest_barcode, p.scanned_barcode,
-                    ]).lower()
-                    return q in haystack
-                filtered = [p for p in filtered if _matches(p)]
-
             st.session_state.review_filtered_ids_cache = [p.id for p in filtered]
-            st.caption(f"{len(filtered)} product(s)")
+            st.caption(f"{len(filtered)} product(s) total")
 
             if not filtered:
                 st.session_state.review_selected_ids = set()
@@ -1827,41 +1813,31 @@ elif page == "🔍 Review & Export":
                         photo_url = _image_static_url(thumb)
                 table_rows.append({
                     "id": p.id,
-                    "Photo": photo_url,
-                    "SKU": p.sku,
-                    "Product Name": p.name,
-                    "Grade": p.grade or "—",
-                    "Status": REVIEW_STATUS_LABELS[_review_status_of(p)],
-                    "Date": (
+                    "photo_url": photo_url,
+                    "sku": p.sku,
+                    "name": p.name,
+                    "grade": p.grade or "—",
+                    "status": REVIEW_STATUS_LABELS[_review_status_of(p)],
+                    "date": (
                         time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
                         if p.exported_at else "—"
                     ),
                 })
-            table_df = pd.DataFrame(table_rows)
 
-            table_key = f"review_table_{st.session_state.review_table_key_seed}"
-            event = st.dataframe(
-                table_df,
-                column_config={
-                    "id": None,
-                    "Photo": st.column_config.ImageColumn("Photo"),
-                    "SKU": st.column_config.TextColumn("SKU"),
-                    "Product Name": st.column_config.TextColumn("Product Name"),
-                    "Grade": st.column_config.TextColumn("Grade"),
-                    "Status": st.column_config.TextColumn("Status"),
-                    "Date": st.column_config.TextColumn("Date"),
-                },
-                hide_index=True,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode="multi-row",
-                key=table_key,
+            focus_id = st.session_state.review_focus_id
+            st.session_state.review_focus_id = ""  # one-shot: only focus once
+
+            result = review_table(
+                rows=table_rows,
+                focus_id=focus_id,
+                clear_seq=st.session_state.review_clear_seq,
+                key="review_table",
             )
-
-            selected_rows = list(event.selection["rows"]) if event and event.selection else []
-            st.session_state.review_selected_ids = {
-                table_df.iloc[i]["id"] for i in selected_rows
-            }
+            if result:
+                st.session_state.review_selected_ids = set(result.get("selected_ids") or [])
+                if result.get("open_id"):
+                    st.session_state.review_open_product_id = result["open_id"]
+                    st.rerun()  # escape fragment scope so the card view (below) renders
 
             n_selected = len(st.session_state.review_selected_ids)
             st.caption(f"Selected: {n_selected} product(s)")
@@ -1881,7 +1857,7 @@ elif page == "🔍 Review & Export":
                 if n_selected > 0:
                     if st.button("✖ Clear Selection", use_container_width=True, key="review_clear_selection"):
                         st.session_state.review_selected_ids = set()
-                        st.session_state.review_table_key_seed += 1  # remount the grid so checkboxes visually clear
+                        st.session_state.review_clear_seq += 1  # tell the grid to deselect all rows
                         st.rerun()
 
         _review_list_fragment()
@@ -1912,6 +1888,12 @@ elif page == "🔍 Review & Export":
 
     else:
         # -------------------------------------------------------- CARD VIEW --
+        esc_value = esc_listener(key="review_esc")
+        if esc_value is not None and esc_value != st.session_state.review_last_esc_value:
+            st.session_state.review_last_esc_value = esc_value
+            st.session_state.review_open_product_id = None
+            st.rerun()
+
         pid = st.session_state.review_open_product_id
         p = review_by_id.get(pid)
         if p is None:
@@ -2038,6 +2020,8 @@ elif page == "🔍 Review & Export":
                         p.review_status = "edited"
 
                     inventory_store.save_product(p)
+                    st.session_state.review_open_product_id = None
+                    st.session_state.review_focus_id = p.id  # scroll/highlight this row back in the list
                     st.success("Saved.")
                     st.rerun()
 

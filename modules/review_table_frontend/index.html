@@ -1,0 +1,226 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.0.2/dist/ag-grid-community.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+               font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #quick-filter {
+    flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 14px;
+  }
+  #quick-filter:focus { outline: 2px solid #38bdf8; }
+  #grid { width: 100%; height: 480px; }
+  #columns-btn {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid #293548;
+    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  #columns-btn:hover { background: #293548; }
+  #columns-panel {
+    position: absolute; z-index: 10; margin-top: 4px; padding: 8px;
+    background: #1f2937; border: 1px solid #293548; border-radius: 6px;
+    display: none; flex-direction: column; gap: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  #columns-panel.open { display: flex; }
+  #columns-panel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #f3f4f6; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Product Name, Brand, Model, or Barcode" />
+  <div style="position: relative;">
+    <button id="columns-btn" type="button">☰ Columns</button>
+    <div id="columns-panel"></div>
+  </div>
+</div>
+<div id="grid"></div>
+<script>
+/* ---- Streamlit component wire protocol (hand-rolled, no streamlit-component-lib) ----
+   Python -> here:  {type: "streamlit:render", args: {...}}
+   here -> Python:   {type: "streamlit:componentReady", apiVersion: 1}
+                      {type: "streamlit:setComponentValue", value: <json>}
+                      {type: "streamlit:setFrameHeight", height: <number>}
+*/
+function sendToStreamlit(msg) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), "*");
+}
+function setComponentValue(value) {
+  sendToStreamlit({ type: "streamlit:setComponentValue", value: value });
+}
+function setFrameHeight() {
+  var h = document.body.scrollHeight;
+  sendToStreamlit({ type: "streamlit:setFrameHeight", height: h });
+}
+
+var gridApi = null;
+var lastFocusId = null;
+var lastClearSeq = null;
+
+var THEME = agGrid.themeQuartz.withParams({
+  backgroundColor: "#111827",
+  foregroundColor: "#f3f4f6",
+  headerBackgroundColor: "#1f2937",
+  headerTextColor: "#f3f4f6",
+  oddRowBackgroundColor: "#161f2e",
+  rowHoverColor: "#1f2937",
+  selectedRowBackgroundColor: "#1e3a5f",
+  borderColor: "#293548",
+  accentColor: "#38bdf8",
+  chromeBackgroundColor: "#111827",
+});
+
+function photoCellRenderer(params) {
+  if (!params.value) { return ""; }
+  var img = document.createElement("img");
+  img.src = params.value;
+  img.style.height = "36px";
+  img.style.width = "36px";
+  img.style.objectFit = "cover";
+  img.style.borderRadius = "4px";
+  img.style.marginTop = "4px";
+  return img;
+}
+
+function getSelectedIds() {
+  return gridApi.getSelectedRows().map(function (r) { return r.id; });
+}
+
+function reportSelection() {
+  setComponentValue({ selected_ids: getSelectedIds(), open_id: null });
+}
+
+function openRow(data) {
+  if (!data) { return; }
+  setComponentValue({ selected_ids: getSelectedIds(), open_id: data.id });
+}
+
+var defaultColDef = { sortable: true, resizable: true, filter: true };
+
+var columnDefs = [
+  {
+    field: "photo_url", headerName: "Photo", cellRenderer: photoCellRenderer,
+    width: 70, sortable: false, filter: false, resizable: false,
+    checkboxSelection: true, headerCheckboxSelection: true,
+  },
+  { field: "sku", headerName: "SKU", width: 110 },
+  { field: "name", headerName: "Product Name", flex: 1, minWidth: 200 },
+  { field: "grade", headerName: "Grade", width: 90 },
+  { field: "status", headerName: "Status", width: 130 },
+  { field: "date", headerName: "Date", width: 120 },
+];
+
+var COLUMN_STATE_KEY = "review_table_column_state_v1";
+
+function saveColumnState() {
+  try {
+    localStorage.setItem(COLUMN_STATE_KEY, JSON.stringify(gridApi.getColumnState()));
+  } catch (e) { /* localStorage unavailable — persistence just won't work this session */ }
+}
+function restoreColumnState() {
+  try {
+    var raw = localStorage.getItem(COLUMN_STATE_KEY);
+    if (raw) { gridApi.applyColumnState({ state: JSON.parse(raw), applyOrder: true }); }
+  } catch (e) { /* ignore malformed/missing saved state */ }
+}
+
+function buildColumnsPanel() {
+  var panel = document.getElementById("columns-panel");
+  panel.innerHTML = "";
+  columnDefs.forEach(function (col) {
+    if (col.field === "photo_url") { return; } // always visible (carries the selection checkbox)
+    var label = document.createElement("label");
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.addEventListener("change", function () {
+      gridApi.setColumnsVisible([col.field], cb.checked);
+      saveColumnState();
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(col.headerName));
+    panel.appendChild(label);
+  });
+}
+
+var gridOptions = {
+  theme: THEME,
+  columnDefs: columnDefs,
+  defaultColDef: defaultColDef,
+  rowData: [],
+  getRowId: function (params) { return params.data.id; },
+  domLayout: "autoHeight",
+  animateRows: true,
+  rowSelection: {
+    mode: "multiRow",
+    checkboxes: false,          // handled by the Photo column's checkboxSelection above
+    headerCheckbox: false,
+    enableClickSelection: true, // single click anywhere on the row selects it
+  },
+  onSelectionChanged: reportSelection,
+  onRowDoubleClicked: function (event) { openRow(event.data); },
+  onCellKeyDown: function (event) {
+    var key = event.event ? event.event.key : null;
+    if (key === "Enter") { openRow(event.data); }
+  },
+  onGridSizeChanged: setFrameHeight,
+  onRowDataUpdated: function () { setTimeout(setFrameHeight, 30); },
+  onColumnMoved: function (event) { if (event.finished) { saveColumnState(); } },
+  onColumnResized: function (event) { if (event.finished) { saveColumnState(); } },
+};
+
+document.addEventListener("DOMContentLoaded", function () {
+  gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
+  restoreColumnState();
+  buildColumnsPanel();
+
+  document.getElementById("quick-filter").addEventListener("input", function (e) {
+    gridApi.setGridOption("quickFilterText", e.target.value);
+  });
+  document.getElementById("columns-btn").addEventListener("click", function () {
+    document.getElementById("columns-panel").classList.toggle("open");
+  });
+  document.addEventListener("click", function (e) {
+    var panel = document.getElementById("columns-panel");
+    var btn = document.getElementById("columns-btn");
+    if (panel.classList.contains("open") && e.target !== btn && !panel.contains(e.target)) {
+      panel.classList.remove("open");
+    }
+  });
+
+  sendToStreamlit({ type: "streamlit:componentReady", apiVersion: 1 });
+});
+
+window.addEventListener("message", function (event) {
+  var data = event.data;
+  if (!data || data.type !== "streamlit:render") { return; }
+  var args = data.args || {};
+  var rows = args.rows || [];
+  if (!gridApi) { return; }
+  gridApi.setGridOption("rowData", rows);
+
+  if (lastClearSeq === null) {
+    lastClearSeq = args.clear_seq;
+  } else if (args.clear_seq !== lastClearSeq) {
+    lastClearSeq = args.clear_seq;
+    gridApi.deselectAll();
+  }
+
+  var focusId = args.focus_id;
+  if (focusId && focusId !== lastFocusId) {
+    lastFocusId = focusId;
+    setTimeout(function () {
+      var node = gridApi.getRowNode(focusId);
+      if (node) {
+        gridApi.ensureNodeVisible(node, "middle");
+        gridApi.setFocusedCell(node.rowIndex, "sku");
+        gridApi.flashCells({ rowNodes: [node] });
+      }
+    }, 60);
+  }
+  setTimeout(setFrameHeight, 50);
+});
+</script>
+</body>
+</html>

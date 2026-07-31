@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8" /></head>
+<body>
+<script>
+/* Tiny sibling to review_table_frontend's component: same hand-rolled
+   Streamlit component wire protocol, just for one thing — report a single
+   Escape keypress back to Python so the Review Card can close on Esc
+   (the card is plain Streamlit content, not inside the grid's iframe, so
+   it needs its own listener rather than piggybacking on the grid). */
+function sendToStreamlit(msg) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), "*");
+}
+window.parent.document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") {
+    sendToStreamlit({ type: "streamlit:setComponentValue", value: Date.now() });
+  }
+});
+sendToStreamlit({ type: "streamlit:setFrameHeight", height: 0 });
+sendToStreamlit({ type: "streamlit:componentReady", apiVersion: 1 });
+</script>
+</body>
+</html>
