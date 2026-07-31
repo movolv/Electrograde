@@ -472,7 +472,14 @@ def sku_folder_name(sku: str, product_id: str) -> str:
 st.set_page_config(
     page_title="ElectroGrader",
     page_icon="📱",
-    layout="centered",
+    # Every other page is deliberately narrow/mobile-first (photo capture,
+    # single-column forms) — Review & Export is the one desktop-oriented,
+    # data-grid-heavy page, so it alone gets the wide layout. st.session_state
+    # already holds last run's sidebar radio value (via its key="page" below)
+    # before the radio widget itself re-renders, which is what makes a
+    # per-page layout possible at all — set_page_config must be the first
+    # Streamlit call, before the radio exists to read from directly.
+    layout="wide" if st.session_state.get("page") == "🔍 Review & Export" else "centered",
     initial_sidebar_state="collapsed",
 )
 pwa.inject_pwa_head()
@@ -614,6 +621,7 @@ page = st.sidebar.radio(
     "Navigate",
     ["🆕 New Item", "📥 Import Manifest", "📦 Inventory", "🔍 Review & Export", "📤 CSV/Excel Export"],
     label_visibility="collapsed",
+    key="page",
 )
 
 if not _ai_configured():
