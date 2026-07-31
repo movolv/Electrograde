@@ -6,7 +6,7 @@
 <style>
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
                font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
-  #toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
   #quick-filter {
     flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid #293548;
     background: #1f2937; color: #f3f4f6; font-size: 14px;
@@ -15,7 +15,7 @@
   #grid { width: 100%; height: 600px; }
   #pagination-bar {
     display: flex; align-items: center; justify-content: center; gap: 12px;
-    margin-bottom: 8px; color: #f3f4f6; font-size: 13px;
+    margin-bottom: 8px; color: #f3f4f6; font-size: 13px; flex-wrap: wrap;
   }
   #pagination-bar select {
     padding: 4px 8px; border-radius: 6px; border: 1px solid #293548;
@@ -55,7 +55,7 @@
 <body>
 <div id="toolbar">
   <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Product Name, Brand, Model, or Barcode" />
-  <div style="position: relative;">
+  <div id="columns-btn-wrap" style="position: relative;">
     <button id="columns-btn" type="button">☰ Columns</button>
     <div id="columns-panel"></div>
   </div>
@@ -266,20 +266,61 @@ SelectAllHeaderComponent.prototype.destroy = function () {
 
 var defaultColDef = { sortable: true, resizable: true, filter: true };
 
+function priceCellFormatter(params) {
+  var v = params.value;
+  return (v === null || v === undefined || v === "") ? "" : "$" + Number(v).toFixed(2);
+}
+
+// Order matters: desktop's must-have set (photo, sku, name, quantity, price)
+// comes first, left to right, matching the priority given in the spec;
+// grade/status/date follow as additional desktop-only columns. Mobile hides
+// everything outside MOBILE_VISIBLE_FIELDS below, regardless of order.
 var columnDefs = [
   {
     field: "photo_url", headerName: "Photo", cellRenderer: photoCellRenderer,
     width: 110, minWidth: 60, maxWidth: 400, sortable: false, filter: false, resizable: true,
   },
-  { field: "sku", headerName: "SKU", width: 110 },
-  { field: "name", headerName: "Product Name", flex: 1, minWidth: 200 },
-  { field: "grade", headerName: "Grade", width: 90 },
-  { field: "quantity", headerName: "Qty", width: 90, type: "numericColumn" },
-  { field: "status", headerName: "Status", width: 130 },
-  { field: "date", headerName: "Date", width: 120 },
+  { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
+  { field: "name", headerName: "Product Name", flex: 1, minWidth: 160 },
+  { field: "quantity", headerName: "Qty", width: 90, minWidth: 70, type: "numericColumn" },
+  { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
+  { field: "grade", headerName: "Grade", width: 90, minWidth: 70 },
+  { field: "status", headerName: "Status", width: 130, minWidth: 110 },
+  { field: "date", headerName: "Date", width: 120, minWidth: 100 },
 ];
 
-var COLUMN_STATE_KEY = "review_table_column_state_v1";
+// Mobile: show only the essentials (checkbox column is separate/always
+// shown). Everything else collapses away rather than needing a distinct
+// card-view layout — same grid, same data, fewer visible columns, and
+// compact widths so those few columns actually fit a phone screen without
+// a horizontal scroll (their normal desktop widths alone still add up to
+// more than a typical phone viewport).
+var MOBILE_VISIBLE_FIELDS = ["photo_url", "name", "price"];
+var MOBILE_BREAKPOINT_PX = 700;
+var wasMobile = false;
+// Both variants set `hide` explicitly (true AND false) on every column —
+// setGridOption("columnDefs", ...) merges new defs against AG Grid's
+// existing internal column state rather than fully resetting it, so a
+// colDef that never mentions `hide` at all does NOT clear a column that a
+// previous columnDefs swap had hidden; it silently stays hidden.
+var DESKTOP_COLUMN_DEFS = columnDefs.map(function (col) {
+  return Object.assign({}, col, { hide: false });
+});
+var MOBILE_COLUMN_DEFS = columnDefs.map(function (col) {
+  var c = Object.assign({}, col);
+  c.hide = col.field !== "photo_url" && col.field !== "name" && MOBILE_VISIBLE_FIELDS.indexOf(col.field) === -1;
+  if (col.field === "photo_url") { c.width = 56; }
+  else if (col.field === "price") { c.width = 76; }
+  return c;
+});
+
+// Bumped from v1: an earlier build of the responsive columns feature had a
+// bug where mobile's column-hiding got persisted as if it were a real user
+// preference (see the event.source check in onColumnMoved/onColumnResized
+// below) — a new key means any browser that already saved that bad state
+// starts clean instead of being stuck with columns wrongly hidden on
+// desktop forever.
+var COLUMN_STATE_KEY = "review_table_column_state_v2";
 
 function saveColumnState() {
   try {
@@ -310,6 +351,40 @@ function buildColumnsPanel() {
     label.appendChild(document.createTextNode(col.headerName));
     panel.appendChild(label);
   });
+}
+
+function applyResponsiveColumns() {
+  if (!gridApi) { return; }
+  // A width of 0 (or anything implausibly small) means the iframe hasn't
+  // actually been laid out by the parent page yet — not a real "mobile"
+  // reading. Trusting it caused a bogus lock into mobile mode on desktop
+  // loads that only self-corrected once a later, much slower ResizeObserver
+  // firing happened to catch the true width; skipping bogus reads instead
+  // means desktop never mistakenly flips to mobile in the first place.
+  if (window.innerWidth < 50) { return; }
+  var mobile = window.innerWidth < MOBILE_BREAKPOINT_PX;
+  if (mobile && !wasMobile) {
+    // Redefine the whole columnDefs set rather than toggling visibility
+    // and width as two separate API calls — applyColumnState() proved
+    // unreliable for setting width on some columns immediately after a
+    // visibility change on a fresh load, so the columnDefs themselves are
+    // now the single source of truth for "what mobile looks like".
+    gridApi.setGridOption("columnDefs", MOBILE_COLUMN_DEFS);
+    gridApi.applyColumnState({ state: [{ colId: "ag-Grid-SelectionColumn", width: 36 }] });
+  } else if (!mobile && wasMobile) {
+    gridApi.setGridOption("columnDefs", DESKTOP_COLUMN_DEFS);
+    gridApi.applyColumnState({ state: [{ colId: "ag-Grid-SelectionColumn", width: 50 }] });
+    restoreColumnState(); // reapply any real saved user preference on top
+  }
+  wasMobile = mobile;
+  document.getElementById("columns-btn-wrap").style.display = mobile ? "none" : "";
+  if (mobile) { document.getElementById("columns-panel").classList.remove("open"); }
+}
+
+var _responsiveResizeTimer = null;
+function scheduleResponsiveColumnsCheck() {
+  if (_responsiveResizeTimer) { clearTimeout(_responsiveResizeTimer); }
+  _responsiveResizeTimer = setTimeout(applyResponsiveColumns, 150);
 }
 
 var gridOptions = {
@@ -346,8 +421,12 @@ var gridOptions = {
     if (key === "Enter") { openRow(event.data); }
   },
   onPaginationChanged: updatePaginationBar,
-  onColumnMoved: function (event) { if (event.finished) { saveColumnState(); } },
-  onColumnResized: function (event) { if (event.finished) { saveColumnState(); } },
+  // event.source guards against saving programmatic changes (responsive
+  // column hiding, applyColumnState()'s own internal flex-width
+  // recalculation, etc.) as if they were a real user preference — only
+  // "ui*" sources are an actual drag by the user's mouse.
+  onColumnMoved: function (event) { if (event.finished && event.source === "uiColumnMoved") { saveColumnState(); } },
+  onColumnResized: function (event) { if (event.finished && event.source === "uiColumnResized") { saveColumnState(); } },
 };
 
 function updatePaginationBar() {
@@ -363,6 +442,20 @@ document.addEventListener("DOMContentLoaded", function () {
   gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
   restoreColumnState();
   buildColumnsPanel();
+  applyResponsiveColumns();
+  // ResizeObserver, not window's own "resize" event: at DOMContentLoaded
+  // time Streamlit hasn't necessarily finished sizing this iframe to match
+  // its final container width yet (it can still be at the browser's
+  // default ~300px), so the single applyResponsiveColumns() call above can
+  // read a stale width and wrongly latch into mobile mode with nothing to
+  // correct it afterward — window "resize" only fires on later changes, not
+  // on that initial layout convergence. ResizeObserver instead re-fires
+  // immediately once the real size is known, and on every change after.
+  if (window.ResizeObserver) {
+    new ResizeObserver(scheduleResponsiveColumnsCheck).observe(document.documentElement);
+  } else {
+    window.addEventListener("resize", scheduleResponsiveColumnsCheck);
+  }
 
   document.getElementById("quick-filter").addEventListener("input", function (e) {
     gridApi.setGridOption("quickFilterText", e.target.value);

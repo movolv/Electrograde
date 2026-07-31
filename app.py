@@ -1840,6 +1840,7 @@ elif page == "🔍 Review & Export":
                     "name": p.name,
                     "grade": p.grade or "—",
                     "quantity": p.quantity or 1,
+                    "price": p.price or 0,
                     "status": REVIEW_STATUS_LABELS[_review_status_of(p)],
                     "date": (
                         time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
