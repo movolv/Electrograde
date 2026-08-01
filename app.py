@@ -19,8 +19,13 @@ import pandas as pd
 from PIL import Image, ImageOps
 
 from modules import (
+    audit_store,
+    auth,
+    auth_cookie,
+    auth_store,
     barcode_scanner,
     baselinker_client,
+    company_store,
     description_gen,
     export,
     identifier_lookup,
@@ -521,13 +526,64 @@ st.set_page_config(
 )
 pwa.inject_pwa_head()
 
+# ------------------------------------------------------------------- auth --
+
+def _resolve_current_user():
+    """None if nobody's logged in. Checks the in-memory session first (free,
+    true for every rerun within a live browser connection), then falls back
+    to the session cookie (see modules/auth_cookie.py) for a brand-new
+    connection — a hard refresh or a new tab — via a DB-backed session
+    lookup that also re-validates the user and their company are still
+    active on every check."""
+    if st.session_state.get("auth_user") is not None:
+        return st.session_state["auth_user"]
+    token = st.context.cookies.get(auth_cookie.COOKIE_NAME)
+    if token:
+        user = auth.validate_session(token)
+        if user is not None:
+            st.session_state["auth_user"] = user
+            st.session_state["auth_token"] = token
+            return user
+    return None
+
+
+def _render_login_form():
+    st.title("📱 ElectroGrader")
+    st.subheader("Log in")
+    with st.form("login_form"):
+        email_in = st.text_input("Email")
+        password_in = st.text_input("Password", type="password")
+        if st.form_submit_button("Log in", type="primary", use_container_width=True):
+            user = auth.verify_login(email_in, password_in)
+            if user is None:
+                st.error("Invalid email or password.")
+            else:
+                token = auth.create_session(user.id)
+                auth_cookie.set_session_cookie(token, auth.SESSION_TTL_SECONDS)
+                st.session_state["auth_user"] = user
+                st.session_state["auth_token"] = token
+                # The cookie is set via a small injected iframe's own script
+                # (see modules/auth_cookie.py) — an immediate st.rerun() can
+                # tear the page down before the browser has actually loaded
+                # and executed that script, silently dropping the cookie.
+                # A brief pause gives it time to run first.
+                time.sleep(0.35)
+                st.rerun()
+
+
+current_user = _resolve_current_user()
+if current_user is None:
+    _render_login_form()
+    st.stop()
+
+current_company = company_store.get_company(current_user.company_id)
+
 # ---------------------------------------------------------------- session --
 
 def _init_state():
     defaults = {
-        "company_id": "default",
         "wizard_step": 1,
-        "product": Product(),
+        "product": Product(company_id=current_user.company_id),
         "captured_photos": [],       # list of raw bytes
         "pending_photos": {},        # job_id -> concurrent.futures.Future,
                                       # still-processing captures (see
@@ -572,6 +628,14 @@ def _init_state():
 
 
 _init_state()
+
+# Re-derived from the authenticated session on every single script run, not
+# just seeded once — this is what makes company_id "never user-editable
+# again" now that the free-text sidebar box is gone.
+st.session_state["company_id"] = current_user.company_id
+st.session_state["user_id"] = current_user.id
+st.session_state["role"] = current_user.role
+st.session_state["user_name"] = current_user.name
 
 
 def reset_wizard():
@@ -645,7 +709,8 @@ def _confirm_delete_batch_dialog(batch, linked_products):
             deleted_count = inventory_store.delete_products_by_manifest(
                 batch.id, company_id=st.session_state.company_id
             )
-            manifest_store.delete_batch(batch.id)
+            manifest_store.delete_batch(batch.id, st.session_state.company_id)
+            audit_store.log_audit(st.session_state.company_id, current_user.id, "DELETE_MANIFEST", "manifest_batch", batch.id)
             st.success(f"Deleted batch and {deleted_count} pending product(s).")
             st.rerun()
 
@@ -653,15 +718,24 @@ def _confirm_delete_batch_dialog(batch, linked_products):
 # ------------------------------------------------------------------- nav --
 
 st.sidebar.title("📱 ElectroGrader")
-st.sidebar.text_input(
-    "Company",
-    key="company_id",
-    help="Scopes inventory per business. Each company only sees its own items — "
-    "groundwork for future multi-company use.",
-)
+st.sidebar.caption(f"🏢 {current_company.name if current_company else current_user.company_id}")
+st.sidebar.caption(f"👤 {current_user.name} · {current_user.role}")
+if st.sidebar.button("Log out", use_container_width=True):
+    auth.invalidate_session(st.session_state.get("auth_token", ""))
+    auth_cookie.clear_session_cookie()
+    for k in ("auth_user", "auth_token"):
+        st.session_state.pop(k, None)
+    time.sleep(0.35)  # let the cookie-clearing iframe script actually run first
+    st.rerun()
+st.sidebar.divider()
+
+_nav_pages = ["🆕 New Item", "📦 Inventory", "🔍 Review & Export", "📤 CSV/Excel Export"]
+if current_user.role == auth.ROLE_ADMIN:
+    _nav_pages.insert(1, "📥 Import Manifest")
+    _nav_pages.append("👥 Manage Users")
 page = st.sidebar.radio(
     "Navigate",
-    ["🆕 New Item", "📥 Import Manifest", "📦 Inventory", "🔍 Review & Export", "📤 CSV/Excel Export"],
+    _nav_pages,
     label_visibility="collapsed",
     key="page",
 )
@@ -725,7 +799,7 @@ if page == "🆕 New Item":
                         for d in drafts
                     }
                     chosen_label = st.selectbox("Pick a pending manifest item", list(options.keys()))
-                    chosen = inventory_store.get_product(options[chosen_label])
+                    chosen = inventory_store.get_product(options[chosen_label], st.session_state.company_id)
 
                     st.write(f"**SKU:** {chosen.sku or '—'}")
                     st.write(f"**Item description:** {chosen.manifest_item_description}")
@@ -1227,6 +1301,11 @@ if page == "🆕 New Item":
 # ======================================================= IMPORT MANIFEST =
 elif page == "📥 Import Manifest":
     st.title("📥 Import Manifest")
+    try:
+        auth.require_role(current_user, auth.ROLE_ADMIN)
+    except PermissionError:
+        st.error("Admins only.")
+        st.stop()
     st.caption(
         "Upload an Amazon liquidation manifest (.xlsx or .csv). Only these "
         "fields are imported: Target #, Subcategory, ASIN, EAN/Barcode, Item "
@@ -1444,9 +1523,10 @@ elif page == "📦 Inventory":
 
     def _delete_button(p: Product):
         if st.button("🗑️ Delete", key=f"del_{p.id}"):
-            excel_warning = inventory_store.delete_product(p.id)
+            excel_warning = inventory_store.delete_product(p.id, p.company_id)
             if excel_warning:
                 st.warning(excel_warning)
+            audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
             st.rerun()
 
     def _render_full_detail(p: Product, tier_label: str = ""):
@@ -1537,8 +1617,8 @@ elif page == "📦 Inventory":
             else:
                 st.caption("Not yet tested — still a pending manifest draft.")
 
-        events = repair_store.list_repair_events(p.id)
-        repair_total = repair_store.total_repair_cost(p.id)
+        events = repair_store.list_repair_events(p.id, p.company_id)
+        repair_total = repair_store.total_repair_cost(p.id, p.company_id)
         with st.expander(f"🛠️ Repair History ({len(events)}) — ${repair_total:.2f} total"):
             for e in events:
                 rc1, rc2 = st.columns([5, 1])
@@ -1548,7 +1628,7 @@ elif page == "📦 Inventory":
                              + (f" — {e.technician}" if e.technician else ""))
                 with rc2:
                     if st.button("🗑️", key=f"delrepair_{e.id}"):
-                        repair_store.delete_repair_event(e.id)
+                        repair_store.delete_repair_event(e.id, p.company_id)
                         st.rerun()
             with st.form(key=f"addrepair_{p.id}", clear_on_submit=True):
                 rf1, rf2, rf3 = st.columns([3, 1, 1])
@@ -1562,7 +1642,7 @@ elif page == "📦 Inventory":
                     if r_desc.strip():
                         repair_store.add_repair_event(
                             repair_store.RepairEvent(
-                                product_id=p.id, description=r_desc.strip(),
+                                product_id=p.id, company_id=p.company_id, description=r_desc.strip(),
                                 cost=r_cost, technician=r_tech.strip(),
                             )
                         )
@@ -1577,7 +1657,7 @@ elif page == "📦 Inventory":
             if p.price_reasoning:
                 st.caption(p.price_reasoning)
 
-            listings = marketplace_store.list_listings(p.id)
+            listings = marketplace_store.list_listings(p.id, p.company_id)
             if listings:
                 for listing in listings:
                     st.write(
@@ -1670,7 +1750,7 @@ elif page == "📦 Inventory":
         else:
             table_rows = []
             for p in products:
-                listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE)
+                listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE, p.company_id)
                 table_rows.append({
                     "id": p.id,
                     "sku": p.sku or "(none)",
@@ -1698,7 +1778,7 @@ elif page == "📦 Inventory":
 
         selected_id = st.session_state.get("inv_selected_id")
         if selected_id:
-            selected_product = inventory_store.get_product(selected_id)
+            selected_product = inventory_store.get_product(selected_id, st.session_state.company_id)
             if selected_product:
                 st.divider()
                 if st.button("✖ Close detail view"):
@@ -1856,12 +1936,16 @@ elif page == "🔍 Review & Export":
             n_selected = len(st.session_state.review_selected_ids)
             st.caption(f"Selected: {n_selected} product(s)")
 
+            can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
+            if not can_export:
+                st.caption("Only Admins and Reviewers can export to BaseLinker.")
+
             action_col1, action_col2 = st.columns([2, 1])
             with action_col1:
                 if st.button(
                     f"📤 Export Selected ({n_selected})",
                     type="primary",
-                    disabled=n_selected == 0,
+                    disabled=n_selected == 0 or not can_export,
                     use_container_width=True,
                     key="review_export_selected_btn",
                 ):
@@ -2268,3 +2352,56 @@ elif page == "📤 CSV/Excel Export":
                 if field in LONG_FIELDS:
                     st.markdown(f"**{field}**")
                     st.text(row.get(field) or "—")
+
+# =========================================================== MANAGE USERS =
+elif page == "👥 Manage Users":
+    st.title("👥 Manage Users")
+    try:
+        auth.require_role(current_user, auth.ROLE_ADMIN)
+    except PermissionError:
+        st.error("Admins only.")
+        st.stop()
+
+    st.caption(f"Users in {current_company.name if current_company else current_user.company_id}")
+
+    users = auth_store.list_users_for_company(current_user.company_id)
+    for u in users:
+        c1, c2, c3, c4 = st.columns([2, 3, 1.5, 1.5])
+        with c1:
+            st.write(u.name)
+        with c2:
+            st.write(u.email)
+        with c3:
+            st.write(u.role)
+        with c4:
+            toggle_label = "Deactivate" if u.active else "Activate"
+            disabled = u.id == current_user.id  # can't deactivate yourself
+            if st.button(toggle_label, key=f"user_toggle_{u.id}", disabled=disabled, use_container_width=True):
+                u.active = not u.active
+                auth_store.update_user(u)
+                if not u.active:
+                    audit_store.log_audit(current_user.company_id, current_user.id, "DEACTIVATE_USER", "user", u.id)
+                st.rerun()
+        if not u.active:
+            st.caption("Inactive")
+        st.divider()
+
+    st.subheader("Add a user")
+    with st.form("create_user_form", clear_on_submit=True):
+        new_name = st.text_input("Name")
+        new_email = st.text_input("Email")
+        new_password = st.text_input("Password", type="password")
+        new_role = st.selectbox("Role", auth.ALL_ROLES, index=auth.ALL_ROLES.index(auth.ROLE_EMPLOYEE))
+        if st.form_submit_button("➕ Add user", type="primary"):
+            if not new_name.strip() or not new_email.strip() or not new_password:
+                st.warning("Name, email, and password are all required.")
+            else:
+                try:
+                    auth.register_user(
+                        company_id=current_user.company_id,
+                        name=new_name, email=new_email, password=new_password, role=new_role,
+                    )
+                    st.success(f"Added {new_email}.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))

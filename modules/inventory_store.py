@@ -11,6 +11,7 @@ save) instead of relying on scanning/deserializing the full JSON blob for
 every row — see search_products().
 """
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -18,7 +19,12 @@ from typing import List, Optional, Tuple
 from modules import excel_autosave
 from modules.models import Product
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "inventory.db"
+# Overridable so scripts/verify_tenant_isolation.py (and any other script
+# that needs a throwaway DB) can point every store module — they all import
+# DB_PATH from here — at an isolated scratch file instead of the real one,
+# just by setting this env var before any modules.*_store module is
+# imported. No effect on the normal `streamlit run` path.
+DB_PATH = Path(os.environ.get("ELECTROGRADER_DB_PATH") or (Path(__file__).resolve().parent.parent / "data" / "inventory.db"))
 
 # Search result tiers, in priority order (see search_products()).
 MATCH_TIER_SKU = "sku"
@@ -119,6 +125,7 @@ def save_product(product: Product) -> Optional[str]:
     could not be written (e.g. the file is open elsewhere) — the SQLite save
     itself always completes regardless.
     """
+    assert product.company_id, "Product.company_id must be set before saving — never save an orphaned record."
     conn = _connect()
     with conn:
         conn.execute(
@@ -130,7 +137,7 @@ def save_product(product: Product) -> Optional[str]:
              json.dumps(product.to_dict())),
         )
     conn.close()
-    return excel_autosave.sync_excel(list_products())
+    return excel_autosave.sync_excel(_list_all_products_unscoped())
 
 
 def save_products_bulk(products: List[Product]) -> Optional[str]:
@@ -138,6 +145,7 @@ def save_products_bulk(products: List[Product]) -> Optional[str]:
     syncs the Excel mirror once at the end instead of once per row."""
     if not products:
         return None
+    assert all(p.company_id for p in products), "Every Product.company_id must be set before saving."
     conn = _connect()
     with conn:
         conn.executemany(
@@ -151,38 +159,32 @@ def save_products_bulk(products: List[Product]) -> Optional[str]:
             ],
         )
     conn.close()
-    return excel_autosave.sync_excel(list_products())
+    return excel_autosave.sync_excel(_list_all_products_unscoped())
 
 
-def delete_product(product_id: str) -> Optional[str]:
+def delete_product(product_id: str, company_id: str) -> Optional[str]:
     conn = _connect()
     with conn:
-        conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
+        conn.execute("DELETE FROM products WHERE id = ? AND company_id = ?", (product_id, company_id))
     conn.close()
-    return excel_autosave.sync_excel(list_products())
+    return excel_autosave.sync_excel(_list_all_products_unscoped())
 
 
-def list_products_by_manifest(manifest_import_id: str, company_id: Optional[str] = None) -> List[Product]:
+def list_products_by_manifest(manifest_import_id: str, company_id: str) -> List[Product]:
     """All products (any status) linked to a given manifest batch."""
     conn = _connect()
-    if company_id:
-        rows = conn.execute(
-            "SELECT data FROM products WHERE manifest_import_id = ? AND company_id = ? "
-            "ORDER BY created_at ASC",
-            (manifest_import_id, company_id),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT data FROM products WHERE manifest_import_id = ? ORDER BY created_at ASC",
-            (manifest_import_id,),
-        ).fetchall()
+    rows = conn.execute(
+        "SELECT data FROM products WHERE manifest_import_id = ? AND company_id = ? "
+        "ORDER BY created_at ASC",
+        (manifest_import_id, company_id),
+    ).fetchall()
     conn.close()
     return [Product.from_dict(json.loads(r[0])) for r in rows]
 
 
 def delete_products_by_manifest(
     manifest_import_id: str,
-    company_id: Optional[str] = None,
+    company_id: str,
     only_drafts: bool = True,
 ) -> int:
     """Deletes products linked to a manifest batch. By default only
@@ -205,29 +207,38 @@ def delete_products_by_manifest(
             "DELETE FROM products WHERE id = ?", [(p.id,) for p in to_delete]
         )
     conn.close()
-    excel_autosave.sync_excel(list_products())
+    excel_autosave.sync_excel(_list_all_products_unscoped())
     return len(to_delete)
 
 
-def list_products(company_id: Optional[str] = None) -> List[Product]:
+def list_products(company_id: str) -> List[Product]:
     conn = _connect()
-    if company_id:
-        rows = conn.execute(
-            "SELECT data FROM products WHERE company_id = ? ORDER BY created_at DESC",
-            (company_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT data FROM products ORDER BY created_at DESC"
-        ).fetchall()
+    rows = conn.execute(
+        "SELECT data FROM products WHERE company_id = ? ORDER BY created_at DESC",
+        (company_id,),
+    ).fetchall()
     conn.close()
     return [Product.from_dict(json.loads(r[0])) for r in rows]
 
 
-def get_product(product_id: str) -> Optional[Product]:
+def _list_all_products_unscoped() -> List[Product]:
+    """Every product across every company, no exceptions — used ONLY by
+    this file's own excel_autosave.sync_excel() calls below. NOT tenant-
+    scoped on purpose (the Excel mirror is currently one shared file for
+    the whole database, not per-company — a real cross-tenant exposure
+    once more than one company exists, called out explicitly as an item
+    that still needs its own design decision, e.g. a per-company file).
+    Do not call this from anywhere outside this module."""
+    conn = _connect()
+    rows = conn.execute("SELECT data FROM products ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [Product.from_dict(json.loads(r[0])) for r in rows]
+
+
+def get_product(product_id: str, company_id: str) -> Optional[Product]:
     conn = _connect()
     row = conn.execute(
-        "SELECT data FROM products WHERE id = ?", (product_id,)
+        "SELECT data FROM products WHERE id = ? AND company_id = ?", (product_id, company_id)
     ).fetchone()
     conn.close()
     if not row:
@@ -235,7 +246,7 @@ def get_product(product_id: str) -> Optional[Product]:
     return Product.from_dict(json.loads(row[0]))
 
 
-def search_products(query: str, company_id: Optional[str] = None) -> List[Tuple[Product, str]]:
+def search_products(query: str, company_id: str) -> List[Tuple[Product, str]]:
     """Fast, indexed, priority-ordered search across the whole inventory.
 
     Priority (matches earlier tiers are returned first; a product appears
@@ -257,12 +268,10 @@ def search_products(query: str, company_id: Optional[str] = None) -> List[Tuple[
         return []
 
     conn = _connect()
-    company_sql = " AND company_id = ?" if company_id else ""
-    company_params = [company_id] if company_id else []
 
     def _run(where_sql: str, where_params: list) -> List[Product]:
-        sql = f"SELECT data FROM products WHERE ({where_sql}){company_sql} ORDER BY created_at DESC"
-        rows = conn.execute(sql, where_params + company_params).fetchall()
+        sql = f"SELECT data FROM products WHERE ({where_sql}) AND company_id = ? ORDER BY created_at DESC"
+        rows = conn.execute(sql, where_params + [company_id]).fetchall()
         return [Product.from_dict(json.loads(r[0])) for r in rows]
 
     like = f"%{q}%"
@@ -293,20 +302,17 @@ def search_products(query: str, company_id: Optional[str] = None) -> List[Tuple[
 
 def next_sku_batch(
     count: int,
-    company_id: Optional[str] = None,
+    company_id: str,
     start_if_empty: int = DEFAULT_SKU_RANGE_START,
 ) -> List[str]:
     """Returns `count` new sequential numeric SKUs as strings, continuing
-    from one past the highest purely-numeric SKU currently in use (scoped
-    to company_id if given) — or starting at `start_if_empty` if none exist
-    yet. Non-numeric SKUs (manual entries like "Test1") are ignored when
-    computing the next number, so auto-assigned and hand-typed SKUs can
-    coexist without colliding."""
+    from one past the highest purely-numeric SKU currently in use for this
+    company — or starting at `start_if_empty` if none exist yet. Non-numeric
+    SKUs (manual entries like "Test1") are ignored when computing the next
+    number, so auto-assigned and hand-typed SKUs can coexist without
+    colliding."""
     conn = _connect()
-    if company_id:
-        rows = conn.execute("SELECT sku FROM products WHERE company_id = ?", (company_id,)).fetchall()
-    else:
-        rows = conn.execute("SELECT sku FROM products").fetchall()
+    rows = conn.execute("SELECT sku FROM products WHERE company_id = ?", (company_id,)).fetchall()
     conn.close()
 
     numeric_skus = [int(r[0]) for r in rows if r[0] and r[0].isdigit()]
@@ -315,7 +321,7 @@ def next_sku_batch(
 
 
 def list_products_paginated(
-    company_id: Optional[str] = None,
+    company_id: str,
     triage_status: Optional[str] = None,
     manifest_import_id: Optional[str] = None,
     location: Optional[str] = None,
@@ -338,12 +344,9 @@ def list_products_paginated(
     turned into an "IS NULL" or "= ''" clause). Returns (rows_for_this_page,
     total_matching_row_count) so the caller can render "page X of Y".
     """
-    where_clauses = []
-    params: list = []
+    where_clauses = ["company_id = ?"]
+    params: list = [company_id]
 
-    if company_id:
-        where_clauses.append("company_id = ?")
-        params.append(company_id)
     if triage_status:
         where_clauses.append("triage_status = ?")
         params.append(triage_status)
@@ -382,19 +385,14 @@ def list_products_paginated(
     return products, total
 
 
-def distinct_locations(company_id: Optional[str] = None) -> List[str]:
+def distinct_locations(company_id: str) -> List[str]:
     """Non-empty distinct location values currently in use, for populating
     a filter dropdown — cheap thanks to the indexed `location` column."""
     conn = _connect()
-    if company_id:
-        rows = conn.execute(
-            "SELECT DISTINCT location FROM products WHERE company_id = ? AND location IS NOT NULL AND location != '' "
-            "ORDER BY location ASC",
-            (company_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT DISTINCT location FROM products WHERE location IS NOT NULL AND location != '' ORDER BY location ASC"
-        ).fetchall()
+    rows = conn.execute(
+        "SELECT DISTINCT location FROM products WHERE company_id = ? AND location IS NOT NULL AND location != '' "
+        "ORDER BY location ASC",
+        (company_id,),
+    ).fetchall()
     conn.close()
     return [r[0] for r in rows]

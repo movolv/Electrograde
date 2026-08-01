@@ -53,6 +53,9 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manifest_batches_company ON manifest_batches(company_id)"
+    )
     return conn
 
 
@@ -85,25 +88,20 @@ def save_batch(batch: ManifestBatch) -> None:
     conn.close()
 
 
-def list_batches(company_id: Optional[str] = None) -> List[ManifestBatch]:
+def list_batches(company_id: str) -> List[ManifestBatch]:
     conn = _connect()
-    if company_id:
-        rows = conn.execute(
-            "SELECT data FROM manifest_batches WHERE company_id = ? ORDER BY imported_at DESC",
-            (company_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT data FROM manifest_batches ORDER BY imported_at DESC"
-        ).fetchall()
+    rows = conn.execute(
+        "SELECT data FROM manifest_batches WHERE company_id = ? ORDER BY imported_at DESC",
+        (company_id,),
+    ).fetchall()
     conn.close()
     return [_from_row(r[0]) for r in rows]
 
 
-def get_batch(batch_id: str) -> Optional[ManifestBatch]:
+def get_batch(batch_id: str, company_id: str) -> Optional[ManifestBatch]:
     conn = _connect()
     row = conn.execute(
-        "SELECT data FROM manifest_batches WHERE id = ?", (batch_id,)
+        "SELECT data FROM manifest_batches WHERE id = ? AND company_id = ?", (batch_id, company_id)
     ).fetchone()
     conn.close()
     if not row:
@@ -111,14 +109,14 @@ def get_batch(batch_id: str) -> Optional[ManifestBatch]:
     return _from_row(row[0])
 
 
-def delete_batch(batch_id: str) -> None:
+def delete_batch(batch_id: str, company_id: str) -> None:
     """Deletes only the batch record itself. Deleting the products linked
     to it (or deciding whether to) is modules/inventory_store.py's
     delete_products_by_manifest() — kept separate so callers explicitly
     choose what happens to linked products rather than it being implicit."""
     conn = _connect()
     with conn:
-        conn.execute("DELETE FROM manifest_batches WHERE id = ?", (batch_id,))
+        conn.execute("DELETE FROM manifest_batches WHERE id = ? AND company_id = ?", (batch_id, company_id))
     conn.close()
 
 

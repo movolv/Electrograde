@@ -1,0 +1,227 @@
+"""Proves — not just assumes — that one company's session can never read or
+write another company's data through any public store-module function.
+
+This is the real safety net for the whole multi-tenant design: SQLite has
+no FK constraints anywhere in this codebase's convention, so nothing in the
+schema itself stops a future function from being added without a
+`company_id` filter. Re-run this any time a new store function is added,
+not just once.
+
+Runs against a throwaway scratch database (via the ELECTROGRADER_DB_PATH
+env var override in modules/inventory_store.py), set *before* importing any
+modules.*_store module — they each bind DB_PATH at import time, so setting
+the env var after import would silently miss them.
+
+    python scripts/verify_tenant_isolation.py
+"""
+import os
+import shutil
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+_SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_isolation_test_")
+os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "isolation_test.db")
+
+from modules import auth, auth_store, company_store, inventory_store  # noqa: E402
+from modules import manifest_store, marketplace_store, repair_store  # noqa: E402
+from modules.models import Product  # noqa: E402
+
+_checks_passed = 0
+_failures = []
+
+
+def check(label: str, condition: bool) -> None:
+    global _checks_passed
+    if condition:
+        _checks_passed += 1
+    else:
+        _failures.append(label)
+    print(("  OK  " if condition else "  FAIL"), label)
+
+
+def main() -> int:
+    print(f"Scratch DB: {os.environ['ELECTROGRADER_DB_PATH']}\n")
+
+    # ---------------------------------------------------------- companies --
+    print("-- companies & users --")
+    company_a = company_store.create_company("Company A", user_limit=10)
+    company_b = company_store.create_company("Company B", user_limit=10)
+
+    admin_a = auth.register_user(company_a.id, "Admin A", "admin@companya.test", "PasswordA1!", role=auth.ROLE_ADMIN)
+    admin_b = auth.register_user(company_b.id, "Admin B", "admin@companyb.test", "PasswordB1!", role=auth.ROLE_ADMIN)
+
+    login_a = auth.verify_login("admin@companya.test", "PasswordA1!")
+    login_b = auth.verify_login("admin@companyb.test", "PasswordB1!")
+    check("login A resolves to company A", login_a is not None and login_a.company_id == company_a.id)
+    check("login B resolves to company B", login_b is not None and login_b.company_id == company_b.id)
+    check("login A with B's password fails", auth.verify_login("admin@companya.test", "PasswordB1!") is None)
+
+    token_a = auth.create_session(admin_a.id)
+    token_b = auth.create_session(admin_b.id)
+    resolved_a = auth.validate_session(token_a)
+    resolved_b = auth.validate_session(token_b)
+    check("session A resolves to admin A only", resolved_a is not None and resolved_a.id == admin_a.id)
+    check("session B resolves to admin B only", resolved_b is not None and resolved_b.id == admin_b.id)
+    check("session A does not resolve to admin B", resolved_a is None or resolved_a.id != admin_b.id)
+
+    # -------------------------------------------------------- seed data --
+    print("\n-- seeding one row per tenant-scoped table, per company --")
+    product_a = Product(company_id=company_a.id, sku="A-SKU-1", name="Product A")
+    product_b = Product(company_id=company_b.id, sku="B-SKU-1", name="Product B")
+    inventory_store.save_product(product_a)
+    inventory_store.save_product(product_b)
+
+    batch_a = manifest_store.ManifestBatch(company_id=company_a.id, filename="a.csv")
+    batch_b = manifest_store.ManifestBatch(company_id=company_b.id, filename="b.csv")
+    manifest_store.save_batch(batch_a)
+    manifest_store.save_batch(batch_b)
+
+    listing_a = marketplace_store.MarketplaceListing(
+        product_id=product_a.id, marketplace="baselinker", company_id=company_a.id,
+        external_listing_id="ext-a", status=marketplace_store.STATUS_LISTED,
+    )
+    listing_b = marketplace_store.MarketplaceListing(
+        product_id=product_b.id, marketplace="baselinker", company_id=company_b.id,
+        external_listing_id="ext-b", status=marketplace_store.STATUS_LISTED,
+    )
+    marketplace_store.upsert_listing(listing_a)
+    marketplace_store.upsert_listing(listing_b)
+
+    repair_a = repair_store.RepairEvent(product_id=product_a.id, company_id=company_a.id, description="fix A", cost=10.0)
+    repair_b = repair_store.RepairEvent(product_id=product_b.id, company_id=company_b.id, description="fix B", cost=20.0)
+    repair_store.add_repair_event(repair_a)
+    repair_store.add_repair_event(repair_b)
+    print("  seeded.")
+
+    # ------------------------------------------- cross-tenant access checks --
+    print("\n-- inventory_store: cross-tenant access must be impossible --")
+    check(
+        "get_product(A's id, company=B) -> None despite the row existing",
+        inventory_store.get_product(product_a.id, company_b.id) is None,
+    )
+    check(
+        "get_product(A's id, company=A) -> found",
+        inventory_store.get_product(product_a.id, company_a.id) is not None,
+    )
+    inventory_store.delete_product(product_a.id, company_b.id)
+    check(
+        "delete_product(A's id, company=B) does not delete it",
+        inventory_store.get_product(product_a.id, company_a.id) is not None,
+    )
+    check(
+        "list_products(company=B) never contains A's product",
+        product_a.id not in {p.id for p in inventory_store.list_products(company_b.id)},
+    )
+    check(
+        "search_products('Product A', company=B) finds nothing",
+        len(inventory_store.search_products("Product A", company_b.id)) == 0,
+    )
+    check(
+        "search_products('Product A', company=A) finds it",
+        any(p.id == product_a.id for p, _ in inventory_store.search_products("Product A", company_a.id)),
+    )
+    check(
+        "list_products_by_manifest(A's batch, company=B) empty",
+        len(inventory_store.list_products_by_manifest(batch_a.id, company_b.id)) == 0,
+    )
+    skus_b = inventory_store.next_sku_batch(1, company_b.id)
+    check("next_sku_batch(company=B) doesn't error / returns a value", len(skus_b) == 1)
+    products_b, total_b = inventory_store.list_products_paginated(company_b.id)
+    check(
+        "list_products_paginated(company=B) never contains A's product",
+        product_a.id not in {p.id for p in products_b},
+    )
+
+    print("\n-- manifest_store: cross-tenant access must be impossible --")
+    check(
+        "get_batch(A's id, company=B) -> None despite the row existing",
+        manifest_store.get_batch(batch_a.id, company_b.id) is None,
+    )
+    check(
+        "get_batch(A's id, company=A) -> found",
+        manifest_store.get_batch(batch_a.id, company_a.id) is not None,
+    )
+    check(
+        "list_batches(company=B) never contains A's batch",
+        batch_a.id not in {b.id for b in manifest_store.list_batches(company_b.id)},
+    )
+    manifest_store.delete_batch(batch_a.id, company_b.id)
+    check(
+        "delete_batch(A's id, company=B) does not delete it",
+        manifest_store.get_batch(batch_a.id, company_a.id) is not None,
+    )
+
+    print("\n-- marketplace_store: cross-tenant access must be impossible --")
+    check(
+        "get_listing(A's product, company=B) -> None despite the row existing",
+        marketplace_store.get_listing(product_a.id, "baselinker", company_b.id) is None,
+    )
+    check(
+        "get_listing(A's product, company=A) -> found",
+        marketplace_store.get_listing(product_a.id, "baselinker", company_a.id) is not None,
+    )
+    check(
+        "list_listings(A's product, company=B) empty",
+        len(marketplace_store.list_listings(product_a.id, company_b.id)) == 0,
+    )
+    marketplace_store.delete_listings_for_product(product_a.id, company_b.id)
+    check(
+        "delete_listings_for_product(A's product, company=B) does not delete it",
+        marketplace_store.get_listing(product_a.id, "baselinker", company_a.id) is not None,
+    )
+
+    print("\n-- repair_store: cross-tenant access must be impossible --")
+    check(
+        "list_repair_events(A's product, company=B) empty despite the row existing",
+        len(repair_store.list_repair_events(product_a.id, company_b.id)) == 0,
+    )
+    check(
+        "list_repair_events(A's product, company=A) -> found",
+        len(repair_store.list_repair_events(product_a.id, company_a.id)) == 1,
+    )
+    check(
+        "total_repair_cost(A's product, company=B) == 0 despite A having real cost",
+        repair_store.total_repair_cost(product_a.id, company_b.id) == 0.0,
+    )
+    check(
+        "total_repair_cost(A's product, company=A) == 10.0",
+        repair_store.total_repair_cost(product_a.id, company_a.id) == 10.0,
+    )
+    repair_store.delete_repair_event(repair_a.id, company_b.id)
+    check(
+        "delete_repair_event(A's event, company=B) does not delete it",
+        len(repair_store.list_repair_events(product_a.id, company_a.id)) == 1,
+    )
+    repair_store.delete_repair_events_for_product(product_a.id, company_b.id)
+    check(
+        "delete_repair_events_for_product(A's product, company=B) does not delete it",
+        len(repair_store.list_repair_events(product_a.id, company_a.id)) == 1,
+    )
+
+    # --------------------------------------------------- company suspension --
+    print("\n-- company suspension revokes access for ALL its users --")
+    company_a.status = company_store.STATUS_SUSPENDED
+    company_store.update_company(company_a)
+    check("suspended company's session is invalidated", auth.validate_session(token_a) is None)
+    check("suspended company's login is rejected", auth.verify_login("admin@companya.test", "PasswordA1!") is None)
+    check("company B is unaffected", auth.validate_session(token_b) is not None)
+    company_a.status = company_store.STATUS_ACTIVE
+    company_store.update_company(company_a)
+
+    # ------------------------------------------------------------- summary --
+    print(f"\n{_checks_passed} check(s) passed, {len(_failures)} failed.")
+    if _failures:
+        print("\nFAILED:")
+        for f in _failures:
+            print(f"  - {f}")
+    return 0 if not _failures else 1
+
+
+if __name__ == "__main__":
+    try:
+        exit_code = main()
+    finally:
+        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+    raise SystemExit(exit_code)

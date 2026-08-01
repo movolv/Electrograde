@@ -28,6 +28,7 @@ STATUS_ERROR = "error"
 class MarketplaceListing:
     product_id: str = ""
     marketplace: str = ""  # "baselinker" | "ebay" | "woocommerce" | ...
+    company_id: str = ""
     external_listing_id: str = ""
     status: str = STATUS_NOT_LISTED
     price: float = 0.0
@@ -44,6 +45,7 @@ def _connect() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS marketplace_listings (
             product_id TEXT NOT NULL,
             marketplace TEXT NOT NULL,
+            company_id TEXT NOT NULL DEFAULT 'default',
             external_listing_id TEXT,
             status TEXT NOT NULL DEFAULT 'not_listed',
             price REAL,
@@ -54,27 +56,53 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+
+    # Migrate older DBs: this table predates company_id entirely, so — same
+    # ALTER TABLE + backfill pattern as modules/inventory_store.py — add the
+    # column and backfill existing rows from their owning product's
+    # company_id (the only source of truth available for legacy rows; a
+    # listing can't outlive/precede the product it belongs to).
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(marketplace_listings)")}
+    if "company_id" not in existing_cols:
+        conn.execute("ALTER TABLE marketplace_listings ADD COLUMN company_id TEXT NOT NULL DEFAULT 'default'")
+        conn.execute(
+            "UPDATE marketplace_listings SET company_id = ("
+            "  SELECT products.company_id FROM products WHERE products.id = marketplace_listings.product_id"
+            ") WHERE EXISTS (SELECT 1 FROM products WHERE products.id = marketplace_listings.product_id)"
+        )
+        conn.commit()
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_marketplace_listings_product ON marketplace_listings(product_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_marketplace_listings_company ON marketplace_listings(company_id)")
     return conn
 
 
 def _row_to_listing(r: tuple) -> MarketplaceListing:
     return MarketplaceListing(
-        product_id=r[0], marketplace=r[1], external_listing_id=r[2] or "",
-        status=r[3] or STATUS_NOT_LISTED, price=r[4] or 0.0, url=r[5] or "",
-        last_synced_at=r[6] or 0.0, error_message=r[7] or "",
+        product_id=r[0], marketplace=r[1], company_id=r[2] or "",
+        external_listing_id=r[3] or "",
+        status=r[4] or STATUS_NOT_LISTED, price=r[5] or 0.0, url=r[6] or "",
+        last_synced_at=r[7] or 0.0, error_message=r[8] or "",
     )
 
 
+_SELECT_COLS = (
+    "product_id, marketplace, company_id, external_listing_id, status, price, url, "
+    "last_synced_at, error_message"
+)
+
+
 def upsert_listing(listing: MarketplaceListing) -> None:
+    assert listing.company_id, "MarketplaceListing.company_id must be set before saving."
     conn = _connect()
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO marketplace_listings
-               (product_id, marketplace, external_listing_id, status, price, url, last_synced_at, error_message)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (product_id, marketplace, company_id, external_listing_id, status, price, url,
+                last_synced_at, error_message)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                listing.product_id, listing.marketplace, listing.external_listing_id,
+                listing.product_id, listing.marketplace, listing.company_id, listing.external_listing_id,
                 listing.status, listing.price, listing.url, listing.last_synced_at,
                 listing.error_message,
             ),
@@ -82,33 +110,36 @@ def upsert_listing(listing: MarketplaceListing) -> None:
     conn.close()
 
 
-def get_listing(product_id: str, marketplace: str) -> Optional[MarketplaceListing]:
+def get_listing(product_id: str, marketplace: str, company_id: str) -> Optional[MarketplaceListing]:
     conn = _connect()
     row = conn.execute(
-        "SELECT product_id, marketplace, external_listing_id, status, price, url, last_synced_at, error_message "
-        "FROM marketplace_listings WHERE product_id = ? AND marketplace = ?",
-        (product_id, marketplace),
+        f"SELECT {_SELECT_COLS} FROM marketplace_listings "
+        "WHERE product_id = ? AND marketplace = ? AND company_id = ?",
+        (product_id, marketplace, company_id),
     ).fetchone()
     conn.close()
     return _row_to_listing(row) if row else None
 
 
-def list_listings(product_id: str) -> List[MarketplaceListing]:
+def list_listings(product_id: str, company_id: str) -> List[MarketplaceListing]:
     conn = _connect()
     rows = conn.execute(
-        "SELECT product_id, marketplace, external_listing_id, status, price, url, last_synced_at, error_message "
-        "FROM marketplace_listings WHERE product_id = ? ORDER BY marketplace ASC",
-        (product_id,),
+        f"SELECT {_SELECT_COLS} FROM marketplace_listings "
+        "WHERE product_id = ? AND company_id = ? ORDER BY marketplace ASC",
+        (product_id, company_id),
     ).fetchall()
     conn.close()
     return [_row_to_listing(r) for r in rows]
 
 
-def delete_listings_for_product(product_id: str) -> int:
+def delete_listings_for_product(product_id: str, company_id: str) -> int:
     """Used when a product itself is deleted, to avoid orphaned listing rows."""
     conn = _connect()
     with conn:
-        cur = conn.execute("DELETE FROM marketplace_listings WHERE product_id = ?", (product_id,))
+        cur = conn.execute(
+            "DELETE FROM marketplace_listings WHERE product_id = ? AND company_id = ?",
+            (product_id, company_id),
+        )
         count = cur.rowcount
     conn.close()
     return count

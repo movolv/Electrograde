@@ -187,7 +187,7 @@ def build_payload(
     }
 
     if existing_listing_id is None:
-        existing = marketplace_store.get_listing(product.id, MARKETPLACE)
+        existing = marketplace_store.get_listing(product.id, MARKETPLACE, product.company_id)
         existing_listing_id = existing.external_listing_id if existing else ""
     if existing_listing_id:
         payload["product_id"] = int(existing_listing_id)
@@ -231,7 +231,7 @@ def push_product(product) -> PushResult:
     except BaseLinkerConfigError as e:
         return PushResult(success=False, message=str(e))
 
-    existing = marketplace_store.get_listing(product.id, MARKETPLACE)
+    existing = marketplace_store.get_listing(product.id, MARKETPLACE, product.company_id)
     existing_id = existing.external_listing_id if existing else ""
     if not existing_id:
         found_id = find_existing_product_id_by_sku(product.sku, config)
@@ -251,6 +251,7 @@ def push_product(product) -> PushResult:
         marketplace_store.MarketplaceListing(
             product_id=product.id,
             marketplace=MARKETPLACE,
+            company_id=product.company_id,
             external_listing_id=listing_id,
             status=marketplace_store.STATUS_LISTED,
             price=product.price,
