@@ -21,12 +21,13 @@ Expected shapes (validated in connect()):
 """
 import json
 import time
-from typing import Optional
+from typing import Optional, Set
 
 import requests
 
 from integrations.base import ConnectionTestResult, ConnectorActionResult, MarketplaceConnector
 from integrations.marketplaces.baselinker import mapper
+from modules import sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
 _MIN_CALL_INTERVAL = 60.0 / 90  # stay safely under the 100 req/min limit
@@ -71,6 +72,48 @@ class BaselinkerConnector(MarketplaceConnector):
         "condition_id": "Condition",
         "category_id": "Category",
     }
+
+    # Fields whose Synchronization-tab checkbox actually gates something in
+    # mapper.build_payload() today. "sku" is deliberately absent — it's
+    # always sent regardless of toggle state (see mapper.py), so its
+    # checkbox wouldn't do anything; "brand"/"model"/"category"/"grade"/
+    # "defects" have no payload destination yet (category stays the single
+    # global category_id setting; grade/defects mapping-application is
+    # future work) — see integrations/field_registry.py for the full field
+    # list these are a subset of.
+    IMPLEMENTED_SYNC_FIELDS = {
+        "name", "product_description", "condition_description",
+        "image_paths", "price", "quantity", "barcode",
+    }
+    DEFAULT_SYNC_FIELDS = [
+        "name", "product_description", "condition_description",
+        "image_paths", "price", "quantity", "sku", "barcode",
+    ]
+
+    def _resolve_fields_send(self) -> Optional[Set[str]]:
+        """None => mapper.build_payload() sends everything (legacy
+        behavior) — used both for companies with no SyncRule at all, and
+        for one whose Synchronization tab has never actually been saved
+        (fields_send_configured=False), so an empty/never-touched row can
+        never accidentally suppress real fields."""
+        rule = sync_rules_store.get_rule(self.company_id, self.integration_type)
+        if rule is None or not rule.fields_send_configured:
+            return None
+        return set(rule.fields_send)
+
+    def preview_payload(self, product) -> dict:
+        """Same build_payload() call the real push uses, minus actually
+        base64-encoding images (wasteful for a preview) — a synthetic
+        `_preview_image_count` key tells the UI how many WOULD be sent
+        instead."""
+        config = self._config()
+        fields_send = self._resolve_fields_send()
+        payload = mapper.build_payload(
+            product, config, existing_listing_id=None, fields_send=fields_send, include_images=False,
+        )
+        wants_images = fields_send is None or "image_paths" in fields_send
+        payload["_preview_image_count"] = len(product.image_paths) if wants_images and product.image_paths else 0
+        return payload
 
     def _config(self) -> dict:
         settings = self.settings
@@ -140,7 +183,9 @@ class BaselinkerConnector(MarketplaceConnector):
             return self.update_product(product, found_id)
 
         try:
-            payload = mapper.build_payload(product, config, existing_listing_id=None)
+            payload = mapper.build_payload(
+                product, config, existing_listing_id=None, fields_send=self._resolve_fields_send(),
+            )
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, message=str(e))
@@ -153,7 +198,9 @@ class BaselinkerConnector(MarketplaceConnector):
     def update_product(self, product, external_id: str) -> ConnectorActionResult:
         config = self._config()
         try:
-            payload = mapper.build_payload(product, config, existing_listing_id=external_id)
+            payload = mapper.build_payload(
+                product, config, existing_listing_id=external_id, fields_send=self._resolve_fields_send(),
+            )
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, external_id=external_id, message=str(e))

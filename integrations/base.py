@@ -79,6 +79,29 @@ class MarketplaceConnector(IntegrationConnector):
     # Mapping UI itself.
     SUPPORTED_TARGET_FIELDS: dict = {}
 
+    # Which integrations/field_registry.SYNCABLE_FIELDS keys this
+    # connector's payload-building ACTUALLY gates on today — i.e. whose
+    # checkbox state in the Synchronization tab has a real effect. Empty in
+    # the base class; a field absent from this set still shows up in the
+    # UI (so it can be saved for a future phase) but app.py renders a
+    # "(not yet applied to export)" note next to it, computed generically
+    # from whichever connector is open — never hardcoded per integration.
+    IMPLEMENTED_SYNC_FIELDS: set = set()
+
+    # Subset of IMPLEMENTED_SYNC_FIELDS (by convention, though not
+    # enforced) turned ON by default the first time a company connects this
+    # integration — see integrations/manager.py's connect(). Empty in the
+    # base class.
+    DEFAULT_SYNC_FIELDS: list = []
+
+    def preview_payload(self, product) -> dict:
+        """What export_product() would actually send, built via the exact
+        same code path as the real push (never a separate summary that
+        could drift) — used by Settings -> Integrations' "Preview export".
+        {} means this connector has nothing preview-able yet; app.py treats
+        that as "no preview available" rather than an error."""
+        return {}
+
     @abstractmethod
     def create_product(self, product) -> ConnectorActionResult:
         raise NotImplementedError

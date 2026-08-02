@@ -15,7 +15,7 @@ from typing import Optional
 from integrations.base import ConnectionTestResult, IntegrationConnector
 from integrations.marketplaces.baselinker.client import BaselinkerConnector
 from integrations.services.deepl.client import DeepLConnector
-from modules import audit_store, integration_store
+from modules import audit_store, integration_store, sync_rules_store
 
 
 class IntegrationNotAvailableError(RuntimeError):
@@ -119,6 +119,17 @@ def get_supported_target_fields(integration_type: str) -> dict:
     return dict(getattr(connector_cls, "SUPPORTED_TARGET_FIELDS", {}))
 
 
+def get_implemented_sync_fields(integration_type: str) -> set:
+    """Which integrations/field_registry.SYNCABLE_FIELDS keys this
+    integration's connector actually gates on today — the Synchronization
+    tab uses this (never a hardcoded per-integration list) to caption any
+    field whose checkbox doesn't yet do anything real."""
+    connector_cls = CONNECTORS.get(integration_type)
+    if connector_cls is None:
+        return set()
+    return set(getattr(connector_cls, "IMPLEMENTED_SYNC_FIELDS", set()))
+
+
 def is_connected(company_id: str, integration_type: str) -> bool:
     record = integration_store.get_integration(company_id, integration_type)
     return record is not None and record.status == integration_store.STATUS_CONNECTED
@@ -174,6 +185,22 @@ def connect(
         audit_store.log_audit(
             company_id, user_id, "CONNECT_INTEGRATION", "integration", integration_type, details=result.message,
         )
+
+    # Seed a sensible default Synchronization configuration the first time
+    # this company connects this integration_type — universal (reads
+    # whatever the connector class itself declares), never special-cased
+    # per integration. Only fires when no SyncRule exists at all yet, so
+    # reconnecting an already-configured integration never overwrites a
+    # company's real choices.
+    if sync_rules_store.get_rule(company_id, integration_type) is None:
+        default_fields = list(getattr(connector_cls, "DEFAULT_SYNC_FIELDS", []))
+        sync_rules_store.upsert_rule(
+            sync_rules_store.SyncRule(
+                company_id=company_id, integration_type=integration_type,
+                fields_send=default_fields, fields_send_configured=bool(default_fields),
+            )
+        )
+
     return result
 
 
@@ -208,3 +235,4 @@ class IntegrationManager:
     test = staticmethod(test)
     is_connected = staticmethod(is_connected)
     get_supported_target_fields = staticmethod(get_supported_target_fields)
+    get_implemented_sync_fields = staticmethod(get_implemented_sync_fields)

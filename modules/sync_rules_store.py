@@ -53,6 +53,15 @@ class SyncRule:
     direction: str = DIRECTION_PUSH
     conflict_handling: str = CONFLICT_KEEP_LOCAL
     fields_send: List[str] = field(default_factory=list)
+    # Disambiguates "never saved this section" from "saved with everything
+    # unchecked" — a row created before this flag existed (or a fresh row
+    # nobody has touched yet) has fields_send_configured=False, so
+    # BaselinkerConnector._resolve_fields_send() falls back to the legacy
+    # "send everything" behavior instead of silently sending almost nothing.
+    # Set to True by app.py's Synchronization tab every time its Save
+    # button is clicked, and by the default-config seeding in
+    # integrations/manager.py's connect().
+    fields_send_configured: bool = False
     fields_receive: List[str] = field(default_factory=list)
     # Each entry: {"trigger_event": str, "job_type": str, "enabled": bool} —
     # see integrations/scheduler.py's job_type constants. Phase 1: saved
@@ -94,13 +103,33 @@ def _connect() -> sqlite3.Connection:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_rules_unique "
         "ON integration_sync_rules(company_id, integration_type)"
     )
+
+    # Migrate older DBs (Phase 1 shipped this table without this column).
+    # Backfill runs exactly once, right when the column is first added: any
+    # row that already has real fields_send content was clearly configured
+    # by a real save (Phase 1's UI could only produce a non-empty list via
+    # an explicit Save click), so it's safe — and necessary for backward
+    # compatibility — to mark those as configured=1 immediately rather than
+    # silently falling back to "legacy" for a company that already made a
+    # real choice.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(integration_sync_rules)")}
+    if "fields_send_configured" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE integration_sync_rules ADD COLUMN fields_send_configured INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute(
+            "UPDATE integration_sync_rules SET fields_send_configured = 1 "
+            "WHERE fields_send IS NOT NULL AND fields_send NOT IN ('[]', '')"
+        )
+        conn.commit()
+
     return conn
 
 
 _SELECT_COLS = (
     "id, company_id, integration_type, frequency, direction, conflict_handling, "
-    "fields_send, fields_receive, automation_triggers, enabled, last_enqueued_at, "
-    "created_at, updated_at"
+    "fields_send, fields_send_configured, fields_receive, automation_triggers, enabled, "
+    "last_enqueued_at, created_at, updated_at"
 )
 
 
@@ -110,10 +139,11 @@ def _row_to_rule(r: tuple) -> SyncRule:
         frequency=r[3] or FREQUENCY_MANUAL, direction=r[4] or DIRECTION_PUSH,
         conflict_handling=r[5] or CONFLICT_KEEP_LOCAL,
         fields_send=json.loads(r[6]) if r[6] else [],
-        fields_receive=json.loads(r[7]) if r[7] else [],
-        automation_triggers=json.loads(r[8]) if r[8] else [],
-        enabled=bool(r[9]), last_enqueued_at=r[10] or 0.0,
-        created_at=r[11] or 0.0, updated_at=r[12] or 0.0,
+        fields_send_configured=bool(r[7]),
+        fields_receive=json.loads(r[8]) if r[8] else [],
+        automation_triggers=json.loads(r[9]) if r[9] else [],
+        enabled=bool(r[10]), last_enqueued_at=r[11] or 0.0,
+        created_at=r[12] or 0.0, updated_at=r[13] or 0.0,
     )
 
 
@@ -173,12 +203,12 @@ def upsert_rule(rule: SyncRule) -> SyncRule:
         conn.execute(
             """INSERT OR REPLACE INTO integration_sync_rules
                (id, company_id, integration_type, frequency, direction, conflict_handling,
-                fields_send, fields_receive, automation_triggers, enabled, last_enqueued_at,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                fields_send, fields_send_configured, fields_receive, automation_triggers, enabled,
+                last_enqueued_at, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 rule.id, rule.company_id, rule.integration_type, rule.frequency, rule.direction,
-                rule.conflict_handling, json.dumps(rule.fields_send or []),
+                rule.conflict_handling, json.dumps(rule.fields_send or []), int(rule.fields_send_configured),
                 json.dumps(rule.fields_receive or []), json.dumps(rule.automation_triggers or []),
                 int(rule.enabled), rule.last_enqueued_at, rule.created_at, rule.updated_at,
             ),

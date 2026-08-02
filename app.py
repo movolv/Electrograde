@@ -44,7 +44,7 @@ from modules import (
     sync_rules_store,
     vision_grading,
 )
-from integrations import scheduler as sync_scheduler
+from integrations import field_registry, scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
 from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
 from modules.models import Product
@@ -1706,17 +1706,55 @@ elif page == "📦 Inventory":
                 st.caption("Not listed on any marketplace yet.")
 
             if IntegrationManager.is_connected(p.company_id, "baselinker"):
-                if st.button("📤 Push to BaseLinker", key=f"push_{p.id}"):
-                    result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
-                    if result.success:
-                        audit_store.log_audit(
-                            p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
-                            f"baselinker_product_id={result.external_id}",
+                bl_col1, bl_col2 = st.columns(2)
+                with bl_col1:
+                    if st.button("🔍 Preview export", key=f"preview_{p.id}", use_container_width=True):
+                        st.session_state[f"show_export_preview_{p.id}"] = True
+                with bl_col2:
+                    if st.button("📤 Push to BaseLinker", key=f"push_{p.id}", use_container_width=True):
+                        result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
+                        if result.success:
+                            audit_store.log_audit(
+                                p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
+                                f"baselinker_product_id={result.external_id}",
+                            )
+                            st.success(f"Pushed — BaseLinker product_id: {result.external_id}")
+                            st.rerun()
+                        else:
+                            st.error(result.message)
+
+                if st.session_state.get(f"show_export_preview_{p.id}"):
+                    # Built from the exact same connector.export_product() code
+                    # path (mapper.build_payload) — can never drift from what a
+                    # real push actually sends.
+                    payload = IntegrationManager.get(p.company_id, "baselinker").preview_payload(p)
+                    text_fields = payload.get("text_fields", {})
+                    prices = payload.get("prices") or {}
+                    stock = payload.get("stock") or {}
+                    with st.expander("🔍 BaseLinker export preview", expanded=True):
+                        st.caption(
+                            "\"(excluded)\" means this field's toggle is off in Synchronization — "
+                            "an empty value shown without that note just means the product itself "
+                            "has nothing there yet."
                         )
-                        st.success(f"Pushed — BaseLinker product_id: {result.external_id}")
-                        st.rerun()
-                    else:
-                        st.error(result.message)
+                        st.write("**Title:**", text_fields["name"] or "— (empty)" if "name" in text_fields else "— (excluded)")
+                        st.write(
+                            "**Description:**",
+                            text_fields["description"] or "— (empty)" if "description" in text_fields else "— (excluded)",
+                        )
+                        st.write(
+                            "**Additional description:**",
+                            text_fields["description_extra1"] if "description_extra1" in text_fields else "— (excluded)",
+                        )
+                        st.write("**SKU:**", payload.get("sku", "—"))
+                        st.write("**Barcode:**", payload.get("ean") or "— (excluded)")
+                        st.write("**Category ID:**", payload.get("category_id", "—"))
+                        st.write("**Price:**", next(iter(prices.values()), None) or "— (excluded or no price set)")
+                        st.write("**Quantity:**", next(iter(stock.values()), "— (excluded)"))
+                        st.write("**Images:**", f"{payload.get('_preview_image_count', 0)} included")
+                        if st.button("Close preview", key=f"close_preview_{p.id}"):
+                            st.session_state[f"show_export_preview_{p.id}"] = False
+                            st.rerun()
 
         with st.expander("💰 Financials", expanded=False):
             fc1, fc2, fc3 = st.columns(3)
@@ -1897,6 +1935,11 @@ elif page == "🔍 Review & Export":
                 inventory_store.save_product(p)
                 st.session_state.review_selected_ids.discard(p.id)
             progress.progress(1.0, text="Done.")
+            integration_store.record_sync(
+                current_user.company_id, "baselinker", "bulk_export_summary",
+                status=integration_store.SYNC_STATUS_SUCCESS if not fail_count else integration_store.SYNC_STATUS_ERROR,
+                error_message=f"{ok_count} successful, {fail_count} failed" if fail_count else "",
+            )
             st.markdown(f"**{ok_count} products exported successfully**")
             if fail_count:
                 st.markdown(f"**{fail_count} product(s) failed**")
@@ -2679,22 +2722,14 @@ elif page == "⚙️ Settings":
         _UI_GROUPS = ["Marketplace", "Store", "Shipping", "ERP", "Accounting", "Payments", "AI", "Communication", "Other"]
 
         # ---- Synchronization / Field Mapping / Automation tab registries --
-        # Universal across every integration — these describe ElectroGrader's
-        # OWN data model (what we could send) or generic concepts (what we
-        # could receive), so unlike Field Mapping's "Target field" (which is
-        # necessarily connector-specific), the same list is correct for any
-        # integration_type.
-        _SYNC_FIELDS_SENT = [
-            ("name", "Product title"), ("brand", "Brand"), ("model", "Model"),
-            ("product_description", "Description"), ("condition_description", "Additional description"),
-            ("defects", "Defects"), ("grade", "Grade"), ("image_paths", "Images"),
-            ("price", "Price"), ("quantity", "Quantity"), ("sku", "SKU"),
-            ("category", "Category"), ("barcode", "Barcode"),
-        ]
-        _SYNC_FIELDS_RECEIVED = [
-            ("categories", "Categories"), ("orders", "Orders"), ("stock_changes", "Stock changes"),
-            ("sales_status", "Sales status"), ("listing_status", "Listing status"),
-        ]
+        # Data-sent/received field lists now come from integrations/
+        # field_registry.py — the single shared source of truth for every
+        # ElectroGrader field any integration could sync (Synchronization
+        # checkboxes, Field Mapping's "Source field" dropdown, Preview all
+        # read the same dicts, so a future integration never needs its own
+        # copy of this list).
+        _SYNC_FIELDS_SENT = [(k, v["label"]) for k, v in field_registry.SYNCABLE_FIELDS.items()]
+        _SYNC_FIELDS_RECEIVED = [(k, v["label"]) for k, v in field_registry.RECEIVABLE_FIELDS.items()]
         _FREQUENCY_OPTIONS = [
             (sync_rules_store.FREQUENCY_MANUAL, "Manual"),
             (sync_rules_store.FREQUENCY_EVERY_15_MIN, "Every 15 minutes"),
@@ -2725,13 +2760,18 @@ elif page == "⚙️ Settings":
         ]
 
         def _render_synchronization_tab(entry, rule: sync_rules_store.SyncRule) -> None:
+            implemented = IntegrationManager.get_implemented_sync_fields(entry.integration_type)
             st.caption("Choose what ElectroGrader sends to / receives from this integration, and how often.")
             st.markdown("**Data sent from ElectroGrader**")
             send_cols = st.columns(3)
             new_fields_send = []
             for i, (key, label) in enumerate(_SYNC_FIELDS_SENT):
                 with send_cols[i % 3]:
-                    if st.checkbox(label, value=key in rule.fields_send, key=f"sync_send_{entry.integration_type}_{key}"):
+                    checkbox_label = label if key in implemented else f"{label} _(not yet applied to export)_"
+                    if st.checkbox(
+                        checkbox_label, value=key in rule.fields_send,
+                        key=f"sync_send_{entry.integration_type}_{key}",
+                    ):
                         new_fields_send.append(key)
 
             st.markdown("**Data received from external platform**")
@@ -2773,6 +2813,8 @@ elif page == "⚙️ Settings":
 
             if st.button("💾 Save synchronization settings", key=f"sync_save_{entry.integration_type}", type="primary"):
                 rule.fields_send = new_fields_send
+                rule.fields_send_configured = True  # a real Save always counts as "configured",
+                # even if the admin deliberately leaves every box unchecked.
                 rule.fields_receive = new_fields_receive
                 rule.frequency = frequency
                 rule.direction = direction
