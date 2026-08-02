@@ -31,9 +31,12 @@ class IntegrationNotConnectedError(RuntimeError):
 @dataclass(frozen=True)
 class CatalogEntry:
     integration_type: str
-    integration_category: str
+    integration_category: str  # "marketplace" | "service" — drives connector typing, not UI
     display_name: str
     available: bool
+    ui_group: str = "Other"  # finer-grained UI filter chip, e.g. "Marketplace"/"ERP"/"Shipping"
+    description: str = ""  # one-line catalog blurb
+    keywords: tuple = ()  # extra search terms beyond display_name
 
 
 CONNECTORS = {
@@ -42,16 +45,56 @@ CONNECTORS = {
 }
 
 CATALOG = [
-    CatalogEntry("baselinker", integration_store.CATEGORY_MARKETPLACE, "BaseLinker", True),
-    CatalogEntry("ebay", integration_store.CATEGORY_MARKETPLACE, "eBay", False),
-    CatalogEntry("amazon", integration_store.CATEGORY_MARKETPLACE, "Amazon", False),
-    CatalogEntry("allegro", integration_store.CATEGORY_MARKETPLACE, "Allegro", False),
-    CatalogEntry("tradera", integration_store.CATEGORY_MARKETPLACE, "Tradera", False),
-    CatalogEntry("woocommerce", integration_store.CATEGORY_MARKETPLACE, "WooCommerce", False),
-    CatalogEntry("deepl", integration_store.CATEGORY_SERVICE, "DeepL Translate", True),
-    CatalogEntry("openai", integration_store.CATEGORY_SERVICE, "AI Assistant", False),
-    CatalogEntry("dhl", integration_store.CATEGORY_SERVICE, "DHL Shipping", False),
-    CatalogEntry("dpd", integration_store.CATEGORY_SERVICE, "DPD Shipping", False),
+    CatalogEntry(
+        "baselinker", integration_store.CATEGORY_MARKETPLACE, "BaseLinker", True,
+        ui_group="ERP", description="Multichannel inventory & order sync (Base.com)",
+        keywords=("base.com", "multichannel", "inventory", "orders", "sync"),
+    ),
+    CatalogEntry(
+        "ebay", integration_store.CATEGORY_MARKETPLACE, "eBay", False,
+        ui_group="Marketplace", description="Sell on the eBay marketplace",
+        keywords=("auction", "marketplace"),
+    ),
+    CatalogEntry(
+        "amazon", integration_store.CATEGORY_MARKETPLACE, "Amazon", False,
+        ui_group="Marketplace", description="Sell on the Amazon marketplace",
+        keywords=("marketplace", "fba"),
+    ),
+    CatalogEntry(
+        "allegro", integration_store.CATEGORY_MARKETPLACE, "Allegro", False,
+        ui_group="Marketplace", description="Sell on Allegro, Poland's largest marketplace",
+        keywords=("marketplace", "poland"),
+    ),
+    CatalogEntry(
+        "tradera", integration_store.CATEGORY_MARKETPLACE, "Tradera", False,
+        ui_group="Marketplace", description="Sell on Tradera, Sweden's largest marketplace",
+        keywords=("marketplace", "sweden", "auction"),
+    ),
+    CatalogEntry(
+        "woocommerce", integration_store.CATEGORY_MARKETPLACE, "WooCommerce", False,
+        ui_group="Store", description="Sync products to your own WooCommerce store",
+        keywords=("wordpress", "store", "ecommerce"),
+    ),
+    CatalogEntry(
+        "deepl", integration_store.CATEGORY_SERVICE, "DeepL Translate", True,
+        ui_group="Communication", description="Automatic listing translation",
+        keywords=("translate", "language", "ai"),
+    ),
+    CatalogEntry(
+        "openai", integration_store.CATEGORY_SERVICE, "AI Assistant", False,
+        ui_group="AI", description="AI-assisted descriptions & automation",
+        keywords=("ai", "assistant", "gpt"),
+    ),
+    CatalogEntry(
+        "dhl", integration_store.CATEGORY_SERVICE, "DHL Shipping", False,
+        ui_group="Shipping", description="DHL shipping labels & rates",
+        keywords=("shipping", "courier", "labels"),
+    ),
+    CatalogEntry(
+        "dpd", integration_store.CATEGORY_SERVICE, "DPD Shipping", False,
+        ui_group="Shipping", description="DPD shipping labels & rates",
+        keywords=("shipping", "courier", "labels"),
+    ),
 ]
 
 _CATALOG_BY_TYPE = {entry.integration_type: entry for entry in CATALOG}

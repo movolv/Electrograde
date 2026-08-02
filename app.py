@@ -57,6 +57,11 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 THUMBS_DIR = STATIC_DIR / "thumbnails"
 THUMB_MAX_DIM = 96
 
+# Drop a {integration_type}.png/.svg here later to replace the CSS wordmark
+# fallback below with a real logo — no code change needed (see
+# _render_integration_logo in the Settings page).
+INTEGRATION_LOGOS_DIR = STATIC_DIR / "integration_logos"
+
 
 def _ensure_thumbnail(image_path: str) -> Path | None:
     """Generates (and disk-caches) a small JPEG thumbnail for the given
@@ -2450,13 +2455,82 @@ elif page == "⚙️ Settings":
 
     with tab_integrations:
         _company_label = current_company.name if current_company else current_user.company_id
-        st.caption(f"Connect marketplaces and external services for {_company_label}.")
+        _catalog_by_type = {e.integration_type: e for e in CATALOG}
 
-        _INTEGRATION_STATUS_LABELS = {
-            integration_store.STATUS_CONNECTED: "✅ Connected",
-            integration_store.STATUS_DISCONNECTED: "⚪ Not connected",
-            integration_store.STATUS_ERROR: "⚠️ Error — needs attention",
+        st.markdown(
+            """
+            <style>
+            div[class*="st-key-integration_card_"], div[class*="st-key-catalog_card_"] {
+                border-radius: 12px !important;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+                transition: box-shadow 0.15s ease, transform 0.15s ease;
+            }
+            div[class*="st-key-integration_card_"]:hover, div[class*="st-key-catalog_card_"]:hover {
+                box-shadow: 0 6px 16px rgba(0,0,0,0.14);
+                transform: translateY(-2px);
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ---- status/health (derived from existing data, no new DB columns) --
+        _HEALTH_STYLES = {
+            "connected": ("Connected", "#16a34a", "🟢"),
+            "attention": ("Needs attention", "#eab308", "🟡"),
+            "failed": ("Connection failed", "#dc2626", "🔴"),
+            "never_synced": ("Never synchronized", "#9ca3af", "⚪"),
         }
+
+        def _integration_health(record) -> tuple:
+            if record is None or record.status == integration_store.STATUS_ERROR:
+                return _HEALTH_STYLES["failed"]
+            if not record.last_sync_at:
+                return _HEALTH_STYLES["never_synced"]
+            latest = integration_store.list_sync_log(record.company_id, record.integration_type, limit=1)
+            if latest and latest[0].status == integration_store.SYNC_STATUS_ERROR:
+                return _HEALTH_STYLES["attention"]
+            return _HEALTH_STYLES["connected"]
+
+        def _integration_account_label(integration_type: str, record) -> str:
+            if record and integration_type == "baselinker" and record.settings.get("inventory_id"):
+                return f"Inventory {record.settings['inventory_id']}"
+            return ""
+
+        # ---- logo: real file if dropped in later, styled wordmark otherwise --
+        _LOGO_STYLES = {
+            "baselinker": {"parts": [("base", "#111111"), (".", "#2f6fed")], "weight": 800},
+            "ebay": {"parts": [("e", "#e53238"), ("b", "#0064d2"), ("a", "#f5af02"), ("y", "#86b817")], "weight": 800},
+            "amazon": {"parts": [("amazon", "#111111")], "weight": 700},
+            "allegro": {"parts": [("allegro", "#ff5a00")], "weight": 800},
+            "tradera": {"parts": [("tradera", "#1a7a3c")], "weight": 800},
+            "woocommerce": {"parts": [("woo", "#7f54b3")], "weight": 800},
+            "deepl": {"parts": [("Deep", "#0f2b46"), ("L", "#0f6fff")], "weight": 800},
+            "openai": {"parts": [("AI Assistant", "#111111")], "weight": 700},
+            "dhl": {"parts": [("DHL", "#d40511")], "weight": 900},
+            "dpd": {"parts": [("DPD", "#dc0032")], "weight": 900},
+        }
+
+        def _render_integration_logo(integration_type: str, height_px: int = 40) -> None:
+            logo_path = INTEGRATION_LOGOS_DIR / f"{integration_type}.png"
+            if logo_path.exists():
+                st.image(str(logo_path), width=height_px * 3)
+                return
+            style = _LOGO_STYLES.get(integration_type)
+            parts = style["parts"] if style else [(integration_type.replace("_", " ").title(), "#6b7280")]
+            weight = style["weight"] if style else 600
+            spans = "".join(f'<span style="color:{color};">{text}</span>' for text, color in parts)
+            # Brand wordmarks are colored for a light background (matching how
+            # every one of these logos is normally displayed) — always render
+            # them inside a white box so they stay legible regardless of the
+            # app's own (often dark) theme.
+            st.markdown(
+                f'<div style="background:#ffffff; border-radius:8px; padding:8px 12px; '
+                f'display:inline-block;"><div style="font-size:{height_px * 0.5}px; '
+                f"font-weight:{weight}; font-family:-apple-system,BlinkMacSystemFont,"
+                f"'Segoe UI',sans-serif; line-height:1.2; white-space:nowrap;\">{spans}</div></div>",
+                unsafe_allow_html=True,
+            )
 
         @st.dialog("Disconnect integration?")
         def _confirm_disconnect_integration_dialog(integration_type: str, display_name: str):
@@ -2509,91 +2583,206 @@ elif page == "⚙️ Settings":
         def _render_baselinker_settings(entry, record) -> None:
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
-            status_label = _INTEGRATION_STATUS_LABELS.get(record.status if record else integration_store.STATUS_DISCONNECTED)
-            with st.expander(f"{entry.display_name} — {status_label}", expanded=not connected):
-                if record and record.last_sync_at:
-                    st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
-                settings = record.settings if record else {}
-                with st.form(f"integration_form_{entry.integration_type}"):
-                    token = st.text_input(
-                        "API token", type="password",
-                        placeholder="Leave blank to keep current" if has_credentials else "",
-                        help="Account & other -> My account -> API in the BaseLinker/Base.com panel.",
-                    )
-                    inventory_id = st.text_input("Inventory ID", value=settings.get("inventory_id") or "")
-                    category_id = st.text_input("Category ID", value=settings.get("category_id") or "")
-                    price_group_id = st.text_input("Price group ID (optional)", value=settings.get("price_group_id") or "")
-                    warehouse_id = st.text_input("Warehouse ID (optional)", value=settings.get("warehouse_id") or "")
-                    tax_rate = st.text_input("Tax rate % (optional)", value=settings.get("tax_rate") or "23")
-                    submitted = st.form_submit_button("💾 Save & test connection", type="primary")
-                    if submitted:
-                        if not token and not has_credentials:
-                            st.warning("API token is required.")
-                        elif not inventory_id.strip() or not category_id.strip():
-                            st.warning("Inventory ID and Category ID are required.")
-                        else:
-                            creds = {"token": token} if token else dict(record.credentials)
-                            new_settings = {
-                                "inventory_id": inventory_id.strip(),
-                                "category_id": category_id.strip(),
-                                "price_group_id": price_group_id.strip(),
-                                "warehouse_id": warehouse_id.strip(),
-                                "tax_rate": tax_rate.strip() or "23",
-                            }
-                            result = IntegrationManager.connect(
-                                current_user.company_id, entry.integration_type, creds, new_settings,
-                                user_id=current_user.id,
-                            )
-                            (st.success if result.success else st.error)(result.message)
-                            st.rerun()
+            if record and record.last_sync_at:
+                st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
+            settings = record.settings if record else {}
+            with st.form(f"integration_form_{entry.integration_type}"):
+                token = st.text_input(
+                    "API token", type="password",
+                    placeholder="Leave blank to keep current" if has_credentials else "",
+                    help="Account & other -> My account -> API in the BaseLinker/Base.com panel.",
+                )
+                inventory_id = st.text_input("Inventory ID", value=settings.get("inventory_id") or "")
+                category_id = st.text_input("Category ID", value=settings.get("category_id") or "")
+                price_group_id = st.text_input("Price group ID (optional)", value=settings.get("price_group_id") or "")
+                warehouse_id = st.text_input("Warehouse ID (optional)", value=settings.get("warehouse_id") or "")
+                tax_rate = st.text_input("Tax rate % (optional)", value=settings.get("tax_rate") or "23")
+                submitted = st.form_submit_button("💾 Save & test connection", type="primary")
+                if submitted:
+                    if not token and not has_credentials:
+                        st.warning("API token is required.")
+                    elif not inventory_id.strip() or not category_id.strip():
+                        st.warning("Inventory ID and Category ID are required.")
+                    else:
+                        creds = {"token": token} if token else dict(record.credentials)
+                        new_settings = {
+                            "inventory_id": inventory_id.strip(),
+                            "category_id": category_id.strip(),
+                            "price_group_id": price_group_id.strip(),
+                            "warehouse_id": warehouse_id.strip(),
+                            "tax_rate": tax_rate.strip() or "23",
+                        }
+                        result = IntegrationManager.connect(
+                            current_user.company_id, entry.integration_type, creds, new_settings,
+                            user_id=current_user.id,
+                        )
+                        (st.success if result.success else st.error)(result.message)
+                        st.rerun()
 
-                _render_integration_test_and_disconnect(entry, connected)
-                _render_integration_activity(entry.integration_type)
+            _render_integration_test_and_disconnect(entry, connected)
+            _render_integration_activity(entry.integration_type)
 
         def _render_deepl_settings(entry, record) -> None:
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
-            status_label = _INTEGRATION_STATUS_LABELS.get(record.status if record else integration_store.STATUS_DISCONNECTED)
-            with st.expander(f"{entry.display_name} — {status_label}", expanded=not connected):
-                if record and record.last_sync_at:
-                    st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
-                with st.form(f"integration_form_{entry.integration_type}"):
-                    api_key = st.text_input(
-                        "API key", type="password",
-                        placeholder="Leave blank to keep current" if has_credentials else "",
-                    )
-                    submitted = st.form_submit_button("💾 Save & test connection", type="primary")
-                    if submitted:
-                        if not api_key and not has_credentials:
-                            st.warning("API key is required.")
-                        else:
-                            creds = {"api_key": api_key} if api_key else dict(record.credentials)
-                            result = IntegrationManager.connect(
-                                current_user.company_id, entry.integration_type, creds, {},
-                                user_id=current_user.id,
-                            )
-                            (st.success if result.success else st.error)(result.message)
-                            st.rerun()
+            if record and record.last_sync_at:
+                st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
+            with st.form(f"integration_form_{entry.integration_type}"):
+                api_key = st.text_input(
+                    "API key", type="password",
+                    placeholder="Leave blank to keep current" if has_credentials else "",
+                )
+                submitted = st.form_submit_button("💾 Save & test connection", type="primary")
+                if submitted:
+                    if not api_key and not has_credentials:
+                        st.warning("API key is required.")
+                    else:
+                        creds = {"api_key": api_key} if api_key else dict(record.credentials)
+                        result = IntegrationManager.connect(
+                            current_user.company_id, entry.integration_type, creds, {},
+                            user_id=current_user.id,
+                        )
+                        (st.success if result.success else st.error)(result.message)
+                        st.rerun()
 
-                _render_integration_test_and_disconnect(entry, connected)
-                _render_integration_activity(entry.integration_type)
+            _render_integration_test_and_disconnect(entry, connected)
+            _render_integration_activity(entry.integration_type)
 
         _INTEGRATION_SETTINGS_RENDERERS = {
             "baselinker": _render_baselinker_settings,
             "deepl": _render_deepl_settings,
         }
 
-        for category, category_label in (
-            (integration_store.CATEGORY_MARKETPLACE, "Marketplaces"),
-            (integration_store.CATEGORY_SERVICE, "Services"),
-        ):
-            st.subheader(category_label)
-            for entry in CATALOG:
-                if entry.integration_category != category:
-                    continue
+        _UI_GROUPS = ["Marketplace", "Store", "Shipping", "ERP", "Accounting", "Payments", "AI", "Communication", "Other"]
+
+        def _render_catalog_card(entry) -> None:
+            with st.container(border=True, key=f"catalog_card_{entry.integration_type}"):
+                _render_integration_logo(entry.integration_type)
+                st.markdown(f"**{entry.display_name}**")
+                st.caption(entry.description)
                 if not entry.available:
-                    st.write(f"**{entry.display_name}**")
-                    st.caption("🔒 Coming soon")
-                    continue
+                    st.caption("🔒 Coming Soon")
+                    return
                 record = integration_store.get_integration(current_user.company_id, entry.integration_type)
-                _INTEGRATION_SETTINGS_RENDERERS[entry.integration_type](entry, record)
+                if record is not None and record.status == integration_store.STATUS_CONNECTED:
+                    st.caption("✅ Connected")
+                btn_label = "Edit" if record is not None else "Connect"
+                if st.button(btn_label, key=f"catalog_btn_{entry.integration_type}", use_container_width=True):
+                    st.session_state.settings_open_integration = entry.integration_type
+                    st.rerun()
+
+        @st.dialog("Add Integration", width="large")
+        def _add_integration_dialog():
+            search = st.text_input("🔍 Search integrations...", key="add_integration_search")
+            selected_group = st.pills(
+                "Category", ["All"] + _UI_GROUPS, selection_mode="single",
+                default="All", key="add_integration_group",
+            ) or "All"
+
+            q = search.strip().lower()
+
+            def _matches(entry) -> bool:
+                if selected_group != "All" and entry.ui_group != selected_group:
+                    return False
+                if not q:
+                    return True
+                haystack = " ".join([entry.integration_type, entry.display_name, *entry.keywords]).lower()
+                return q in haystack
+
+            filtered = [e for e in CATALOG if _matches(e)]
+            if not filtered:
+                st.info("No integrations match your search.")
+            for group in _UI_GROUPS:
+                group_entries = [e for e in filtered if e.ui_group == group]
+                if not group_entries:
+                    continue
+                st.markdown(f"**{group}**")
+                cols = st.columns(4)
+                for i, entry in enumerate(group_entries):
+                    with cols[i % 4]:
+                        _render_catalog_card(entry)
+
+        open_type = st.session_state.get("settings_open_integration", "")
+        open_entry = _catalog_by_type.get(open_type) if open_type else None
+        if open_type and (open_entry is None or not open_entry.available):
+            st.session_state.settings_open_integration = ""
+            open_type, open_entry = "", None
+
+        if open_entry is not None:
+            # ---- B) Full configuration page (not a dialog — see plan: this
+            # is where Mapping/Sync/Webhooks/Analytics/Logs tabs land later) --
+            if st.button("← Back to Integrations", key="settings_back"):
+                st.session_state.settings_open_integration = ""
+                st.rerun()
+            record = integration_store.get_integration(current_user.company_id, open_entry.integration_type)
+            head1, head2 = st.columns([1, 6])
+            with head1:
+                _render_integration_logo(open_entry.integration_type, height_px=32)
+            with head2:
+                st.markdown(f"### {open_entry.display_name}")
+                if record is not None:
+                    label, color, dot = _integration_health(record)
+                    st.markdown(f"<span style='color:{color};'>{dot} {label}</span>", unsafe_allow_html=True)
+                else:
+                    st.caption("⚪ Not connected yet")
+            st.divider()
+            _INTEGRATION_SETTINGS_RENDERERS[open_entry.integration_type](open_entry, record)
+
+        else:
+            # ---- A) Dashboard: only connected integrations, as cards --
+            head_col1, head_col2 = st.columns([4, 1])
+            with head_col1:
+                st.caption(f"Connect marketplaces and external services for {_company_label}.")
+            with head_col2:
+                if st.button("➕ Add Integration", use_container_width=True, key="open_add_integration"):
+                    _add_integration_dialog()
+
+            connected_records = [
+                r for r in integration_store.list_integrations(current_user.company_id)
+                if r.status in (integration_store.STATUS_CONNECTED, integration_store.STATUS_ERROR)
+            ]
+
+            st.divider()
+
+            if not connected_records:
+                empty_cols = st.columns([1, 2, 1])
+                with empty_cols[1]:
+                    st.markdown(
+                        "<div style='text-align:center; padding:2rem 0;'>"
+                        "<div style='font-size:3rem;'>🧩</div>"
+                        "<h3>No integrations connected yet</h3>"
+                        "<p style='color:#6b7280;'>Connect a marketplace or service to start "
+                        "syncing products automatically.</p></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if st.button(
+                        "➕ Add Integration", use_container_width=True, type="primary", key="empty_add_integration",
+                    ):
+                        _add_integration_dialog()
+            else:
+                cols = st.columns(3)
+                for i, record in enumerate(connected_records):
+                    entry = _catalog_by_type.get(record.integration_type)
+                    if entry is None:
+                        continue
+                    with cols[i % 3]:
+                        with st.container(border=True, key=f"integration_card_{record.integration_type}"):
+                            _render_integration_logo(record.integration_type)
+                            st.markdown(f"**{entry.display_name}**")
+                            label, color, dot = _integration_health(record)
+                            st.markdown(f"<span style='color:{color};'>{dot} {label}</span>", unsafe_allow_html=True)
+                            account_label = _integration_account_label(record.integration_type, record)
+                            if account_label:
+                                st.caption(account_label)
+                            st.caption(
+                                f"Last synced: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}"
+                                if record.last_sync_at else "Never synchronized"
+                            )
+                            if st.button("Edit", key=f"card_edit_{record.integration_type}", use_container_width=True):
+                                st.session_state.settings_open_integration = record.integration_type
+                                st.rerun()
+                            if st.button(
+                                "Disconnect", key=f"card_disconnect_{record.integration_type}",
+                                use_container_width=True,
+                            ):
+                                _confirm_disconnect_integration_dialog(record.integration_type, entry.display_name)
