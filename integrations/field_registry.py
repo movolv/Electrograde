@@ -36,3 +36,34 @@ RECEIVABLE_FIELDS = {
     "sales_status": {"label": "Sales status", "type": "text"},
     "listing_status": {"label": "Listing status", "type": "text"},
 }
+
+# Sync Ownership: which SYSTEM is the master/source-of-truth for a given
+# field, once real two-way sync exists (modules/sync_ownership_store.py,
+# Settings -> Integrations -> [connector] -> "Sync Ownership" tab). A
+# deliberately separate concern from SYNCABLE_FIELDS above (which is about
+# whether ElectroGrader SENDS a field at all) — ownership is about who
+# WINS when both sides could plausibly have a value. "status" is a new
+# concept here (the marketplace listing/sale status) with no equivalent in
+# SYNCABLE_FIELDS/RECEIVABLE_FIELDS.
+#
+# default_owner is either "electrograder", "manual", or the sentinel
+# "<connector>" (meaning "whichever connector this config is for" — e.g.
+# "baselinker" — resolved by modules/sync_ownership_store.get_field_owner(),
+# never hardcoded to one integration here).
+SYNC_OWNERSHIP_FIELDS = {
+    "name": {"label": "Title", "group": "Product Content", "default_owner": "electrograder"},
+    "product_description": {"label": "Description", "group": "Product Content", "default_owner": "electrograder"},
+    "image_paths": {"label": "Images", "group": "Product Content", "default_owner": "electrograder"},
+    "brand": {"label": "Brand", "group": "Product Content", "default_owner": "electrograder"},
+    "model": {"label": "Model", "group": "Product Content", "default_owner": "electrograder"},
+    "category": {"label": "Category", "group": "Product Content", "default_owner": "electrograder"},
+    "grade": {"label": "Grade", "group": "Product Content", "default_owner": "electrograder"},
+    "defects": {"label": "Defects", "group": "Product Content", "default_owner": "electrograder"},
+    "barcode": {"label": "Barcode", "group": "Product Content", "default_owner": "electrograder"},
+    "price": {"label": "Price", "group": "Sales Data", "default_owner": "electrograder"},
+    "quantity": {"label": "Quantity", "group": "Sales Data", "default_owner": "<connector>"},
+    "status": {"label": "Status", "group": "Sales Data", "default_owner": "<connector>"},
+}
+
+SOURCE_ELECTROGRADER = "electrograder"
+SOURCE_MANUAL = "manual"

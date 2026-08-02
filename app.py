@@ -41,12 +41,15 @@ from modules import (
     repair_store,
     spec_lookup,
     sync_job_store,
+    sync_ownership_store,
     sync_rules_store,
     vision_grading,
 )
 from integrations import field_registry, scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
 from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
+from sync import service as sync_service
+from sync.status import STATUS_DISABLED, STATUS_SUCCESS
 from modules.models import Product
 from modules.review_table_component import review_table
 from modules.inventory_table_component import inventory_table
@@ -1706,7 +1709,7 @@ elif page == "📦 Inventory":
                 st.caption("Not listed on any marketplace yet.")
 
             if IntegrationManager.is_connected(p.company_id, "baselinker"):
-                bl_col1, bl_col2 = st.columns(2)
+                bl_col1, bl_col2, bl_col3 = st.columns(3)
                 with bl_col1:
                     if st.button("🔍 Preview export", key=f"preview_{p.id}", use_container_width=True):
                         st.session_state[f"show_export_preview_{p.id}"] = True
@@ -1722,6 +1725,29 @@ elif page == "📦 Inventory":
                             st.rerun()
                         else:
                             st.error(result.message)
+                with bl_col3:
+                    if st.button("🔄 Sync now", key=f"sync_now_{p.id}", use_container_width=True):
+                        st.session_state[f"sync_now_results_{p.id}"] = sync_service.run_manual_sync(
+                            p.company_id, p, "baselinker",
+                        )
+
+                if st.session_state.get(f"sync_now_results_{p.id}"):
+                    # Two-way sync architecture prep (Phase 3.2) — export is
+                    # real (delegates to the same export_product() path as
+                    # the Push button above); import honestly reports
+                    # "disabled" since no connector implements pulling data
+                    # FROM BaseLinker yet. Never fakes a result either way.
+                    with st.expander("🔄 Sync now — result", expanded=True):
+                        for rec in st.session_state[f"sync_now_results_{p.id}"]:
+                            if rec.sync_status == STATUS_SUCCESS:
+                                st.success(f"{rec.direction.capitalize()}: ✅ success")
+                            elif rec.sync_status == STATUS_DISABLED:
+                                st.info(f"{rec.direction.capitalize()}: ⏸️ {rec.error_message or 'disabled'}")
+                            else:
+                                st.error(f"{rec.direction.capitalize()}: ❌ {rec.error_message}")
+                        if st.button("Close", key=f"close_sync_now_{p.id}"):
+                            st.session_state[f"sync_now_results_{p.id}"] = None
+                            st.rerun()
 
                 if st.session_state.get(f"show_export_preview_{p.id}"):
                     # Built from the exact same connector.export_product() code
@@ -2877,6 +2903,52 @@ elif page == "⚙️ Settings":
                 st.success("Saved.")
                 st.rerun()
 
+        def _render_sync_ownership_tab(entry) -> None:
+            st.caption(
+                "Which system is the master source of truth for each field, once real two-way sync exists. "
+                "Purely configuration today — nothing reads this to make a live sync decision yet."
+            )
+            source_options = ["electrograder", entry.integration_type, "manual"]
+            source_labels = {
+                "electrograder": "ElectroGrader", entry.integration_type: entry.display_name, "manual": "Manual",
+            }
+            config = sync_ownership_store.list_field_config(current_user.company_id, entry.integration_type)
+
+            new_choices = {}
+            for group in ("Product Content", "Sales Data"):
+                st.markdown(f"**{group}**")
+                fields_in_group = [
+                    (key, meta) for key, meta in field_registry.SYNC_OWNERSHIP_FIELDS.items() if meta["group"] == group
+                ]
+                for key, meta in fields_in_group:
+                    row_col1, row_col2, row_col3 = st.columns([2, 2, 1])
+                    current_cfg = config[key]
+                    with row_col1:
+                        st.write(meta["label"])
+                    with row_col2:
+                        chosen = st.selectbox(
+                            meta["label"], source_options,
+                            index=source_options.index(current_cfg.source_system)
+                            if current_cfg.source_system in source_options else 0,
+                            format_func=lambda k: source_labels[k],
+                            key=f"ownership_source_{entry.integration_type}_{key}",
+                            label_visibility="collapsed",
+                        )
+                    with row_col3:
+                        enabled = st.checkbox(
+                            "Enabled", value=current_cfg.sync_enabled,
+                            key=f"ownership_enabled_{entry.integration_type}_{key}",
+                        )
+                    new_choices[key] = (chosen, enabled)
+
+            if st.button("💾 Save Sync Ownership", key=f"ownership_save_{entry.integration_type}", type="primary"):
+                for field_name, (source_system, sync_enabled) in new_choices.items():
+                    sync_ownership_store.upsert_field_config(
+                        current_user.company_id, entry.integration_type, field_name, source_system, sync_enabled,
+                    )
+                st.success("Saved.")
+                st.rerun()
+
         def _render_automation_tab(entry, rule: sync_rules_store.SyncRule) -> None:
             st.caption("These actions are saved but not executed automatically yet — real automation is future work.")
             triggers_by_event = {t.get("trigger_event"): t for t in rule.automation_triggers}
@@ -2991,8 +3063,8 @@ elif page == "⚙️ Settings":
                     st.caption("⚪ Not connected yet")
             st.divider()
 
-            tab_general, tab_sync, tab_mapping, tab_automation, tab_logs = st.tabs(
-                ["General", "Synchronization", "Field Mapping", "Automation", "Logs"]
+            tab_general, tab_sync, tab_mapping, tab_ownership, tab_automation, tab_logs = st.tabs(
+                ["General", "Synchronization", "Field Mapping", "Sync Ownership", "Automation", "Logs"]
             )
             with tab_general:
                 _INTEGRATION_SETTINGS_RENDERERS[open_entry.integration_type](open_entry, record)
@@ -3001,6 +3073,8 @@ elif page == "⚙️ Settings":
                 _render_synchronization_tab(open_entry, rule)
             with tab_mapping:
                 _render_field_mapping_tab(open_entry, mapping)
+            with tab_ownership:
+                _render_sync_ownership_tab(open_entry)
             with tab_automation:
                 _render_automation_tab(open_entry, rule)
             with tab_logs:

@@ -60,6 +60,10 @@ class CompanyIntegration:
     created_at: float = 0.0
     updated_at: float = 0.0
     last_sync_at: float = 0.0
+    # Prepared for future OAuth-style connectors (eBay/Amazon/etc.) that need
+    # token refresh — always 0 today (BaseLinker/DeepL use static tokens with
+    # no expiry), read/written by nothing yet.
+    token_expires_at: float = 0.0
 
 
 @dataclass
@@ -98,6 +102,13 @@ def _connect() -> sqlite3.Connection:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_company_integrations_unique "
         "ON company_integrations(company_id, integration_type)"
     )
+
+    # Migrate older DBs (Phase 1/2 shipped this table without this column).
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(company_integrations)")}
+    if "token_expires_at" not in existing_cols:
+        conn.execute("ALTER TABLE company_integrations ADD COLUMN token_expires_at REAL NOT NULL DEFAULT 0")
+        conn.commit()
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS integration_sync_log (
@@ -122,7 +133,7 @@ def _connect() -> sqlite3.Connection:
 
 _SELECT_COLS = (
     "id, company_id, integration_type, integration_category, status, credentials, "
-    "settings, created_at, updated_at, last_sync_at"
+    "settings, created_at, updated_at, last_sync_at, token_expires_at"
 )
 
 
@@ -135,6 +146,7 @@ def _row_to_integration(r: tuple) -> CompanyIntegration:
         credentials=crypto.decrypt_dict(r[5]) if r[5] else {},
         settings=json.loads(r[6]) if r[6] else {},
         created_at=r[7] or 0.0, updated_at=r[8] or 0.0, last_sync_at=r[9] or 0.0,
+        token_expires_at=r[10] or 0.0,
     )
 
 
@@ -183,14 +195,15 @@ def upsert_integration(integration: CompanyIntegration) -> CompanyIntegration:
         conn.execute(
             """INSERT OR REPLACE INTO company_integrations
                (id, company_id, integration_type, integration_category, status, credentials,
-                settings, created_at, updated_at, last_sync_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                settings, created_at, updated_at, last_sync_at, token_expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 integration.id, integration.company_id, integration.integration_type,
                 integration.integration_category, integration.status,
                 crypto.encrypt_dict(integration.credentials) if integration.credentials else "",
                 json.dumps(integration.settings or {}),
                 integration.created_at, integration.updated_at, integration.last_sync_at,
+                integration.token_expires_at,
             ),
         )
     conn.close()

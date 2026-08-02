@@ -166,6 +166,50 @@ class MarketplaceConnector(IntegrationConnector):
 
         return result
 
+    # ---- Phase 3.3 Connector Interface aliases --------------------------
+    # Purely additive convenience names matching the generic
+    # connect/test_connection/build_payload/validate/export/sync shape a
+    # future connector (eBay/Amazon/etc.) is expected to implement — every
+    # one of these just delegates to the existing, proven methods above.
+    # Nothing here changes create_product/update_product/delete_product/
+    # sync_inventory/export_product/preview_payload or any of their call
+    # sites (app.py, Review & Export) — this is a second name for the same
+    # thing, not a replacement.
+
+    def validate(self) -> ConnectionTestResult:
+        """Alias for connect() (offline field validation)."""
+        return self.connect()
+
+    def build_payload(self, product) -> dict:
+        """Alias for preview_payload()."""
+        return self.preview_payload(product)
+
+    def export(self, product) -> ConnectorActionResult:
+        """Alias for export_product()."""
+        return self.export_product(product)
+
+    def import_product(self, external_id: str) -> ConnectorActionResult:
+        """The reverse of export_product() — pulls remote state (quantity/
+        price/status) FROM this marketplace INTO ElectroGrader. Phase 3.2 is
+        architecture-only: no connector implements this yet. Returns an
+        honest "not implemented" failure rather than a fake success or a
+        silent no-op — sync/engine.py records this as STATUS_DISABLED, not
+        STATUS_FAILED, since nothing actually went wrong. A future connector
+        overrides this method once a real pull-from-marketplace API call is
+        wired up."""
+        return ConnectorActionResult(
+            success=False, message=f"Import sync not implemented yet for '{self.integration_type}'.",
+        )
+
+    def sync(self, product, external_id: str = "", direction: str = "export") -> ConnectorActionResult:
+        """Universal two-way entry point — sync/engine.py's sync_product()
+        calls this rather than export_product()/import_product() directly,
+        so the Sync Engine never needs to know which direction maps to
+        which underlying method."""
+        if direction == "import":
+            return self.import_product(external_id)
+        return self.export_product(product)
+
 
 class ServiceConnector(IntegrationConnector):
     """A non-marketplace external service (translation, AI, shipping...).
