@@ -24,12 +24,12 @@ from modules import (
     auth_cookie,
     auth_store,
     barcode_scanner,
-    baselinker_client,
     company_store,
     description_gen,
     export,
     identifier_lookup,
     image_pipeline,
+    integration_store,
     inventory_store,
     manifest_import,
     manifest_store,
@@ -40,6 +40,8 @@ from modules import (
     spec_lookup,
     vision_grading,
 )
+from integrations.base import ConnectorActionResult
+from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
 from modules.models import Product
 from modules.review_table_component import review_table
 from modules.inventory_table_component import inventory_table
@@ -733,6 +735,7 @@ _nav_pages = ["🆕 New Item", "📦 Inventory", "🔍 Review & Export", "📤 C
 if current_user.role == auth.ROLE_ADMIN:
     _nav_pages.insert(1, "📥 Import Manifest")
     _nav_pages.append("👥 Manage Users")
+    _nav_pages.append("⚙️ Settings")
 page = st.sidebar.radio(
     "Navigate",
     _nav_pages,
@@ -1286,10 +1289,9 @@ if page == "🆕 New Item":
                     saved_paths.append(str(fp))
                 product.image_paths = saved_paths
 
-                excel_warning = inventory_store.save_product(product)
+                inventory_store.save_product(product)
+                audit_store.log_audit(product.company_id, current_user.id, "CREATE_PRODUCT", "product", product.id)
                 st.success(f"Saved '{product.name or product.model_number}' to inventory.")
-                if excel_warning:
-                    st.warning(excel_warning)
                 st.balloons()
                 reset_wizard()
 
@@ -1363,16 +1365,18 @@ elif page == "📥 Import Manifest":
                         progress.progress((i + 1) / len(to_check), text=f"Checked {i + 1}/{len(to_check)} item(s)...")
                     progress.empty()
 
-                excel_warning = inventory_store.save_products_bulk(drafts)
+                inventory_store.save_products_bulk(drafts)
                 batch.status = manifest_store.STATUS_IMPORTED
                 manifest_store.save_batch(batch)
+                audit_store.log_audit(
+                    st.session_state.company_id, current_user.id, "IMPORT_MANIFEST", "manifest_batch", batch.id,
+                    f"{len(drafts)} item(s), file={batch.filename}",
+                )
 
                 st.success(
                     f"Created manifest batch **{batch.id}** with {len(drafts)} item(s), "
                     f"assigned SKU **{skus[0]}** to **{skus[-1]}**."
                 )
-                if excel_warning:
-                    st.warning(excel_warning)
                 st.caption("Go to '🆕 New Item' → '📥 From a pending manifest item' to process them one by one.")
             except Exception as e:
                 batch.status = manifest_store.STATUS_ERROR
@@ -1478,7 +1482,7 @@ elif page == "📥 Import Manifest":
                                     for d, sku in zip(new, new_skus):
                                         d.sku = sku
 
-                                excel_warning = inventory_store.save_products_bulk(updated + new)
+                                inventory_store.save_products_bulk(updated + new)
                                 b.filename = replace_upload.name
                                 b.row_count = len(r_rows)
                                 b.column_map = r_confirmed_map
@@ -1486,13 +1490,16 @@ elif page == "📥 Import Manifest":
                                 b.status = manifest_store.STATUS_IMPORTED
                                 b.error_message = ""
                                 manifest_store.save_batch(b)
+                                audit_store.log_audit(
+                                    st.session_state.company_id, current_user.id, "IMPORT_MANIFEST",
+                                    "manifest_batch", b.id,
+                                    f"replace: {len(updated)} updated, {len(new)} new, file={b.filename}",
+                                )
 
                                 st.success(
                                     f"Replaced: {len(updated)} product(s) updated in place, "
                                     f"{len(new)} new product(s) added. No duplicates created."
                                 )
-                                if excel_warning:
-                                    st.warning(excel_warning)
                                 st.session_state[f"show_replace_{b.id}"] = False
                                 st.rerun()
                             except Exception as e:
@@ -1523,9 +1530,7 @@ elif page == "📦 Inventory":
 
     def _delete_button(p: Product):
         if st.button("🗑️ Delete", key=f"del_{p.id}"):
-            excel_warning = inventory_store.delete_product(p.id, p.company_id)
-            if excel_warning:
-                st.warning(excel_warning)
+            inventory_store.delete_product(p.id, p.company_id)
             audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
             st.rerun()
 
@@ -1551,12 +1556,14 @@ elif page == "📦 Inventory":
             if new_triage != p.triage_status:
                 p.triage_status = new_triage
                 inventory_store.save_product(p)
+                audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "triage_status")
                 st.rerun()
         with qa2:
             new_location = st.text_input("Location", value=p.location, key=f"loc_{p.id}")
             if new_location != p.location:
                 p.location = new_location
                 inventory_store.save_product(p)
+                audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "location")
                 st.rerun()
         with qa3:
             new_quantity = st.number_input(
@@ -1565,6 +1572,7 @@ elif page == "📦 Inventory":
             if int(new_quantity) != p.quantity:
                 p.quantity = int(new_quantity)
                 inventory_store.save_product(p)
+                audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "quantity")
                 st.rerun()
         with qa4:
             st.write("")
@@ -1668,11 +1676,15 @@ elif page == "📦 Inventory":
             else:
                 st.caption("Not listed on any marketplace yet.")
 
-            if baselinker_client.is_configured():
+            if IntegrationManager.is_connected(p.company_id, "baselinker"):
                 if st.button("📤 Push to BaseLinker", key=f"push_{p.id}"):
-                    result = baselinker_client.push_product(p)
+                    result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
                     if result.success:
-                        st.success(f"Pushed — BaseLinker product_id: {result.baselinker_product_id}")
+                        audit_store.log_audit(
+                            p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
+                            f"baselinker_product_id={result.external_id}",
+                        )
+                        st.success(f"Pushed — BaseLinker product_id: {result.external_id}")
                         st.rerun()
                     else:
                         st.error(result.message)
@@ -1687,6 +1699,9 @@ elif page == "📦 Inventory":
                 if new_purchase != p.purchase_price_allocated:
                     p.purchase_price_allocated = new_purchase
                     inventory_store.save_product(p)
+                    audit_store.log_audit(
+                        p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "purchase_price_allocated",
+                    )
                     st.rerun()
             with fc2:
                 st.metric("Repair cost", f"${repair_total:.2f}")
@@ -1750,7 +1765,7 @@ elif page == "📦 Inventory":
         else:
             table_rows = []
             for p in products:
-                listing = marketplace_store.get_listing(p.id, baselinker_client.MARKETPLACE, p.company_id)
+                listing = marketplace_store.get_listing(p.id, "baselinker", p.company_id)
                 table_rows.append({
                     "id": p.id,
                     "sku": p.sku or "(none)",
@@ -1833,12 +1848,19 @@ elif page == "🔍 Review & Export":
                     i / len(selected_products),
                     text=f"Exporting {p.sku} ({i + 1}/{len(selected_products)})...",
                 )
-                result = baselinker_client.push_product(p)
+                try:
+                    result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
+                except (IntegrationNotConnectedError, IntegrationNotAvailableError) as e:
+                    result = ConnectorActionResult(success=False, message=str(e))
                 if result.success:
                     p.review_status = "exported"
                     p.exported_at = time.time()
                     ok_count += 1
                     results_box.success(f"✅ {p.sku}: {result.message}")
+                    audit_store.log_audit(
+                        p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
+                        f"baselinker_product_id={result.external_id}",
+                    )
                 else:
                     p.review_status = "failed"
                     fail_count += 1
@@ -2145,6 +2167,10 @@ elif page == "🔍 Review & Export":
                                 added_paths.append(str(fp))
                             p.image_paths = p.image_paths + added_paths
                             inventory_store.save_product(p)
+                            audit_store.log_audit(
+                                p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
+                                f"added {len(to_add)} photo(s)",
+                            )
                             st.success(f"Added {len(to_add)} photo(s).")
                             st.rerun()
             else:
@@ -2196,6 +2222,8 @@ elif page == "🔍 Review & Export":
                     p.review_status = "edited"
 
                 inventory_store.save_product(p)
+                if changed:
+                    audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id)
                 st.session_state.review_open_product_id = None
                 st.session_state.review_focus_id = p.id  # scroll/highlight this row back in the list
                 st.success("Saved.")
@@ -2381,6 +2409,10 @@ elif page == "👥 Manage Users":
                 auth_store.update_user(u)
                 if not u.active:
                     audit_store.log_audit(current_user.company_id, current_user.id, "DEACTIVATE_USER", "user", u.id)
+                else:
+                    audit_store.log_audit(
+                        current_user.company_id, current_user.id, "UPDATE_USER", "user", u.id, "reactivated",
+                    )
                 st.rerun()
         if not u.active:
             st.caption("Inactive")
@@ -2405,3 +2437,163 @@ elif page == "👥 Manage Users":
                     st.rerun()
                 except ValueError as e:
                     st.error(str(e))
+
+elif page == "⚙️ Settings":
+    st.title("⚙️ Settings")
+    try:
+        auth.require_role(current_user, auth.ROLE_ADMIN)
+    except PermissionError:
+        st.error("Admins only.")
+        st.stop()
+
+    (tab_integrations,) = st.tabs(["🔌 Integrations"])
+
+    with tab_integrations:
+        _company_label = current_company.name if current_company else current_user.company_id
+        st.caption(f"Connect marketplaces and external services for {_company_label}.")
+
+        _INTEGRATION_STATUS_LABELS = {
+            integration_store.STATUS_CONNECTED: "✅ Connected",
+            integration_store.STATUS_DISCONNECTED: "⚪ Not connected",
+            integration_store.STATUS_ERROR: "⚠️ Error — needs attention",
+        }
+
+        @st.dialog("Disconnect integration?")
+        def _confirm_disconnect_integration_dialog(integration_type: str, display_name: str):
+            st.warning(
+                f"This disconnects **{display_name}** for {_company_label}. Stored "
+                "credentials are deleted (other settings are kept); pushing products "
+                "through it will stop working until reconnected. This cannot be undone."
+            )
+            confirm = st.checkbox("I understand, disconnect", key=f"disconnect_confirm_{integration_type}")
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                if st.button("Cancel", use_container_width=True, key=f"disconnect_cancel_{integration_type}"):
+                    st.rerun()
+            with dcol2:
+                if st.button(
+                    "🔌 Disconnect", type="primary", disabled=not confirm,
+                    use_container_width=True, key=f"disconnect_go_{integration_type}",
+                ):
+                    IntegrationManager.disconnect(current_user.company_id, integration_type, user_id=current_user.id)
+                    st.success(f"{display_name} disconnected.")
+                    st.rerun()
+
+        def _render_integration_activity(integration_type: str) -> None:
+            entries = integration_store.list_sync_log(current_user.company_id, integration_type, limit=10)
+            with st.expander("Recent activity"):
+                if not entries:
+                    st.caption("No activity yet.")
+                for e in entries:
+                    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.created_at)) if e.created_at else "—"
+                    icon = "✅" if e.status == integration_store.SYNC_STATUS_SUCCESS else "❌"
+                    line = f"{icon} {ts} — {e.action}"
+                    if e.product_id:
+                        line += f" (product {e.product_id})"
+                    if e.error_message:
+                        line += f": {e.error_message}"
+                    st.caption(line)
+
+        def _render_integration_test_and_disconnect(entry, connected: bool) -> None:
+            if not connected:
+                return
+            tcol1, tcol2 = st.columns(2)
+            with tcol1:
+                if st.button("🔄 Test connection", key=f"test_{entry.integration_type}", use_container_width=True):
+                    result = IntegrationManager.test(current_user.company_id, entry.integration_type)
+                    (st.success if result.success else st.error)(result.message)
+            with tcol2:
+                if st.button("🔌 Disconnect", key=f"disconnect_open_{entry.integration_type}", use_container_width=True):
+                    _confirm_disconnect_integration_dialog(entry.integration_type, entry.display_name)
+
+        def _render_baselinker_settings(entry, record) -> None:
+            connected = record is not None and record.status == integration_store.STATUS_CONNECTED
+            has_credentials = record is not None and bool(record.credentials)
+            status_label = _INTEGRATION_STATUS_LABELS.get(record.status if record else integration_store.STATUS_DISCONNECTED)
+            with st.expander(f"{entry.display_name} — {status_label}", expanded=not connected):
+                if record and record.last_sync_at:
+                    st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
+                settings = record.settings if record else {}
+                with st.form(f"integration_form_{entry.integration_type}"):
+                    token = st.text_input(
+                        "API token", type="password",
+                        placeholder="Leave blank to keep current" if has_credentials else "",
+                        help="Account & other -> My account -> API in the BaseLinker/Base.com panel.",
+                    )
+                    inventory_id = st.text_input("Inventory ID", value=settings.get("inventory_id") or "")
+                    category_id = st.text_input("Category ID", value=settings.get("category_id") or "")
+                    price_group_id = st.text_input("Price group ID (optional)", value=settings.get("price_group_id") or "")
+                    warehouse_id = st.text_input("Warehouse ID (optional)", value=settings.get("warehouse_id") or "")
+                    tax_rate = st.text_input("Tax rate % (optional)", value=settings.get("tax_rate") or "23")
+                    submitted = st.form_submit_button("💾 Save & test connection", type="primary")
+                    if submitted:
+                        if not token and not has_credentials:
+                            st.warning("API token is required.")
+                        elif not inventory_id.strip() or not category_id.strip():
+                            st.warning("Inventory ID and Category ID are required.")
+                        else:
+                            creds = {"token": token} if token else dict(record.credentials)
+                            new_settings = {
+                                "inventory_id": inventory_id.strip(),
+                                "category_id": category_id.strip(),
+                                "price_group_id": price_group_id.strip(),
+                                "warehouse_id": warehouse_id.strip(),
+                                "tax_rate": tax_rate.strip() or "23",
+                            }
+                            result = IntegrationManager.connect(
+                                current_user.company_id, entry.integration_type, creds, new_settings,
+                                user_id=current_user.id,
+                            )
+                            (st.success if result.success else st.error)(result.message)
+                            st.rerun()
+
+                _render_integration_test_and_disconnect(entry, connected)
+                _render_integration_activity(entry.integration_type)
+
+        def _render_deepl_settings(entry, record) -> None:
+            connected = record is not None and record.status == integration_store.STATUS_CONNECTED
+            has_credentials = record is not None and bool(record.credentials)
+            status_label = _INTEGRATION_STATUS_LABELS.get(record.status if record else integration_store.STATUS_DISCONNECTED)
+            with st.expander(f"{entry.display_name} — {status_label}", expanded=not connected):
+                if record and record.last_sync_at:
+                    st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
+                with st.form(f"integration_form_{entry.integration_type}"):
+                    api_key = st.text_input(
+                        "API key", type="password",
+                        placeholder="Leave blank to keep current" if has_credentials else "",
+                    )
+                    submitted = st.form_submit_button("💾 Save & test connection", type="primary")
+                    if submitted:
+                        if not api_key and not has_credentials:
+                            st.warning("API key is required.")
+                        else:
+                            creds = {"api_key": api_key} if api_key else dict(record.credentials)
+                            result = IntegrationManager.connect(
+                                current_user.company_id, entry.integration_type, creds, {},
+                                user_id=current_user.id,
+                            )
+                            (st.success if result.success else st.error)(result.message)
+                            st.rerun()
+
+                _render_integration_test_and_disconnect(entry, connected)
+                _render_integration_activity(entry.integration_type)
+
+        _INTEGRATION_SETTINGS_RENDERERS = {
+            "baselinker": _render_baselinker_settings,
+            "deepl": _render_deepl_settings,
+        }
+
+        for category, category_label in (
+            (integration_store.CATEGORY_MARKETPLACE, "Marketplaces"),
+            (integration_store.CATEGORY_SERVICE, "Services"),
+        ):
+            st.subheader(category_label)
+            for entry in CATALOG:
+                if entry.integration_category != category:
+                    continue
+                if not entry.available:
+                    st.write(f"**{entry.display_name}**")
+                    st.caption("🔒 Coming soon")
+                    continue
+                record = integration_store.get_integration(current_user.company_id, entry.integration_type)
+                _INTEGRATION_SETTINGS_RENDERERS[entry.integration_type](entry, record)

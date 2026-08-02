@@ -4,9 +4,11 @@ WooCommerce, ...) at once, each with its own external ID/status/price.
 
 This is the channel-agnostic replacement for the old BaseLinker-specific
 `Product.baselinker_product_id`/`baselinker_synced_at` fields (modules/
-models.py): modules/baselinker_client.py reads/writes rows here with
-marketplace="baselinker" — a future eBay/WooCommerce client would write
-marketplace="ebay"/"woocommerce" rows to this SAME table, no schema change.
+models.py): integrations/marketplaces/baselinker/client.py (via
+integrations/base.py's MarketplaceConnector.export_product()) reads/writes
+rows here with marketplace="baselinker" — an eBay/WooCommerce connector
+writes marketplace="ebay"/"woocommerce" rows to this SAME table, no schema
+change.
 
 Shares the same SQLite file as modules/inventory_store.py.
 """

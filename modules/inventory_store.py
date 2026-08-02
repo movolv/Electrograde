@@ -1,9 +1,12 @@
-"""SQLite-backed inventory persistence.
+"""SQLite-backed inventory persistence — the single source of truth. There
+is no persistent Excel mirror anymore (removed: it was one shared file
+across every company, a real cross-tenant exposure once more than one
+company has data); Excel/CSV export is generated on demand from this
+database instead — see modules/export.py.
 
 Every row carries a `company_id` column (also duplicated inside the JSON
-blob via Product.company_id) so a future multi-company deployment can filter
-per-tenant without a schema migration — today everything just uses the
-"default" company.
+blob via Product.company_id) so a multi-company deployment can filter
+per-tenant without a schema migration.
 
 For fast search at scale, `ean`/`asin`/`model_number`/`model`/`brand`/`name`
 are denormalized into their own indexed columns (kept in sync on every
@@ -16,7 +19,6 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from modules import excel_autosave
 from modules.models import Product
 
 # Overridable so scripts/verify_tenant_isolation.py (and any other script
@@ -118,13 +120,10 @@ def _search_columns(p: Product) -> tuple:
     )
 
 
-def save_product(product: Product) -> Optional[str]:
-    """Saves to SQLite (source of truth) and mirrors to Excel.
-
-    Returns None on full success, or a warning string if the Excel mirror
-    could not be written (e.g. the file is open elsewhere) — the SQLite save
-    itself always completes regardless.
-    """
+def save_product(product: Product) -> None:
+    """Saves to SQLite — the single source of truth. No Excel mirror to
+    keep in sync anymore; export a spreadsheet on demand instead (see
+    modules/export.py) if one is needed."""
     assert product.company_id, "Product.company_id must be set before saving — never save an orphaned record."
     conn = _connect()
     with conn:
@@ -137,14 +136,12 @@ def save_product(product: Product) -> Optional[str]:
              json.dumps(product.to_dict())),
         )
     conn.close()
-    return excel_autosave.sync_excel(_list_all_products_unscoped())
 
 
-def save_products_bulk(products: List[Product]) -> Optional[str]:
-    """Saves many products in one transaction (e.g. a manifest import) and
-    syncs the Excel mirror once at the end instead of once per row."""
+def save_products_bulk(products: List[Product]) -> None:
+    """Saves many products in one transaction (e.g. a manifest import)."""
     if not products:
-        return None
+        return
     assert all(p.company_id for p in products), "Every Product.company_id must be set before saving."
     conn = _connect()
     with conn:
@@ -159,15 +156,13 @@ def save_products_bulk(products: List[Product]) -> Optional[str]:
             ],
         )
     conn.close()
-    return excel_autosave.sync_excel(_list_all_products_unscoped())
 
 
-def delete_product(product_id: str, company_id: str) -> Optional[str]:
+def delete_product(product_id: str, company_id: str) -> None:
     conn = _connect()
     with conn:
         conn.execute("DELETE FROM products WHERE id = ? AND company_id = ?", (product_id, company_id))
     conn.close()
-    return excel_autosave.sync_excel(_list_all_products_unscoped())
 
 
 def list_products_by_manifest(manifest_import_id: str, company_id: str) -> List[Product]:
@@ -198,16 +193,13 @@ def delete_products_by_manifest(
     if not to_delete:
         return 0
 
-    # Bulk delete + a single Excel resync at the end, rather than looping
-    # delete_product() (which would resync the whole file once per row —
-    # fine for one item, far too slow for a manifest of hundreds).
+    # Bulk delete in one transaction rather than looping delete_product().
     conn = _connect()
     with conn:
         conn.executemany(
             "DELETE FROM products WHERE id = ?", [(p.id,) for p in to_delete]
         )
     conn.close()
-    excel_autosave.sync_excel(_list_all_products_unscoped())
     return len(to_delete)
 
 
@@ -217,20 +209,6 @@ def list_products(company_id: str) -> List[Product]:
         "SELECT data FROM products WHERE company_id = ? ORDER BY created_at DESC",
         (company_id,),
     ).fetchall()
-    conn.close()
-    return [Product.from_dict(json.loads(r[0])) for r in rows]
-
-
-def _list_all_products_unscoped() -> List[Product]:
-    """Every product across every company, no exceptions — used ONLY by
-    this file's own excel_autosave.sync_excel() calls below. NOT tenant-
-    scoped on purpose (the Excel mirror is currently one shared file for
-    the whole database, not per-company — a real cross-tenant exposure
-    once more than one company exists, called out explicitly as an item
-    that still needs its own design decision, e.g. a per-company file).
-    Do not call this from anywhere outside this module."""
-    conn = _connect()
-    rows = conn.execute("SELECT data FROM products ORDER BY created_at DESC").fetchall()
     conn.close()
     return [Product.from_dict(json.loads(r[0])) for r in rows]
 

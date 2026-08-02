@@ -16,6 +16,7 @@ the env var after import would silently miss them.
 """
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 
@@ -24,8 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_isolation_test_")
 os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "isolation_test.db")
 
+os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
+
 from modules import auth, auth_store, company_store, inventory_store  # noqa: E402
 from modules import manifest_store, marketplace_store, repair_store  # noqa: E402
+from modules import integration_store  # noqa: E402
 from modules.models import Product  # noqa: E402
 
 _checks_passed = 0
@@ -198,6 +202,69 @@ def main() -> int:
     check(
         "delete_repair_events_for_product(A's product, company=B) does not delete it",
         len(repair_store.list_repair_events(product_a.id, company_a.id)) == 1,
+    )
+
+    print("\n-- integration_store: cross-tenant access must be impossible --")
+    secret_a, secret_b = "SUPER-SECRET-TOKEN-A", "SUPER-SECRET-TOKEN-B"
+    integration_a = integration_store.CompanyIntegration(
+        company_id=company_a.id, integration_type="baselinker",
+        integration_category=integration_store.CATEGORY_MARKETPLACE,
+        status=integration_store.STATUS_CONNECTED,
+        credentials={"token": secret_a}, settings={"inventory_id": "1"},
+    )
+    integration_b = integration_store.CompanyIntegration(
+        company_id=company_b.id, integration_type="baselinker",
+        integration_category=integration_store.CATEGORY_MARKETPLACE,
+        status=integration_store.STATUS_CONNECTED,
+        credentials={"token": secret_b}, settings={"inventory_id": "2"},
+    )
+    integration_store.upsert_integration(integration_a)
+    integration_store.upsert_integration(integration_b)
+    integration_store.record_sync(company_a.id, "baselinker", "export", product_id=product_a.id, status="success")
+    integration_store.record_sync(company_b.id, "baselinker", "export", product_id=product_b.id, status="success")
+
+    check(
+        "get_integration(company=A) returns A's own credentials, not B's",
+        integration_store.get_integration(company_a.id, "baselinker").credentials.get("token") == secret_a,
+    )
+    check(
+        "get_integration(company=B) returns B's own credentials, not A's",
+        integration_store.get_integration(company_b.id, "baselinker").credentials.get("token") == secret_b,
+    )
+    check(
+        "list_integrations(company=B) never contains A's row",
+        all(rec.company_id == company_b.id for rec in integration_store.list_integrations(company_b.id)),
+    )
+    check(
+        "list_sync_log(company=B) never contains A's product_id",
+        product_a.id not in {e.product_id for e in integration_store.list_sync_log(company_b.id)},
+    )
+    check(
+        "list_sync_log(company=A) contains A's product_id",
+        product_a.id in {e.product_id for e in integration_store.list_sync_log(company_a.id)},
+    )
+    integration_store.disconnect_integration(company_b.id, "baselinker")
+    check(
+        "disconnect_integration(company=B) does not affect A's connection",
+        integration_store.get_integration(company_a.id, "baselinker").status == integration_store.STATUS_CONNECTED,
+    )
+    check(
+        "disconnect_integration(company=B) clears only B's credentials",
+        integration_store.get_integration(company_b.id, "baselinker").credentials == {},
+    )
+
+    print("\n-- integration_store: credentials must be encrypted at rest, not just query-filtered --")
+    raw_conn = sqlite3.connect(os.environ["ELECTROGRADER_DB_PATH"])
+    raw_rows = raw_conn.execute("SELECT company_id, credentials FROM company_integrations").fetchall()
+    raw_conn.close()
+    check("at least one company_integrations row exists to check", len(raw_rows) > 0)
+    check(
+        "raw credentials column never contains company A's plaintext token",
+        all(secret_a not in (row[1] or "") for row in raw_rows),
+    )
+    check(
+        "raw credentials column never contains company B's plaintext token",
+        all(secret_b not in (row[1] or "") for row in raw_rows),
     )
 
     # --------------------------------------------------- company suspension --

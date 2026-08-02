@@ -1,0 +1,151 @@
+"""Shared interfaces every marketplace/service connector implements.
+app.py and integrations/manager.py only ever talk to these — never to a
+concrete connector class directly — so adding eBay/Amazon/DeepL-translate/
+etc. later means adding a class here-shaped, not touching call sites.
+
+IntegrationConnector
+  -> MarketplaceConnector (BaseLinker, eBay, Amazon, Allegro, Tradera, WooCommerce, ...)
+  -> ServiceConnector     (DeepL, AI, shipping, ...)
+
+A connector is constructed fresh per call (company_id, credentials,
+settings passed in from modules/integration_store.py's decrypted row) —
+it holds no state beyond that, so there's nothing to leak between
+requests/companies.
+"""
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class ConnectionTestResult:
+    success: bool
+    message: str = ""
+
+
+@dataclass
+class ConnectorActionResult:
+    success: bool
+    external_id: str = ""
+    message: str = ""
+    data: dict = field(default_factory=dict)
+
+
+class IntegrationConnector(ABC):
+    """Base for every connector, marketplace or service alike."""
+
+    integration_type: str = ""
+    integration_category: str = ""
+
+    def __init__(self, company_id: str, credentials: dict, settings: Optional[dict] = None):
+        self.company_id = company_id
+        self.credentials = credentials or {}
+        self.settings = settings or {}
+
+    @abstractmethod
+    def connect(self) -> ConnectionTestResult:
+        """Offline validation only — required fields present, well-formed.
+        Called before test_connection() by manager.connect() so a typo'd
+        field fails fast without spending an API call."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def test_connection(self) -> ConnectionTestResult:
+        """One real, cheap, read-only API call proving the credentials
+        actually work against the live service."""
+        raise NotImplementedError
+
+    def disconnect(self) -> None:
+        """No-op by default — most integrations have nothing to tell the
+        remote side when disconnecting locally. Override only if a
+        connector's API has a real "revoke" step."""
+        return None
+
+
+class MarketplaceConnector(IntegrationConnector):
+    """A channel a Product can be listed/sold on."""
+
+    integration_category = "marketplace"
+
+    @abstractmethod
+    def create_product(self, product) -> ConnectorActionResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_product(self, product, external_id: str) -> ConnectorActionResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_product(self, external_id: str) -> ConnectorActionResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    def sync_inventory(self, product, external_id: str) -> ConnectorActionResult:
+        raise NotImplementedError
+
+    def export_product(self, product) -> ConnectorActionResult:
+        """The one call site app.py actually uses:
+        IntegrationManager.get(company_id, "baselinker").export_product(product).
+        Every marketplace connector gets this for free — decide create vs.
+        update from the existing marketplace_store listing, persist the
+        result, and log the attempt. Individual connectors only implement
+        the four primitives above."""
+        from modules import integration_store, marketplace_store
+
+        existing = marketplace_store.get_listing(product.id, self.integration_type, self.company_id)
+        existing_id = existing.external_listing_id if existing else ""
+
+        try:
+            if existing_id:
+                result = self.update_product(product, existing_id)
+            else:
+                result = self.create_product(product)
+        except Exception as e:
+            integration_store.record_sync(
+                self.company_id, self.integration_type, "export", product_id=product.id,
+                status=integration_store.SYNC_STATUS_ERROR, error_message=str(e),
+            )
+            return ConnectorActionResult(success=False, message=f"Unexpected error: {e}")
+
+        if result.success:
+            marketplace_store.upsert_listing(
+                marketplace_store.MarketplaceListing(
+                    product_id=product.id,
+                    marketplace=self.integration_type,
+                    company_id=self.company_id,
+                    external_listing_id=result.external_id or existing_id,
+                    status=marketplace_store.STATUS_LISTED,
+                    price=product.price,
+                    last_synced_at=time.time(),
+                )
+            )
+            integration_store.record_sync(
+                self.company_id, self.integration_type, "export", product_id=product.id,
+                external_id=result.external_id or existing_id, status=integration_store.SYNC_STATUS_SUCCESS,
+            )
+        else:
+            integration_store.record_sync(
+                self.company_id, self.integration_type, "export", product_id=product.id,
+                status=integration_store.SYNC_STATUS_ERROR, error_message=result.message,
+            )
+
+        return result
+
+
+class ServiceConnector(IntegrationConnector):
+    """A non-marketplace external service (translation, AI, shipping...).
+    Each method raises NotImplementedError by default; a concrete service
+    only overrides the ones it actually offers (DeepL overrides
+    translate() only)."""
+
+    integration_category = "service"
+
+    def translate(self, text: str, target_lang: str, source_lang: Optional[str] = None) -> str:
+        raise NotImplementedError(f"{self.integration_type} does not support translate()")
+
+    def process(self, *args, **kwargs):
+        raise NotImplementedError(f"{self.integration_type} does not support process()")
+
+    def calculate(self, *args, **kwargs):
+        raise NotImplementedError(f"{self.integration_type} does not support calculate()")

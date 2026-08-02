@@ -31,8 +31,14 @@ electro-grader-pwa/
 │   ├── pricing.py              # Web price search + grade multiplier
 │   ├── description_gen.py      # AI listing copy: marketplace product name + 2 English description columns
 │   ├── export.py                # Baselinker Excel/CSV export
-│   ├── baselinker_client.py     # Optional: direct BaseLinker API push (create/update + photos)
+│   ├── integration_store.py     # Per-company integration config (encrypted credentials)
 │   └── pwa.py                    # Injects manifest/meta tags into page <head>
+├── integrations/                # Marketplace/service connectors (Settings -> Integrations)
+│   ├── base.py                   # IntegrationConnector / MarketplaceConnector / ServiceConnector
+│   ├── manager.py                 # IntegrationManager.get/connect/disconnect/test, CATALOG
+│   ├── marketplaces/baselinker/  # Real: direct BaseLinker API push (create/update + photos)
+│   ├── marketplaces/ebay/        # Not built yet — structural stub
+│   └── services/deepl/           # Real: test_connection + translate (not wired into a workflow yet)
 ├── static/
 │   ├── manifest.json            # PWA manifest (the *app's* manifest — not to be confused
 │   │                             # with an Amazon liquidation manifest file)
@@ -288,44 +294,53 @@ never-auto-pick rule; it stays in the internal database only.)
 
 ### Optional: direct BaseLinker API push (no CSV, no column mapping)
 
-Alongside the CSV/Excel download buttons, the Export tab also offers
-**"📤 Push directly to BaseLinker via API"** — an *additional* option, not a
-replacement. It creates or updates each selected product straight in your
-BaseLinker/Base.com catalog via their JSON API (`modules/baselinker_client.py`),
-including photos (sent as inline base64 — no public URL hosting needed at
-all), with zero manual column mapping since the code maps each field once,
-directly, by name.
+Alongside the CSV/Excel download buttons on the **"📤 CSV/Excel Export"**
+page, two other places offer **"📤 Push to BaseLinker"** — an *additional*
+option, not a replacement: a single product's detail view (Inventory ->
+open a product -> "🛒 Sales & Listings"), and a bulk "Export Selected" flow
+on the **"🔍 Review & Export"** page. Both create or update the product
+straight in your BaseLinker/Base.com catalog via their JSON API
+(`integrations/marketplaces/baselinker/client.py`), including photos (sent
+as inline base64 — no public URL hosting needed at all), with zero manual
+column mapping since the code maps each field once, directly, by name.
 
-**Setup** (all in `.env`, see `.env.example`):
+BaseLinker is one connector under a general integration framework
+(`integrations/`, see the Architecture tree above) — every company connects
+its own account independently; nothing here is a shared/global config.
+
+**Setup** (Admin-only, from the app itself — **⚙️ Settings -> 🔌
+Integrations**, no `.env` editing required):
 1. Generate a token in the BaseLinker/Base.com panel: *Account & other → My
    account → API*.
 2. Find your `inventory_id` via the panel or the `getInventories` API method.
 3. Create (or pick) a category and note its `category_id` — required per
    product; there's no "uncategorized" fallback.
-4. Set `BASELINKER_API_TOKEN`, `BASELINKER_INVENTORY_ID`,
-   `BASELINKER_CATEGORY_ID`. Optionally set `BASELINKER_PRICE_GROUP_ID` /
-   `BASELINKER_WAREHOUSE_ID` if you want price/stock sent automatically, and
-   `BASELINKER_TAX_RATE` (default `23`).
+4. In Settings -> Integrations -> BaseLinker, fill in the token,
+   `inventory_id`, and `category_id`, then **"💾 Save & test connection"**.
+   Price group ID / warehouse ID (for automatic price/stock sync) and tax
+   rate (default `23`) are optional.
 
-Leave all of these unset and the button stays disabled with a setup hint —
-CSV/Excel export keeps working exactly as before either way.
+Until an admin connects it, the push buttons above stay hidden — CSV/Excel
+export keeps working exactly as before either way. (One-time legacy note:
+`scripts/migrate_baselinker_env_to_integration.py` seeds a connection from
+the old `BASELINKER_*` env vars for anyone upgrading from before this
+integration framework existed — new setups should just use Settings.)
 
 **How it stays safe:**
 - **Idempotent, not duplicate-prone**: the first successful push stores
-  BaseLinker's own `product_id` on the `Product` record
-  (`baselinker_product_id` / `baselinker_synced_at` in `modules/models.py`);
-  every push after that **updates** the same BaseLinker product instead of
-  creating a new one. As an extra safety net, a not-yet-synced product is
-  first checked against BaseLinker by SKU (`filter_sku`) before creating
-  anything, in case the local database was ever reset.
-- **Preview before push**: an expander shows exactly what will be sent
-  (name, SKU, EAN, price, photo count, create-vs-update) for every selected
-  item before the button is pressed — nothing goes out unreviewed.
+  BaseLinker's own `product_id` in `marketplace_store` (a channel-agnostic
+  table, not a BaseLinker-specific field); every push after that **updates**
+  the same BaseLinker product instead of creating a new one. As an extra
+  safety net, a not-yet-synced product is first checked against BaseLinker
+  by SKU (`filter_sku`) before creating anything, in case the local
+  database was ever reset.
 - **Per-item results, never silent**: each push reports success (with the
   resulting BaseLinker `product_id`), warnings, or errors individually —
-  a failure on one item doesn't hide the others' results.
-- **Test small first**: the item multiselect above already lets you select
-  just one or two products — do that before pushing a whole batch, and
+  a failure on one item doesn't hide the others' results. Every attempt is
+  also recorded in Settings -> Integrations -> BaseLinker -> "Recent
+  activity".
+- **Test small first**: Review & Export's checkboxes let you select just
+  one or two products before pushing a whole batch — do that first, and
   check the BaseLinker panel afterward to confirm they landed as expected.
 
 ## 6. Customization points
