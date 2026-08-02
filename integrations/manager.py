@@ -107,6 +107,18 @@ def _require_available(integration_type: str) -> CatalogEntry:
     return entry
 
 
+def get_supported_target_fields(integration_type: str) -> dict:
+    """Field Mapping tab's 'Target field' dropdown source — reads whatever
+    the connector class itself declares (MarketplaceConnector.
+    SUPPORTED_TARGET_FIELDS), never a hardcoded per-integration branch here.
+    {} for service connectors (e.g. DeepL) or unrecognized types — the UI
+    treats that as "nothing to map for this integration."""
+    connector_cls = CONNECTORS.get(integration_type)
+    if connector_cls is None:
+        return {}
+    return dict(getattr(connector_cls, "SUPPORTED_TARGET_FIELDS", {}))
+
+
 def is_connected(company_id: str, integration_type: str) -> bool:
     record = integration_store.get_integration(company_id, integration_type)
     return record is not None and record.status == integration_store.STATUS_CONNECTED
@@ -195,3 +207,4 @@ class IntegrationManager:
     disconnect = staticmethod(disconnect)
     test = staticmethod(test)
     is_connected = staticmethod(is_connected)
+    get_supported_target_fields = staticmethod(get_supported_target_fields)

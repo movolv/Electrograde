@@ -68,6 +68,17 @@ class MarketplaceConnector(IntegrationConnector):
 
     integration_category = "marketplace"
 
+    # Technical target-field key -> human-readable label, for the Settings
+    # -> Integrations -> Field Mapping tab's "Target field" dropdown (see
+    # integrations/manager.get_supported_target_fields()). Empty in the
+    # base class; each concrete connector declares its own (different
+    # platforms use different technical field names for the same concept —
+    # e.g. BaseLinker's condition_id vs. eBay's condition). app.py reads
+    # this off the connector class, never hardcodes a specific integration's
+    # field names, so adding a new marketplace never touches the Field
+    # Mapping UI itself.
+    SUPPORTED_TARGET_FIELDS: dict = {}
+
     @abstractmethod
     def create_product(self, product) -> ConnectorActionResult:
         raise NotImplementedError

@@ -45,6 +45,7 @@ STATUS_ERROR = "error"
 
 SYNC_STATUS_SUCCESS = "success"
 SYNC_STATUS_ERROR = "error"
+SYNC_STATUS_SKIPPED = "skipped"  # honest "no executor registered yet" outcome — see integrations/scheduler.py
 
 
 @dataclass

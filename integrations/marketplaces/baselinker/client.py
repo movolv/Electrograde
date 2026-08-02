@@ -64,6 +64,14 @@ def _call(method: str, parameters: dict, token: str) -> dict:
 class BaselinkerConnector(MarketplaceConnector):
     integration_type = "baselinker"
 
+    # Phase 1: just the dropdown source for Settings -> Field Mapping.
+    # Nothing reads/applies these yet — mapper.py's build_payload() is
+    # unchanged; real field-mapping application is Phase 2 work.
+    SUPPORTED_TARGET_FIELDS = {
+        "condition_id": "Condition",
+        "category_id": "Category",
+    }
+
     def _config(self) -> dict:
         settings = self.settings
         return {

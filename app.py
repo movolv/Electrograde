@@ -8,6 +8,7 @@ import hashlib
 import io
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -27,6 +28,7 @@ from modules import (
     company_store,
     description_gen,
     export,
+    field_mapping_store,
     identifier_lookup,
     image_pipeline,
     integration_store,
@@ -38,8 +40,11 @@ from modules import (
     pwa,
     repair_store,
     spec_lookup,
+    sync_job_store,
+    sync_rules_store,
     vision_grading,
 )
+from integrations import scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
 from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
 from modules.models import Product
@@ -256,6 +261,24 @@ def _photo_executor() -> concurrent.futures.ThreadPoolExecutor:
     (EXIF transpose + resize), not I/O-bound, so more workers than cores
     just causes contention rather than helping."""
     return concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+@st.cache_resource
+def ensure_scheduler_running() -> threading.Thread:
+    """Starts the one background sync-scheduler thread for this process —
+    st.cache_resource guarantees exactly one Thread ever gets created no
+    matter how many concurrent sessions/reruns reach this line, the same
+    mechanism as _photo_executor() above. Called unconditionally near the
+    top of the script (before the login gate), not lazily from the Settings
+    page, so it starts regardless of which page a user opens first.
+
+    integrations/scheduler.py has zero Streamlit dependency of its own —
+    this thread is purely today's convenience wrapper for a single-process
+    deployment; the same module runs standalone via
+    `python -m integrations.scheduler` with no Streamlit involved at all."""
+    thread = threading.Thread(target=sync_scheduler.run_forever, daemon=True, name="sync-scheduler")
+    thread.start()
+    return thread
 
 
 _PHOTO_MAX_DIM = 2400  # long-side cap in px — well above what any listing
@@ -532,6 +555,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 pwa.inject_pwa_head()
+ensure_scheduler_running()  # unconditional: starts regardless of which page/user loads first
 
 # ------------------------------------------------------------------- auth --
 
@@ -2560,7 +2584,12 @@ elif page == "⚙️ Settings":
                     st.caption("No activity yet.")
                 for e in entries:
                     ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.created_at)) if e.created_at else "—"
-                    icon = "✅" if e.status == integration_store.SYNC_STATUS_SUCCESS else "❌"
+                    if e.status == integration_store.SYNC_STATUS_SUCCESS:
+                        icon = "✅"
+                    elif e.status == integration_store.SYNC_STATUS_SKIPPED:
+                        icon = "⏭️"
+                    else:
+                        icon = "❌"
                     line = f"{icon} {ts} — {e.action}"
                     if e.product_id:
                         line += f" (product {e.product_id})"
@@ -2619,9 +2648,6 @@ elif page == "⚙️ Settings":
                         (st.success if result.success else st.error)(result.message)
                         st.rerun()
 
-            _render_integration_test_and_disconnect(entry, connected)
-            _render_integration_activity(entry.integration_type)
-
         def _render_deepl_settings(entry, record) -> None:
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
@@ -2645,15 +2671,203 @@ elif page == "⚙️ Settings":
                         (st.success if result.success else st.error)(result.message)
                         st.rerun()
 
-            _render_integration_test_and_disconnect(entry, connected)
-            _render_integration_activity(entry.integration_type)
-
         _INTEGRATION_SETTINGS_RENDERERS = {
             "baselinker": _render_baselinker_settings,
             "deepl": _render_deepl_settings,
         }
 
         _UI_GROUPS = ["Marketplace", "Store", "Shipping", "ERP", "Accounting", "Payments", "AI", "Communication", "Other"]
+
+        # ---- Synchronization / Field Mapping / Automation tab registries --
+        # Universal across every integration — these describe ElectroGrader's
+        # OWN data model (what we could send) or generic concepts (what we
+        # could receive), so unlike Field Mapping's "Target field" (which is
+        # necessarily connector-specific), the same list is correct for any
+        # integration_type.
+        _SYNC_FIELDS_SENT = [
+            ("name", "Product title"), ("brand", "Brand"), ("model", "Model"),
+            ("product_description", "Description"), ("condition_description", "Additional description"),
+            ("defects", "Defects"), ("grade", "Grade"), ("image_paths", "Images"),
+            ("price", "Price"), ("quantity", "Quantity"), ("sku", "SKU"),
+            ("category", "Category"), ("barcode", "Barcode"),
+        ]
+        _SYNC_FIELDS_RECEIVED = [
+            ("categories", "Categories"), ("orders", "Orders"), ("stock_changes", "Stock changes"),
+            ("sales_status", "Sales status"), ("listing_status", "Listing status"),
+        ]
+        _FREQUENCY_OPTIONS = [
+            (sync_rules_store.FREQUENCY_MANUAL, "Manual"),
+            (sync_rules_store.FREQUENCY_EVERY_15_MIN, "Every 15 minutes"),
+            (sync_rules_store.FREQUENCY_HOURLY, "Hourly"),
+            (sync_rules_store.FREQUENCY_DAILY, "Daily"),
+        ]
+        _DIRECTION_OPTIONS = [
+            (sync_rules_store.DIRECTION_PUSH, "ElectroGrader → Platform"),
+            (sync_rules_store.DIRECTION_PULL, "Platform → ElectroGrader"),
+            (sync_rules_store.DIRECTION_TWO_WAY, "Two-way"),
+        ]
+        _CONFLICT_OPTIONS = [
+            (sync_rules_store.CONFLICT_KEEP_LOCAL, "Keep ElectroGrader data"),
+            (sync_rules_store.CONFLICT_KEEP_REMOTE, "Keep external platform data"),
+            (sync_rules_store.CONFLICT_ASK_USER, "Ask me"),
+        ]
+        # (trigger_event, job_type, checkbox label) — Phase 1's fixed starter
+        # set; the underlying storage (SyncRule.automation_triggers) is a
+        # JSON list, not fixed columns, so more triggers can be added later
+        # without a migration.
+        _AUTOMATION_TRIGGER_DEFAULTS = [
+            ("product_completed", sync_job_store.JOB_TYPE_PRODUCT_EXPORT,
+             "When a product is marked completed → export it automatically"),
+            ("product_updated", sync_job_store.JOB_TYPE_PRODUCT_EXPORT,
+             "When a product's price/description/photos/quantity changes → update the listing"),
+            ("stock_changed", sync_job_store.JOB_TYPE_LISTING_END,
+             "When stock reaches zero → end the listing"),
+        ]
+
+        def _render_synchronization_tab(entry, rule: sync_rules_store.SyncRule) -> None:
+            st.caption("Choose what ElectroGrader sends to / receives from this integration, and how often.")
+            st.markdown("**Data sent from ElectroGrader**")
+            send_cols = st.columns(3)
+            new_fields_send = []
+            for i, (key, label) in enumerate(_SYNC_FIELDS_SENT):
+                with send_cols[i % 3]:
+                    if st.checkbox(label, value=key in rule.fields_send, key=f"sync_send_{entry.integration_type}_{key}"):
+                        new_fields_send.append(key)
+
+            st.markdown("**Data received from external platform**")
+            recv_cols = st.columns(3)
+            new_fields_receive = []
+            for i, (key, label) in enumerate(_SYNC_FIELDS_RECEIVED):
+                with recv_cols[i % 3]:
+                    if st.checkbox(
+                        label, value=key in rule.fields_receive, key=f"sync_recv_{entry.integration_type}_{key}",
+                    ):
+                        new_fields_receive.append(key)
+
+            st.divider()
+            st.markdown("**Synchronization rules**")
+            freq_keys = [k for k, _ in _FREQUENCY_OPTIONS]
+            frequency = st.selectbox(
+                "Frequency", freq_keys,
+                index=freq_keys.index(rule.frequency) if rule.frequency in freq_keys else 0,
+                format_func=lambda k: dict(_FREQUENCY_OPTIONS)[k], key=f"sync_freq_{entry.integration_type}",
+            )
+            if frequency != sync_rules_store.FREQUENCY_MANUAL:
+                st.caption(
+                    "⏭️ Phase 1: scheduled runs are queued and logged, but no integration has real "
+                    "automatic sync wired up yet — expect a \"Skipped (not implemented yet)\" entry "
+                    "in Logs each time, until that integration's automation ships."
+                )
+            dir_keys = [k for k, _ in _DIRECTION_OPTIONS]
+            direction = st.selectbox(
+                "Direction", dir_keys,
+                index=dir_keys.index(rule.direction) if rule.direction in dir_keys else 0,
+                format_func=lambda k: dict(_DIRECTION_OPTIONS)[k], key=f"sync_dir_{entry.integration_type}",
+            )
+            conflict_keys = [k for k, _ in _CONFLICT_OPTIONS]
+            conflict_handling = st.selectbox(
+                "Conflict handling", conflict_keys,
+                index=conflict_keys.index(rule.conflict_handling) if rule.conflict_handling in conflict_keys else 0,
+                format_func=lambda k: dict(_CONFLICT_OPTIONS)[k], key=f"sync_conflict_{entry.integration_type}",
+            )
+
+            if st.button("💾 Save synchronization settings", key=f"sync_save_{entry.integration_type}", type="primary"):
+                rule.fields_send = new_fields_send
+                rule.fields_receive = new_fields_receive
+                rule.frequency = frequency
+                rule.direction = direction
+                rule.conflict_handling = conflict_handling
+                sync_rules_store.upsert_rule(rule)
+                st.success("Saved.")
+                st.rerun()
+
+        def _render_field_mapping_tab(entry, mapping: field_mapping_store.FieldMapping) -> None:
+            target_fields = IntegrationManager.get_supported_target_fields(entry.integration_type)
+            if not target_fields:
+                st.info(f"{entry.display_name} has no mappable fields yet.")
+                return
+
+            st.caption(
+                "Map ElectroGrader data onto this integration's technical fields. "
+                "One active configuration per integration."
+            )
+            search = st.text_input("🔍 Search mapping rules...", key=f"mapping_search_{entry.integration_type}")
+            source_field_keys = [k for k, _ in _SYNC_FIELDS_SENT]
+
+            df = pd.DataFrame(
+                [
+                    {
+                        "Source field": r.source_field, "Source value": r.source_value,
+                        "Target field": r.target_field, "Target value": r.target_value,
+                        "Target label": r.target_label,
+                    }
+                    for r in mapping.rules
+                ],
+                columns=["Source field", "Source value", "Target field", "Target value", "Target label"],
+            )
+
+            q = search.strip().lower()
+            if q:
+                mask = df.apply(lambda row: q in " ".join(str(v) for v in row).lower(), axis=1)
+                st.dataframe(df[mask], use_container_width=True, hide_index=True)
+                st.caption("Clear the search box to edit and save mappings.")
+                return
+
+            edited = st.data_editor(
+                df, num_rows="dynamic", use_container_width=True, hide_index=True,
+                key=f"mapping_editor_{entry.integration_type}",
+                column_config={
+                    "Source field": st.column_config.SelectboxColumn(options=source_field_keys, required=True),
+                    "Target field": st.column_config.SelectboxColumn(options=list(target_fields.keys()), required=True),
+                },
+            )
+            if st.button("💾 Save field mapping", key=f"mapping_save_{entry.integration_type}", type="primary"):
+                mapping.rules = [
+                    field_mapping_store.FieldMappingRule(
+                        source_field=row.get("Source field") or "", source_value=row.get("Source value") or "",
+                        target_field=row.get("Target field") or "", target_value=row.get("Target value") or "",
+                        target_label=row.get("Target label") or "",
+                    )
+                    for _, row in edited.iterrows()
+                    if row.get("Source field") and row.get("Target field")
+                ]
+                field_mapping_store.upsert_mapping(mapping)
+                st.success("Saved.")
+                st.rerun()
+
+        def _render_automation_tab(entry, rule: sync_rules_store.SyncRule) -> None:
+            st.caption("These actions are saved but not executed automatically yet — real automation is future work.")
+            triggers_by_event = {t.get("trigger_event"): t for t in rule.automation_triggers}
+            new_triggers = []
+            for trigger_event, job_type, label in _AUTOMATION_TRIGGER_DEFAULTS:
+                existing = triggers_by_event.get(trigger_event, {})
+                enabled = st.checkbox(
+                    label, value=bool(existing.get("enabled", False)),
+                    key=f"automation_{entry.integration_type}_{trigger_event}",
+                )
+                new_triggers.append({"trigger_event": trigger_event, "job_type": job_type, "enabled": enabled})
+
+            if st.button("💾 Save automation settings", key=f"automation_save_{entry.integration_type}", type="primary"):
+                rule.automation_triggers = new_triggers
+                sync_rules_store.upsert_rule(rule)
+                st.success("Saved.")
+                st.rerun()
+
+        def _render_logs_tab(entry) -> None:
+            _render_integration_activity(entry.integration_type)
+            st.markdown("**Scheduled sync jobs**")
+            jobs = sync_job_store.list_jobs(current_user.company_id, entry.integration_type, limit=10)
+            if not jobs:
+                st.caption("No scheduled jobs yet.")
+            job_icons = {
+                sync_job_store.STATUS_SUCCESS: "✅", sync_job_store.STATUS_ERROR: "❌",
+                sync_job_store.STATUS_SKIPPED: "⏭️", sync_job_store.STATUS_RETRYING: "🔁",
+                sync_job_store.STATUS_PENDING: "⏳", sync_job_store.STATUS_RUNNING: "⚙️",
+            }
+            for j in jobs:
+                ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(j.created_at)) if j.created_at else "—"
+                icon = job_icons.get(j.status, "•")
+                st.caption(f"{icon} {ts} — {j.job_type} ({j.status}, attempt {j.attempts}/{j.max_attempts})")
 
         def _render_catalog_card(entry) -> None:
             with st.container(border=True, key=f"catalog_card_{entry.integration_type}"):
@@ -2709,12 +2923,20 @@ elif page == "⚙️ Settings":
             open_type, open_entry = "", None
 
         if open_entry is not None:
-            # ---- B) Full configuration page (not a dialog — see plan: this
-            # is where Mapping/Sync/Webhooks/Analytics/Logs tabs land later) --
+            # ---- B) Full configuration page (not a dialog — deliberately, so
+            # General/Synchronization/Field Mapping/Automation/Logs each have
+            # room as real tabs, with space for more (Webhooks/Analytics) later
+            # without another navigation rework) --
             if st.button("← Back to Integrations", key="settings_back"):
                 st.session_state.settings_open_integration = ""
                 st.rerun()
             record = integration_store.get_integration(current_user.company_id, open_entry.integration_type)
+            connected = record is not None and record.status == integration_store.STATUS_CONNECTED
+            rule = sync_rules_store.get_rule(current_user.company_id, open_entry.integration_type) or \
+                sync_rules_store.SyncRule(company_id=current_user.company_id, integration_type=open_entry.integration_type)
+            mapping = field_mapping_store.get_mapping(current_user.company_id, open_entry.integration_type) or \
+                field_mapping_store.FieldMapping(company_id=current_user.company_id, integration_type=open_entry.integration_type)
+
             head1, head2 = st.columns([1, 6])
             with head1:
                 _render_integration_logo(open_entry.integration_type, height_px=32)
@@ -2726,7 +2948,21 @@ elif page == "⚙️ Settings":
                 else:
                     st.caption("⚪ Not connected yet")
             st.divider()
-            _INTEGRATION_SETTINGS_RENDERERS[open_entry.integration_type](open_entry, record)
+
+            tab_general, tab_sync, tab_mapping, tab_automation, tab_logs = st.tabs(
+                ["General", "Synchronization", "Field Mapping", "Automation", "Logs"]
+            )
+            with tab_general:
+                _INTEGRATION_SETTINGS_RENDERERS[open_entry.integration_type](open_entry, record)
+                _render_integration_test_and_disconnect(open_entry, connected)
+            with tab_sync:
+                _render_synchronization_tab(open_entry, rule)
+            with tab_mapping:
+                _render_field_mapping_tab(open_entry, mapping)
+            with tab_automation:
+                _render_automation_tab(open_entry, rule)
+            with tab_logs:
+                _render_logs_tab(open_entry)
 
         else:
             # ---- A) Dashboard: only connected integrations, as cards --
