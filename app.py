@@ -41,6 +41,7 @@ from modules import (
     repair_store,
     spec_lookup,
     sync_job_store,
+    sync_log_store,
     sync_ownership_store,
     sync_rules_store,
     vision_grading,
@@ -2912,6 +2913,11 @@ elif page == "⚙️ Settings":
             source_labels = {
                 "electrograder": "ElectroGrader", entry.integration_type: entry.display_name, "manual": "Manual",
             }
+            policy_options = ["electrograder", entry.integration_type, "manual_review"]
+            policy_labels = {
+                "electrograder": "ElectroGrader", entry.integration_type: entry.display_name,
+                "manual_review": "Manual review",
+            }
             config = sync_ownership_store.list_field_config(current_user.company_id, entry.integration_type)
 
             new_choices = {}
@@ -2921,7 +2927,7 @@ elif page == "⚙️ Settings":
                     (key, meta) for key, meta in field_registry.SYNC_OWNERSHIP_FIELDS.items() if meta["group"] == group
                 ]
                 for key, meta in fields_in_group:
-                    row_col1, row_col2, row_col3 = st.columns([2, 2, 1])
+                    row_col1, row_col2, row_col3, row_col4 = st.columns([2, 2, 2, 1])
                     current_cfg = config[key]
                     with row_col1:
                         st.write(meta["label"])
@@ -2935,17 +2941,36 @@ elif page == "⚙️ Settings":
                             label_visibility="collapsed",
                         )
                     with row_col3:
+                        chosen_policy = st.selectbox(
+                            f"{meta['label']} conflict policy", policy_options,
+                            index=policy_options.index(current_cfg.conflict_policy)
+                            if current_cfg.conflict_policy in policy_options else 0,
+                            format_func=lambda k: policy_labels[k],
+                            key=f"ownership_policy_{entry.integration_type}_{key}",
+                            label_visibility="collapsed",
+                        )
+                    with row_col4:
                         enabled = st.checkbox(
                             "Enabled", value=current_cfg.sync_enabled,
                             key=f"ownership_enabled_{entry.integration_type}_{key}",
                         )
-                    new_choices[key] = (chosen, enabled)
+                    if sync_ownership_store.is_conflicting_configuration(chosen, chosen_policy):
+                        st.warning(
+                            f"Conflict policy allows {policy_labels[chosen_policy]} changes although this field "
+                            f"is owned by {source_labels[chosen]}."
+                        )
+                    new_choices[key] = (chosen, chosen_policy, enabled)
 
             if st.button("💾 Save Sync Ownership", key=f"ownership_save_{entry.integration_type}", type="primary"):
-                for field_name, (source_system, sync_enabled) in new_choices.items():
+                for field_name, (source_system, conflict_policy, sync_enabled) in new_choices.items():
                     sync_ownership_store.upsert_field_config(
-                        current_user.company_id, entry.integration_type, field_name, source_system, sync_enabled,
+                        current_user.company_id, entry.integration_type, field_name, source_system,
+                        sync_enabled, conflict_policy,
                     )
+                audit_store.log_audit(
+                    current_user.company_id, current_user.id, "UPDATE_SYNC_OWNERSHIP",
+                    "integration", entry.integration_type,
+                )
                 st.success("Saved.")
                 st.rerun()
 
@@ -2982,6 +3007,28 @@ elif page == "⚙️ Settings":
                 ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(j.created_at)) if j.created_at else "—"
                 icon = job_icons.get(j.status, "•")
                 st.caption(f"{icon} {ts} — {j.job_type} ({j.status}, attempt {j.attempts}/{j.max_attempts})")
+
+            st.markdown("**Field sync history**")
+            logs = sync_log_store.list_logs(current_user.company_id, connector_name=entry.integration_type, limit=10)
+            if not logs:
+                st.caption("No field-level sync history yet — populated once real two-way sync detects a change.")
+            for log in logs:
+                ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(log.created_at)) if log.created_at else "—"
+                st.caption(
+                    f"{ts} — {log.field_name}: {log.old_value or '—'} → {log.new_value or '—'} "
+                    f"(from {log.source}, {log.direction})"
+                )
+
+            st.markdown("**Pending conflicts**")
+            pending = [c for c in sync_ownership_store.list_conflicts(current_user.company_id) if not c.resolution]
+            if not pending:
+                st.caption("No pending conflicts.")
+            for c in pending:
+                ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.timestamp)) if c.timestamp else "—"
+                st.caption(
+                    f"{ts} — product {c.product_id}, field {c.field_name}: "
+                    f"ElectroGrader={c.electrograder_value or '—'} vs {entry.display_name}={c.baselinker_value or '—'}"
+                )
 
         def _render_catalog_card(entry) -> None:
             with st.container(border=True, key=f"catalog_card_{entry.integration_type}"):

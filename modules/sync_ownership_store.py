@@ -36,6 +36,12 @@ class SyncFieldConfig:
     field_name: str = ""
     source_system: str = ""  # "electrograder" | "manual" | connector_name
     sync_enabled: bool = True
+    # Which value wins when the NON-owning side changes a field, once real
+    # two-way sync exists: "electrograder" | connector_name | "manual_review"
+    # (the last one meaning "ask a human" rather than picking a side
+    # automatically — the only value that is never a "mismatch" with
+    # source_system, see is_conflicting_configuration() below).
+    conflict_policy: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -74,6 +80,14 @@ def _connect() -> sqlite3.Connection:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_field_config_unique "
         "ON sync_field_config(company_id, connector_name, field_name)"
     )
+
+    # Migrate older DBs (initial Sync Ownership shipped this table without
+    # conflict_policy).
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(sync_field_config)")}
+    if "conflict_policy" not in existing_cols:
+        conn.execute("ALTER TABLE sync_field_config ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_conflicts (
@@ -96,20 +110,76 @@ def _connect() -> sqlite3.Connection:
 
 
 _FIELD_CONFIG_COLS = (
-    "id, company_id, connector_name, field_name, source_system, sync_enabled, created_at, updated_at"
+    "id, company_id, connector_name, field_name, source_system, sync_enabled, "
+    "conflict_policy, created_at, updated_at"
 )
 
 
 def _row_to_field_config(r: tuple) -> SyncFieldConfig:
     return SyncFieldConfig(
         id=r[0], company_id=r[1], connector_name=r[2], field_name=r[3], source_system=r[4],
-        sync_enabled=bool(r[5]), created_at=r[6] or 0.0, updated_at=r[7] or 0.0,
+        sync_enabled=bool(r[5]), conflict_policy=r[6] or "", created_at=r[7] or 0.0, updated_at=r[8] or 0.0,
     )
 
 
 def _resolve_default_owner(field_name: str, connector_name: str) -> str:
     default = SYNC_OWNERSHIP_FIELDS.get(field_name, {}).get("default_owner", "electrograder")
     return connector_name if default == "<connector>" else default
+
+
+# Sync direction is deliberately NOT a stored column — every flow in the
+# spec is 1:1 determined by ownership (owner=electrograder -> flows TO the
+# connector; owner=connector -> flows FROM it; owner=manual -> nothing
+# automatic), so storing it separately would let it drift out of sync with
+# source_system. resolve_flow() is the single computation, always derived.
+FLOW_EXPORT_ONLY = "export"  # ElectroGrader -> connector
+FLOW_IMPORT_ONLY = "import"  # connector -> ElectroGrader
+FLOW_MANUAL_ONLY = "manual"  # nothing changes automatically
+
+
+def resolve_flow(source_system: str, connector_name: str) -> str:
+    if source_system == "electrograder":
+        return FLOW_EXPORT_ONLY
+    if source_system == "manual":
+        return FLOW_MANUAL_ONLY
+    return FLOW_IMPORT_ONLY  # source_system == connector_name
+
+
+CONFLICT_MANUAL_REVIEW = "manual_review"
+
+
+def _conflict_policy_for_owner(source_system: str) -> str:
+    """Maps a concrete owner value to its sensible default conflict policy:
+    the owner's own side wins by default, except "manual" (nobody
+    auto-owns it, so any conflict needs a human) which maps to
+    CONFLICT_MANUAL_REVIEW rather than nonsensically defaulting to a side
+    that doesn't own the field."""
+    return CONFLICT_MANUAL_REVIEW if source_system == "manual" else source_system
+
+
+def _resolve_default_conflict_policy(field_name: str, connector_name: str) -> str:
+    """The default conflict policy for a field that has NO saved
+    sync_field_config row at all yet — derived from the field's registry
+    default_owner (SYNC_OWNERSHIP_FIELDS), via _conflict_policy_for_owner().
+    Distinct from upsert_field_config's blank-conflict_policy fallback,
+    which must instead default from the source_system actually being
+    saved right now, not the field's registry default (they can differ,
+    e.g. saving brand -> manual while brand's registry default is
+    electrograder)."""
+    return _conflict_policy_for_owner(_resolve_default_owner(field_name, connector_name))
+
+
+def is_conflicting_configuration(owner: str, conflict_policy: str) -> bool:
+    """True when conflict_policy names a concrete side that DISAGREES with
+    who owns the field — e.g. owner=electrograder but conflict_policy lets
+    the connector's changes win outright. Not forbidden (the UI only warns,
+    never blocks), but worth surfacing since it's easy to configure by
+    accident. conflict_policy == CONFLICT_MANUAL_REVIEW is never a
+    mismatch, for any owner — deferring to a human is always a safe,
+    non-contradictory choice."""
+    if conflict_policy == CONFLICT_MANUAL_REVIEW:
+        return False
+    return conflict_policy != owner
 
 
 def get_field_owner(company_id: str, connector_name: str, field_name: str) -> str:
@@ -128,6 +198,26 @@ def get_field_owner(company_id: str, connector_name: str, field_name: str) -> st
     return _resolve_default_owner(field_name, connector_name)
 
 
+def get_conflict_policy(company_id: str, connector_name: str, field_name: str) -> str:
+    """Same guarantee as get_field_owner(): a saved sync_field_config row's
+    conflict_policy ALWAYS wins over the computed default — the default is
+    only used when no row exists yet. The one difference: a row saved
+    BEFORE this column existed has conflict_policy == "" (the ALTER TABLE
+    migration default) rather than no row at all, and that blank also
+    falls through to the default — same backward-compat shape as
+    fields_send_configured elsewhere in this codebase, since an old row
+    never made a real choice for this column."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT conflict_policy FROM sync_field_config WHERE company_id = ? AND connector_name = ? AND field_name = ?",
+        (company_id, connector_name, field_name),
+    ).fetchone()
+    conn.close()
+    if row is not None and row[0]:
+        return row[0]
+    return _resolve_default_conflict_policy(field_name, connector_name)
+
+
 def list_field_config(company_id: str, connector_name: str) -> Dict[str, SyncFieldConfig]:
     """Every field in SYNC_OWNERSHIP_FIELDS, filled in from saved rows
     where they exist and from safe defaults where they don't — the shape
@@ -143,21 +233,34 @@ def list_field_config(company_id: str, connector_name: str) -> Dict[str, SyncFie
     result: Dict[str, SyncFieldConfig] = {}
     for field_name in SYNC_OWNERSHIP_FIELDS:
         if field_name in saved:
-            result[field_name] = saved[field_name]
+            cfg = saved[field_name]
+            if not cfg.conflict_policy:  # pre-migration row — same fallback as get_conflict_policy()
+                cfg.conflict_policy = _resolve_default_conflict_policy(field_name, connector_name)
+            result[field_name] = cfg
         else:
             result[field_name] = SyncFieldConfig(
                 company_id=company_id, connector_name=connector_name, field_name=field_name,
                 source_system=_resolve_default_owner(field_name, connector_name), sync_enabled=True,
+                conflict_policy=_resolve_default_conflict_policy(field_name, connector_name),
             )
     return result
 
 
 def upsert_field_config(
     company_id: str, connector_name: str, field_name: str, source_system: str, sync_enabled: bool = True,
+    conflict_policy: str = "",
 ) -> None:
+    """conflict_policy defaults to "" (meaning "resolve a sensible default
+    for the source_system being saved") purely so existing call sites
+    (scripts/verify_sync_ownership.py, already shipped) that don't pass it
+    keep working unchanged — a real save from the UI always passes an
+    explicit choice."""
     assert company_id, "company_id is required."
     assert connector_name, "connector_name is required."
     assert field_name, "field_name is required."
+
+    if not conflict_policy:
+        conflict_policy = _conflict_policy_for_owner(source_system)
 
     now = time.time()
     conn = _connect()
@@ -171,9 +274,13 @@ def upsert_field_config(
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO sync_field_config
-               (id, company_id, connector_name, field_name, source_system, sync_enabled, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (record_id, company_id, connector_name, field_name, source_system, int(sync_enabled), created_at, now),
+               (id, company_id, connector_name, field_name, source_system, sync_enabled, conflict_policy,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record_id, company_id, connector_name, field_name, source_system, int(sync_enabled),
+                conflict_policy, created_at, now,
+            ),
         )
     conn.close()
 
