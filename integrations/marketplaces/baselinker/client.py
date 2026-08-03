@@ -25,8 +25,8 @@ from typing import Optional, Set
 
 import requests
 
-from integrations.base import ConnectionTestResult, ConnectorActionResult, MarketplaceConnector
-from integrations.marketplaces.baselinker import mapper, sync
+from integrations.base import ConnectionTestResult, ConnectorActionResult, ImportedProductData, MarketplaceConnector
+from integrations.marketplaces.baselinker import import_products, mapper, sync
 from modules import sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
@@ -80,6 +80,27 @@ def get_product_data(product_ids: list, config: dict) -> dict:
 def get_inventory(product_ids: list, config: dict) -> dict:
     """Spec-named alias for get_product_data() — same real call."""
     return get_product_data(product_ids, config)
+
+
+def list_all_product_ids(config: dict) -> list:
+    """Paginates getInventoryProductsList (page=1,2,...) until a page comes
+    back with no products, collecting every product_id for this
+    inventory_id — the same real endpoint _find_existing_by_sku() already
+    uses (there, narrowed with filter_sku; here, unfiltered)."""
+    ids: list = []
+    page = 1
+    while True:
+        data = _call(
+            "getInventoryProductsList",
+            {"inventory_id": config["inventory_id"], "page": page},
+            config["token"],
+        )
+        products = data.get("products") or {}
+        if not products:
+            break
+        ids.extend(str(pid) for pid in products)
+        page += 1
+    return ids
 
 
 def get_orders(config: dict, date_confirmed_from: float) -> list:
@@ -289,3 +310,11 @@ class BaselinkerConnector(MarketplaceConnector):
             return sync.push_field(product, field_name, listing_id, config)
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, external_id=listing_id, message=str(e))
+
+    def fetch_catalog(self) -> list:
+        """Real bulk catalog fetch — List[ImportedProductData] for every
+        product in this account's configured inventory_id."""
+        try:
+            return import_products.fetch_all_products(self._config())
+        except (BaseLinkerAPIError, requests.RequestException):
+            return []

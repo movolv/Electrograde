@@ -17,6 +17,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import pandas as pd
+import requests
 from PIL import Image, ImageOps
 
 from modules import (
@@ -25,6 +26,7 @@ from modules import (
     auth_cookie,
     auth_store,
     barcode_scanner,
+    catalog_import_job_store,
     company_store,
     description_gen,
     export,
@@ -51,7 +53,7 @@ from modules import (
 from integrations import field_registry, scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
 from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
-from sync import change_detector, engine as sync_engine, service as sync_service
+from sync import catalog_import, change_detector, engine as sync_engine, service as sync_service
 from sync.status import STATUS_DISABLED, STATUS_SUCCESS
 from modules.models import Product
 from modules.review_table_component import review_table
@@ -175,6 +177,63 @@ def _record_sync_field_changes(product, diffs: dict, user_id: str) -> None:
             )
 
 
+def _save_imported_photo(product, image_url: str) -> None:
+    """catalog_import.import_catalog()'s save_image callback — the one
+    place bulk import touches the filesystem, reusing the exact same
+    UPLOAD_DIR/sku_folder_name/_normalize_captured_photo convention as the
+    Review & Export photo-upload block. Best-effort: a single bad image
+    URL is skipped rather than failing the whole product import."""
+    try:
+        resp = requests.get(image_url, timeout=15)
+        resp.raise_for_status()
+        norm = _normalize_captured_photo(resp.content)
+    except Exception:
+        return
+    item_dir = UPLOAD_DIR / sku_folder_name(product.sku, product.id)
+    item_dir.mkdir(parents=True, exist_ok=True)
+    existing_nums = [
+        int(m.group(1)) for f in item_dir.glob("photo_*.jpg")
+        if (m := re.match(r"photo_(\d+)\.jpg$", f.name))
+    ]
+    next_num = (max(existing_nums) + 1) if existing_nums else 1
+    fp = item_dir / f"photo_{next_num}.jpg"
+    fp.write_bytes(norm)
+    product.image_paths = product.image_paths + [str(fp)]
+    inventory_store.save_product(product)
+
+
+def _run_import_job(company_id: str, connector_name: str, user_id: str) -> None:
+    """Runs entirely inside _import_executor()'s background thread — MUST
+    NEVER call any st.* function (no Streamlit "ScriptRunContext" exists in
+    a plain worker thread), only DB writes via catalog_import_job_store,
+    the same rule _photo_executor()'s jobs already follow. Progress is
+    persisted after every item so _render_import_progress() (running in a
+    real Streamlit session) can poll it independently."""
+    try:
+        def _progress(imported, skipped, error_count, total):
+            catalog_import_job_store.update_progress(company_id, connector_name, imported, skipped, error_count)
+
+        result = catalog_import.import_catalog(
+            company_id, connector_name, user_id, save_image=_save_imported_photo, on_progress=_progress,
+        )
+        catalog_import_job_store.finish_job(company_id, connector_name, success=True, errors=result["errors"])
+    except Exception as e:  # noqa: BLE001 - a background thread must never crash silently
+        catalog_import_job_store.finish_job(company_id, connector_name, success=False, errors=[str(e)])
+
+
+@st.fragment(run_every=2)
+def _render_import_progress(company_id: str, connector_name: str) -> None:
+    """Auto-refreshing progress display for a running background import —
+    same st.fragment(run_every=...) pattern as _render_photo_gallery(). A
+    fragment reruns only itself, not the whole page, so this polls without
+    disturbing anything else the user is doing."""
+    job = catalog_import_job_store.get_job(company_id, connector_name)
+    if job is None or job.status != catalog_import_job_store.STATUS_RUNNING:
+        return
+    st.progress(job.imported / job.total if job.total else 0.0)
+    st.caption(f"Importing… {job.imported}/{job.total} done, {job.skipped} skipped, {job.error_count} error(s).")
+
+
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
 
 # Below this, a manifest-vs-photo match is flagged to the user as suspect.
@@ -293,6 +352,19 @@ def _photo_executor() -> concurrent.futures.ThreadPoolExecutor:
     (EXIF transpose + resize), not I/O-bound, so more workers than cores
     just causes contention rather than helping."""
     return concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+@st.cache_resource
+def _import_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """One shared background worker for bulk catalog imports (see
+    _run_import_job() below), same st.cache_resource singleton pattern as
+    _photo_executor() — one instance for the whole process, so the "Import
+    N products" button can submit work and return immediately instead of
+    blocking the browser session for however long the import takes.
+    max_workers=1: only one import should ever run per process at a time
+    (the UI also guards against starting a second one while one is active,
+    see _render_catalog_import_section)."""
+    return concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
 @st.cache_resource
@@ -1573,6 +1645,38 @@ elif page == "📥 Import Manifest":
 elif page == "📦 Inventory":
     st.title("📦 Inventory")
 
+    with st.expander("📋 Bulk status update"):
+        st.caption(
+            "Change the workflow status (draft / in_progress / completed) for several products at once — "
+            "e.g. after a bulk import, instead of opening each one individually."
+        )
+        _bulk_status_products = inventory_store.list_products(current_user.company_id)
+        if not _bulk_status_products:
+            st.caption("No products yet.")
+        else:
+            _bulk_status_df = pd.DataFrame(
+                [{"SKU": p.sku, "Title": p.name, "Status": p.status} for p in _bulk_status_products]
+            )
+            _bulk_status_selection = st.dataframe(
+                _bulk_status_df, use_container_width=True, hide_index=True,
+                on_select="rerun", selection_mode="multi-row", key="bulk_status_table",
+            )
+            _selected_rows = _bulk_status_selection.selection.rows if _bulk_status_selection else []
+            new_status = st.selectbox(
+                "New status", ["draft", "in_progress", "completed"], key="bulk_status_new_value",
+            )
+            if st.button(f"Apply to {len(_selected_rows)} selected", key="bulk_status_apply", disabled=not _selected_rows):
+                for row_idx in _selected_rows:
+                    prod = _bulk_status_products[row_idx]
+                    prod.status = new_status
+                    inventory_store.save_product(prod)
+                    audit_store.log_audit(
+                        current_user.company_id, current_user.id, "UPDATE_PRODUCT", "product", prod.id,
+                        f"status -> {new_status}",
+                    )
+                st.success(f"Updated {len(_selected_rows)} product(s) to '{new_status}'.")
+                st.rerun()
+
     TRIAGE_LABELS = {
         "": "All",
         "testing_pending": "🔍 Testing pending",
@@ -2749,6 +2853,66 @@ elif page == "⚙️ Settings":
                 if st.button("🔌 Disconnect", key=f"disconnect_open_{entry.integration_type}", use_container_width=True):
                     _confirm_disconnect_integration_dialog(entry.integration_type, entry.display_name)
 
+        def _render_catalog_import_section(entry) -> None:
+            """Generic bulk catalog import — works for ANY connected
+            marketplace connector via the universal fetch_catalog()
+            interface (integrations/base.py). Nothing here is BaseLinker-
+            specific; a future eBay/Amazon/Tradera connector shows up here
+            automatically the moment it implements fetch_catalog().
+
+            The actual import runs in the background (_import_executor()) —
+            clicking "Import" starts the job and returns immediately, so
+            this browser session (and every other user) stays fully usable
+            while it runs. Progress persists in catalog_import_job_store,
+            not session_state, so navigating away and back still shows the
+            current state correctly."""
+            st.divider()
+            st.markdown(f"**📥 Import catalog from {entry.display_name}**")
+            st.caption(
+                f"One-time (but safely re-runnable) import of your existing {entry.display_name} products into "
+                "ElectroGrader, so you don't have to re-enter them by hand. Imported products start as drafts "
+                "and need review (Grade/Description/Condition) before they're complete. Runs in the background — "
+                "feel free to keep using the app while it imports."
+            )
+
+            job = catalog_import_job_store.get_job(current_user.company_id, entry.integration_type)
+            if job is not None and job.status == catalog_import_job_store.STATUS_RUNNING:
+                _render_import_progress(current_user.company_id, entry.integration_type)
+                return
+
+            if job is not None and job.status in (catalog_import_job_store.STATUS_SUCCESS, catalog_import_job_store.STATUS_FAILED):
+                if job.errors:
+                    st.warning(
+                        f"Last import: {job.imported} imported, {job.skipped} skipped, "
+                        f"{job.error_count} error(s): {'; '.join(job.errors[:5])}"
+                    )
+                else:
+                    st.success(f"Last import: {job.imported} product(s) imported, {job.skipped} skipped (already existed).")
+
+            preview_key = f"catalog_import_preview_{entry.integration_type}"
+            if st.button("🔍 Preview import", key=f"catalog_import_preview_btn_{entry.integration_type}"):
+                st.session_state[preview_key] = catalog_import.preview_import(
+                    current_user.company_id, entry.integration_type,
+                )
+
+            preview = st.session_state.get(preview_key)
+            if preview is not None:
+                n_new, n_existing = len(preview["new"]), len(preview["existing"])
+                if n_new == 0 and n_existing == 0:
+                    st.info(
+                        f"Nothing to import — either {entry.display_name} has no products, or this connector "
+                        "doesn't support catalog import yet."
+                    )
+                else:
+                    st.write(f"**{n_new}** new product(s) to import, **{n_existing}** already exist (will be skipped).")
+                    if n_new > 0 and st.button(f"📥 Import {n_new} products", key=f"catalog_import_run_{entry.integration_type}", type="primary"):
+                        catalog_import_job_store.start_job(current_user.company_id, entry.integration_type, n_new)
+                        _import_executor().submit(
+                            _run_import_job, current_user.company_id, entry.integration_type, current_user.id,
+                        )
+                        st.session_state[preview_key] = None
+                        st.rerun()
+
         def _render_baselinker_settings(entry, record) -> None:
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
@@ -3238,6 +3402,8 @@ elif page == "⚙️ Settings":
             with tab_general:
                 _INTEGRATION_SETTINGS_RENDERERS[open_entry.integration_type](open_entry, record)
                 _render_integration_test_and_disconnect(open_entry, connected)
+                if connected and open_entry.integration_category == integration_store.CATEGORY_MARKETPLACE:
+                    _render_catalog_import_section(open_entry)
             with tab_sync:
                 _render_synchronization_tab(open_entry, rule)
             with tab_mapping:

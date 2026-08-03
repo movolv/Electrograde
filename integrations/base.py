@@ -32,6 +32,21 @@ class ConnectorActionResult:
     data: dict = field(default_factory=dict)
 
 
+@dataclass
+class ImportedProductData:
+    """One remote product, translated into ElectroGrader's vocabulary for
+    bulk catalog import — the same shape regardless of which marketplace it
+    came from, so sync/catalog_import.py's orchestration never needs to
+    know which connector produced it."""
+    external_id: str
+    sku: str
+    name: str
+    price: float = 0.0
+    quantity: int = 1
+    barcode: str = ""
+    image_urls: list = field(default_factory=list)
+
+
 class IntegrationConnector(ABC):
     """Base for every connector, marketplace or service alike."""
 
@@ -224,6 +239,15 @@ class MarketplaceConnector(IntegrationConnector):
         a full export_product() — a safe fallback for a connector with no
         granular single-field push of its own."""
         return self.export_product(product)
+
+    # ---- Bulk catalog import ------------------------------------------
+
+    def fetch_catalog(self) -> list:
+        """Fetches this connector's full remote product catalog for bulk
+        import into ElectroGrader (List[ImportedProductData]). []
+        (the default) means "this connector doesn't support catalog
+        import yet" — the same honest-empty pattern as pull_state()'s {}."""
+        return []
 
 
 class ServiceConnector(IntegrationConnector):
