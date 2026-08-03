@@ -106,6 +106,39 @@ def process_due_jobs(limit: int = 5) -> int:
     return processed
 
 
+def poll_two_way_sync_once() -> int:
+    """Real two-way sync automation's own due-scan — completely separate
+    from poll_once()/process_due_jobs() above (the old product_export job
+    path, untouched). Only ever looks at rows with the NEW
+    auto_sync_enabled=1 gate (modules/sync_rules_store.list_auto_sync_rules(),
+    default False for every company including ones with the old enabled=1
+    flag already set) — a company that hasn't explicitly opted in here is
+    completely unaffected by this function's existence. Returns how many
+    due (push-interval-or-pull-interval-elapsed) rules were processed this
+    tick."""
+    from modules import marketplace_store, sync_rules_store
+    from sync import engine as sync_engine
+
+    processed = 0
+    now = _now()
+    for rule in sync_rules_store.list_auto_sync_rules():
+        if now - rule.last_push_at >= rule.push_interval_seconds:
+            sync_engine.process_sync_queue()
+            sync_rules_store.mark_pushed(rule.company_id, rule.integration_type, now)
+            processed += 1
+
+        if now - rule.last_pull_at >= rule.pull_interval_seconds:
+            from modules import inventory_store
+
+            for product in inventory_store.list_products(rule.company_id):
+                listing = marketplace_store.get_listing(product.id, rule.integration_type, rule.company_id)
+                if listing is not None and listing.external_listing_id:
+                    sync_engine.pull_product(rule.company_id, product, rule.integration_type)
+            sync_rules_store.mark_pulled(rule.company_id, rule.integration_type, now)
+            processed += 1
+    return processed
+
+
 def run_forever(poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
     """The background loop. A tick failing outright (e.g. a transient DB
     hiccup) is logged and swallowed — one bad tick must never kill the
@@ -115,6 +148,7 @@ def run_forever(poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
         try:
             poll_once()
             process_due_jobs()
+            poll_two_way_sync_once()
         except Exception:
             logger.exception("Sync scheduler tick failed")
         time.sleep(poll_interval)

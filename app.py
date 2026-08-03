@@ -37,19 +37,21 @@ from modules import (
     manifest_store,
     marketplace_store,
     pricing,
+    product_change_log_store,
     pwa,
     repair_store,
     spec_lookup,
     sync_job_store,
     sync_log_store,
     sync_ownership_store,
+    sync_queue_store,
     sync_rules_store,
     vision_grading,
 )
 from integrations import field_registry, scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
 from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
-from sync import service as sync_service
+from sync import change_detector, engine as sync_engine, service as sync_service
 from sync.status import STATUS_DISABLED, STATUS_SUCCESS
 from modules.models import Product
 from modules.review_table_component import review_table
@@ -145,6 +147,32 @@ def _image_static_url(path: Path) -> str | None:
     except (ValueError, OSError):
         return None
     return f"/app/static/{rel.as_posix()}"
+
+
+def _record_sync_field_changes(product, diffs: dict, user_id: str) -> None:
+    """Feeds the Inventory edit form's per-field diffs into
+    sync/change_detector.py's generic "product field changed" event —
+    the ONE call site this phase wires it into (see change_detector.py's
+    own docstring for why other save paths aren't touched here). Notifies
+    every connected marketplace integration for this company, never
+    hardcoding "baselinker" — a future second marketplace connector needs
+    no change here."""
+    connected = [
+        i for i in integration_store.list_integrations(product.company_id)
+        if i.integration_category == integration_store.CATEGORY_MARKETPLACE
+        and i.status == integration_store.STATUS_CONNECTED
+    ]
+    if not connected:
+        return
+    for field_name, (old_value, new_value) in diffs.items():
+        if old_value == new_value:
+            continue
+        for integration in connected:
+            change_detector.record_and_enqueue(
+                product.company_id, product.id, integration.integration_type, field_name,
+                old_value, new_value, source_system=product_change_log_store.SOURCE_ELECTROGRADER,
+                changed_by=f"user:{user_id}",
+            )
 
 
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
@@ -1710,7 +1738,7 @@ elif page == "📦 Inventory":
                 st.caption("Not listed on any marketplace yet.")
 
             if IntegrationManager.is_connected(p.company_id, "baselinker"):
-                bl_col1, bl_col2, bl_col3 = st.columns(3)
+                bl_col1, bl_col2, bl_col3, bl_col4 = st.columns(4)
                 with bl_col1:
                     if st.button("🔍 Preview export", key=f"preview_{p.id}", use_container_width=True):
                         st.session_state[f"show_export_preview_{p.id}"] = True
@@ -1731,13 +1759,22 @@ elif page == "📦 Inventory":
                         st.session_state[f"sync_now_results_{p.id}"] = sync_service.run_manual_sync(
                             p.company_id, p, "baselinker",
                         )
+                with bl_col4:
+                    if st.button("⬇️ Pull now", key=f"pull_now_{p.id}", use_container_width=True):
+                        st.session_state[f"pull_now_results_{p.id}"] = sync_engine.pull_product(
+                            p.company_id, p, "baselinker",
+                        )
+                        st.rerun()
 
                 if st.session_state.get(f"sync_now_results_{p.id}"):
-                    # Two-way sync architecture prep (Phase 3.2) — export is
-                    # real (delegates to the same export_product() path as
-                    # the Push button above); import honestly reports
+                    # export is real (delegates to the same export_product()
+                    # path as the Push button above); import honestly reports
                     # "disabled" since no connector implements pulling data
-                    # FROM BaseLinker yet. Never fakes a result either way.
+                    # FROM BaseLinker through this specific path yet — real
+                    # Pull is the dedicated "⬇️ Pull now" button below, which
+                    # goes through sync/engine.py's pull_product() +
+                    # Conflict Resolver instead of this generic sync() entry
+                    # point. Never fakes a result either way.
                     with st.expander("🔄 Sync now — result", expanded=True):
                         for rec in st.session_state[f"sync_now_results_{p.id}"]:
                             if rec.sync_status == STATUS_SUCCESS:
@@ -1748,6 +1785,22 @@ elif page == "📦 Inventory":
                                 st.error(f"{rec.direction.capitalize()}: ❌ {rec.error_message}")
                         if st.button("Close", key=f"close_sync_now_{p.id}"):
                             st.session_state[f"sync_now_results_{p.id}"] = None
+                            st.rerun()
+
+                if st.session_state.get(f"pull_now_results_{p.id}") is not None:
+                    with st.expander("⬇️ Pull now — result", expanded=True):
+                        resolutions = st.session_state[f"pull_now_results_{p.id}"]
+                        if not resolutions:
+                            st.caption("Nothing to pull — no BaseLinker listing yet, or BaseLinker returned no data.")
+                        for res in resolutions:
+                            if res.resolution_action == "accepted":
+                                st.success(f"{res.field_name}: ✅ accepted — {res.applied_value}")
+                            elif res.resolution_action == "overridden":
+                                st.warning(f"{res.field_name}: ⚠️ conflict, resolved to {res.applied_value}")
+                            else:
+                                st.info(f"{res.field_name}: ⏸️ pending manual review")
+                        if st.button("Close", key=f"close_pull_now_{p.id}"):
+                            st.session_state[f"pull_now_results_{p.id}"] = None
                             st.rerun()
 
                 if st.session_state.get(f"show_export_preview_{p.id}"):
@@ -2300,6 +2353,22 @@ elif page == "🔍 Review & Export":
                     or new_checklist != p.functional_checklist
                 )
 
+                # Snapshot pre-change values for the fields the real
+                # two-way sync change-detector cares about (SYNC_OWNERSHIP_FIELDS'
+                # keys) — captured before reassignment below so the event
+                # layer can log/enqueue an accurate old -> new diff per field.
+                _sync_field_diffs = {
+                    "name": (p.name, name_in.strip()),
+                    "brand": (p.brand, brand_in.strip()),
+                    "model": (p.model, model_in.strip()),
+                    "category": (p.category, category_in.strip()),
+                    "barcode": (current_barcode, barcode_in.strip()),
+                    "grade": (p.grade, grade_in),
+                    "price": (p.price, float(price_in)),
+                    "quantity": (p.quantity, int(quantity_in)),
+                    "product_description": (p.product_description, desc_in.strip()),
+                }
+
                 p.name = name_in.strip()
                 p.brand = brand_in.strip()
                 p.model = model_in.strip()
@@ -2323,6 +2392,7 @@ elif page == "🔍 Review & Export":
                 inventory_store.save_product(p)
                 if changed:
                     audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id)
+                    _record_sync_field_changes(p, _sync_field_diffs, current_user.id)
                 st.session_state.review_open_product_id = None
                 st.session_state.review_focus_id = p.id  # scroll/highlight this row back in the list
                 st.success("Saved.")
@@ -2906,8 +2976,9 @@ elif page == "⚙️ Settings":
 
         def _render_sync_ownership_tab(entry) -> None:
             st.caption(
-                "Which system is the master source of truth for each field, once real two-way sync exists. "
-                "Purely configuration today — nothing reads this to make a live sync decision yet."
+                "Which system is the master source of truth for each field. Read by the real Push/Pull "
+                "sync engine (manual “Sync now”/“Pull now”, and Automatic Sync once enabled "
+                "in the Automation tab) to decide what wins on a conflict."
             )
             source_options = ["electrograder", entry.integration_type, "manual"]
             source_labels = {
@@ -2920,6 +2991,15 @@ elif page == "⚙️ Settings":
             }
             config = sync_ownership_store.list_field_config(current_user.company_id, entry.integration_type)
 
+            # Field Sync Status: most recent sync_logs entry per field, so
+            # each row can show "Last sync" / "Status" next to its ownership
+            # controls (spec's Field Sync Status mockup) — one query for all
+            # 12 fields rather than one per row.
+            _latest_log_by_field: dict = {}
+            for log in sync_log_store.list_logs(current_user.company_id, connector_name=entry.integration_type, limit=200):
+                if log.field_name not in _latest_log_by_field:
+                    _latest_log_by_field[log.field_name] = log
+
             new_choices = {}
             for group in ("Product Content", "Sales Data"):
                 st.markdown(f"**{group}**")
@@ -2927,7 +3007,7 @@ elif page == "⚙️ Settings":
                     (key, meta) for key, meta in field_registry.SYNC_OWNERSHIP_FIELDS.items() if meta["group"] == group
                 ]
                 for key, meta in fields_in_group:
-                    row_col1, row_col2, row_col3, row_col4 = st.columns([2, 2, 2, 1])
+                    row_col1, row_col2, row_col3, row_col4, row_col5 = st.columns([2, 2, 2, 1, 2])
                     current_cfg = config[key]
                     with row_col1:
                         st.write(meta["label"])
@@ -2954,6 +3034,14 @@ elif page == "⚙️ Settings":
                             "Enabled", value=current_cfg.sync_enabled,
                             key=f"ownership_enabled_{entry.integration_type}_{key}",
                         )
+                    with row_col5:
+                        last_log = _latest_log_by_field.get(key)
+                        if last_log is None:
+                            st.caption("Last sync: —")
+                        else:
+                            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_log.created_at))
+                            status_label = "Pending review" if last_log.new_value == "(pending review)" else "Success"
+                            st.caption(f"Last sync: {ts}  \nStatus: {status_label}")
                     if sync_ownership_store.is_conflicting_configuration(chosen, chosen_policy):
                         st.warning(
                             f"Conflict policy allows {policy_labels[chosen_policy]} changes although this field "
@@ -2975,7 +3063,7 @@ elif page == "⚙️ Settings":
                 st.rerun()
 
         def _render_automation_tab(entry, rule: sync_rules_store.SyncRule) -> None:
-            st.caption("These actions are saved but not executed automatically yet — real automation is future work.")
+            st.caption("These event triggers are saved but not executed automatically yet — future work.")
             triggers_by_event = {t.get("trigger_event"): t for t in rule.automation_triggers}
             new_triggers = []
             for trigger_event, job_type, label in _AUTOMATION_TRIGGER_DEFAULTS:
@@ -2989,6 +3077,40 @@ elif page == "⚙️ Settings":
             if st.button("💾 Save automation settings", key=f"automation_save_{entry.integration_type}", type="primary"):
                 rule.automation_triggers = new_triggers
                 sync_rules_store.upsert_rule(rule)
+                st.success("Saved.")
+                st.rerun()
+
+            st.divider()
+            st.markdown("**Automatic Sync (real-time push/pull)**")
+            st.caption(
+                "When enabled, ElectroGrader will automatically push/pull changes to/from "
+                f"{entry.display_name} in the background, on the intervals below."
+            )
+            auto_enabled = st.checkbox(
+                "Enable automatic sync", value=rule.auto_sync_enabled,
+                key=f"auto_sync_enabled_{entry.integration_type}",
+            )
+            auto_col1, auto_col2 = st.columns(2)
+            with auto_col1:
+                push_interval = st.number_input(
+                    "Push interval (seconds)", min_value=10, value=rule.push_interval_seconds or 60,
+                    key=f"push_interval_{entry.integration_type}",
+                )
+            with auto_col2:
+                pull_interval = st.number_input(
+                    "Pull interval (seconds)", min_value=10, value=rule.pull_interval_seconds or 300,
+                    key=f"pull_interval_{entry.integration_type}",
+                )
+            if st.button("💾 Save Automatic Sync settings", key=f"auto_sync_save_{entry.integration_type}"):
+                rule.auto_sync_enabled = auto_enabled
+                rule.push_interval_seconds = int(push_interval)
+                rule.pull_interval_seconds = int(pull_interval)
+                sync_rules_store.upsert_rule(rule)
+                audit_store.log_audit(
+                    current_user.company_id, current_user.id, "UPDATE_AUTO_SYNC_SETTINGS",
+                    "integration", entry.integration_type,
+                    f"auto_sync_enabled={auto_enabled}",
+                )
                 st.success("Saved.")
                 st.rerun()
 

@@ -26,7 +26,7 @@ from typing import Optional, Set
 import requests
 
 from integrations.base import ConnectionTestResult, ConnectorActionResult, MarketplaceConnector
-from integrations.marketplaces.baselinker import mapper
+from integrations.marketplaces.baselinker import mapper, sync
 from modules import sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
@@ -60,6 +60,35 @@ def _call(method: str, parameters: dict, token: str) -> dict:
     if data.get("status") == "ERROR":
         raise BaseLinkerAPIError(f"{method} failed: {data.get('error_message', data)}")
     return data
+
+
+def get_product_data(product_ids: list, config: dict) -> dict:
+    """Real getInventoryProductsData call — returns the raw "products" dict
+    keyed by product_id, each holding prices/stock/etc. for the configured
+    inventory_id. The one real API call both get_product() and
+    get_inventory() (spec-named aliases) are built on — BaseLinker has no
+    separate single-product-fetch or stock-only endpoint worth using
+    instead."""
+    data = _call(
+        "getInventoryProductsData",
+        {"inventory_id": config["inventory_id"], "products": [int(p) for p in product_ids]},
+        config["token"],
+    )
+    return data.get("products", {}) or {}
+
+
+def get_inventory(product_ids: list, config: dict) -> dict:
+    """Spec-named alias for get_product_data() — same real call."""
+    return get_product_data(product_ids, config)
+
+
+def get_orders(config: dict, date_confirmed_from: float) -> list:
+    """Real getOrders call. Prepared but not wired into any Pull decision
+    this pass — no SYNC_OWNERSHIP_FIELDS field maps to order data yet."""
+    data = _call(
+        "getOrders", {"date_confirmed_from": int(date_confirmed_from)}, config["token"],
+    )
+    return data.get("orders", []) or []
 
 
 class BaselinkerConnector(MarketplaceConnector):
@@ -222,3 +251,41 @@ class BaselinkerConnector(MarketplaceConnector):
         # BaseLinker's addInventoryProduct is a full upsert — no separate
         # stock-only endpoint worth using here.
         return self.update_product(product, external_id)
+
+    # ---- Real two-way sync (Push/Pull) --------------------------------
+
+    def pull_state(self, product) -> dict:
+        """Real Pull: fetch BaseLinker's current operational state
+        (quantity/price/status only — see field_reader.py) for this
+        product's existing listing. {} if there's no listing yet (nothing
+        to pull) or the listing lookup fails."""
+        from modules import marketplace_store
+
+        listing = marketplace_store.get_listing(product.id, self.integration_type, self.company_id)
+        if listing is None or not listing.external_listing_id:
+            return {}
+        config = self._config()
+        try:
+            raw = sync.pull_state(listing.external_listing_id, config)
+        except (BaseLinkerAPIError, requests.RequestException):
+            return {}
+        return raw
+
+    def push_field(self, product, field_name: str, existing_listing_id: str = "") -> ConnectorActionResult:
+        """Real single-field Push — used by sync/engine.py's
+        process_sync_queue() instead of a full export_product() so a
+        Sync Queue row only sends the one field it recorded."""
+        from modules import marketplace_store
+
+        config = self._config()
+        listing_id = existing_listing_id
+        if not listing_id:
+            listing = marketplace_store.get_listing(product.id, self.integration_type, self.company_id)
+            listing_id = listing.external_listing_id if listing else ""
+        if not listing_id:
+            return ConnectorActionResult(success=False, message="No existing BaseLinker listing to push a field to.")
+
+        try:
+            return sync.push_field(product, field_name, listing_id, config)
+        except (BaseLinkerAPIError, requests.RequestException) as e:
+            return ConnectorActionResult(success=False, external_id=listing_id, message=str(e))

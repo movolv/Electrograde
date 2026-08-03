@@ -210,6 +210,21 @@ class MarketplaceConnector(IntegrationConnector):
             return self.import_product(external_id)
         return self.export_product(product)
 
+    # ---- Real two-way sync (Push/Pull) --------------------------------
+
+    def pull_state(self, product) -> dict:
+        """Fetches this connector's current operational field values
+        (quantity/price/status — never product-intelligence fields) for an
+        existing listing. {} means "nothing pull-able yet" — the default
+        for a connector that hasn't implemented real Pull."""
+        return {}
+
+    def push_field(self, product, field_name: str, existing_listing_id: str = "") -> ConnectorActionResult:
+        """Pushes exactly one field's current value. Default delegates to
+        a full export_product() — a safe fallback for a connector with no
+        granular single-field push of its own."""
+        return self.export_product(product)
+
 
 class ServiceConnector(IntegrationConnector):
     """A non-marketplace external service (translation, AI, shipping...).

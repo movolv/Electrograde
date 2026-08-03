@@ -12,7 +12,7 @@ sync_product() here rather than duplicating this logic — that's the
 asked to prepare.
 """
 from integrations.manager import IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
-from modules import sync_record_store
+from modules import product_change_log_store, sync_queue_store, sync_record_store
 from sync.models import SyncRecord
 from sync.status import DIRECTION_EXPORT
 
@@ -56,3 +56,89 @@ def get_export_field_owners(company_id: str, connector_name: str) -> dict:
         field_name: sync_ownership_store.get_field_owner(company_id, connector_name, field_name)
         for field_name in SYNC_OWNERSHIP_FIELDS
     }
+
+
+def process_sync_queue(limit: int = 10) -> int:
+    """Claims pending sync_queue rows (same claim-then-process pattern as
+    integrations/scheduler.py's process_due_jobs()) and pushes each one via
+    the connector's push_field(). Cross-tenant (scheduler infra) — every
+    item still carries its own company_id."""
+    from modules import inventory_store, sync_log_store
+
+    processed = 0
+    for item in sync_queue_store.claim_pending(limit=limit):
+        try:
+            connector = IntegrationManager.get(item.company_id, item.connector_name)
+        except (IntegrationNotConnectedError, IntegrationNotAvailableError) as e:
+            sync_queue_store.mark_failed(item.id, str(e), item.attempts, item.max_attempts)
+            processed += 1
+            continue
+
+        product = inventory_store.get_product(item.product_id, item.company_id)
+        if product is None:
+            sync_queue_store.mark_failed(item.id, "Product no longer exists.", item.attempts, item.max_attempts)
+            processed += 1
+            continue
+
+        result = connector.push_field(product, item.field_name)
+        if result.success:
+            sync_queue_store.mark_success(item.id)
+            sync_log_store.record_log(
+                item.company_id, item.product_id, item.connector_name, item.field_name,
+                old_value=item.old_value, new_value=item.new_value, direction="export", source="electrograder",
+            )
+        else:
+            sync_queue_store.mark_failed(item.id, result.message, item.attempts, item.max_attempts)
+        processed += 1
+    return processed
+
+
+# Fields it's actually safe to write back onto a Product from a Pull —
+# deliberately NOT the full SYNC_OWNERSHIP_FIELDS set. Product.status is the
+# grading workflow field (draft/in_progress/completed); the marketplace
+# listing/sale "status" concept in SYNC_OWNERSHIP_FIELDS has no
+# corresponding Product attribute, so it's decided/logged for visibility
+# but never written back — writing it would silently corrupt the grading
+# workflow's own status field.
+_PULL_APPLICABLE_FIELDS = {"quantity", "price"}
+
+
+def pull_product(company_id: str, product, connector_name: str) -> list:
+    """connector.pull_state(product) returns only BaseLinker-owned
+    operational fields (quantity/price/status — see field_reader.py's
+    scope). Each one is decided via conflict_resolver.resolve_field_change()
+    — an accepted/overridden result is only written back to the Product
+    (and logged to product_change_log with source_system="baselinker") when
+    the field is in _PULL_APPLICABLE_FIELDS; a field with no safe Product
+    attribute (status) is still resolved and sync-logged for visibility,
+    just never applied. Returns the list of FieldChangeResolution."""
+    from modules import inventory_store, product_change_log_store
+    from sync import conflict_resolver
+
+    try:
+        connector = IntegrationManager.get(company_id, connector_name)
+    except (IntegrationNotConnectedError, IntegrationNotAvailableError):
+        return []
+
+    remote_state = connector.pull_state(product)
+    resolutions = []
+    for field_name, remote_value in remote_state.items():
+        local_value = getattr(product, field_name, None)
+        resolution = conflict_resolver.resolve_field_change(
+            company_id, product.id, connector_name, field_name,
+            changed_in=connector_name, electrograder_value=local_value, connector_value=remote_value,
+        )
+        resolutions.append(resolution)
+
+        if not resolution.accepted or field_name not in _PULL_APPLICABLE_FIELDS:
+            continue
+        if resolution.applied_value == local_value:
+            continue
+
+        setattr(product, field_name, resolution.applied_value)
+        inventory_store.save_product(product)
+        product_change_log_store.record_change(
+            company_id, product.id, field_name, str(local_value), str(resolution.applied_value),
+            source_system=product_change_log_store.SOURCE_BASELINKER, changed_by="system:pull_sync",
+        )
+    return resolutions

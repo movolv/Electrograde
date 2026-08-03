@@ -73,6 +73,17 @@ class SyncRule:
     # (which only moves on a *successful* sync). Keeping them separate means
     # a failing rule still waits out its full interval before retrying,
     # instead of being re-enqueued on every poll tick.
+    # Real two-way sync automation — completely SEPARATE gate from
+    # `enabled`/`frequency` above (which only ever drove the old
+    # product_export scheduled job). Defaults to False for EVERY row,
+    # including ones that already have enabled=1 from before this column
+    # existed — nothing starts running automatic real Push/Pull until an
+    # admin explicitly turns this on via the Automation tab.
+    auto_sync_enabled: bool = False
+    push_interval_seconds: int = 60
+    pull_interval_seconds: int = 300
+    last_push_at: float = 0.0
+    last_pull_at: float = 0.0
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -123,13 +134,25 @@ def _connect() -> sqlite3.Connection:
         )
         conn.commit()
 
+    # Migrate older DBs (shipped before real two-way sync automation
+    # existed). auto_sync_enabled defaults to 0 for every row, including
+    # ones with the old enabled=1 — see the SyncRule field comment above.
+    if "auto_sync_enabled" not in existing_cols:
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN auto_sync_enabled INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN push_interval_seconds INTEGER NOT NULL DEFAULT 60")
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN pull_interval_seconds INTEGER NOT NULL DEFAULT 300")
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN last_push_at REAL NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN last_pull_at REAL NOT NULL DEFAULT 0")
+        conn.commit()
+
     return conn
 
 
 _SELECT_COLS = (
     "id, company_id, integration_type, frequency, direction, conflict_handling, "
     "fields_send, fields_send_configured, fields_receive, automation_triggers, enabled, "
-    "last_enqueued_at, created_at, updated_at"
+    "last_enqueued_at, auto_sync_enabled, push_interval_seconds, pull_interval_seconds, "
+    "last_push_at, last_pull_at, created_at, updated_at"
 )
 
 
@@ -143,7 +166,9 @@ def _row_to_rule(r: tuple) -> SyncRule:
         fields_receive=json.loads(r[8]) if r[8] else [],
         automation_triggers=json.loads(r[9]) if r[9] else [],
         enabled=bool(r[10]), last_enqueued_at=r[11] or 0.0,
-        created_at=r[12] or 0.0, updated_at=r[13] or 0.0,
+        auto_sync_enabled=bool(r[12]), push_interval_seconds=r[13] or 60, pull_interval_seconds=r[14] or 300,
+        last_push_at=r[15] or 0.0, last_pull_at=r[16] or 0.0,
+        created_at=r[17] or 0.0, updated_at=r[18] or 0.0,
     )
 
 
@@ -189,12 +214,13 @@ def upsert_rule(rule: SyncRule) -> SyncRule:
     now = time.time()
     conn = _connect()
     existing = conn.execute(
-        "SELECT id, created_at, last_enqueued_at FROM integration_sync_rules "
+        "SELECT id, created_at, last_enqueued_at, last_push_at, last_pull_at FROM integration_sync_rules "
         "WHERE company_id = ? AND integration_type = ?",
         (rule.company_id, rule.integration_type),
     ).fetchone()
     if existing:
         rule.id, rule.created_at, rule.last_enqueued_at = existing[0], existing[1] or now, existing[2] or 0.0
+        rule.last_push_at, rule.last_pull_at = existing[3] or 0.0, existing[4] or 0.0
     else:
         rule.created_at = now
     rule.updated_at = now
@@ -204,17 +230,53 @@ def upsert_rule(rule: SyncRule) -> SyncRule:
             """INSERT OR REPLACE INTO integration_sync_rules
                (id, company_id, integration_type, frequency, direction, conflict_handling,
                 fields_send, fields_send_configured, fields_receive, automation_triggers, enabled,
-                last_enqueued_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                last_enqueued_at, auto_sync_enabled, push_interval_seconds, pull_interval_seconds,
+                last_push_at, last_pull_at, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 rule.id, rule.company_id, rule.integration_type, rule.frequency, rule.direction,
                 rule.conflict_handling, json.dumps(rule.fields_send or []), int(rule.fields_send_configured),
                 json.dumps(rule.fields_receive or []), json.dumps(rule.automation_triggers or []),
-                int(rule.enabled), rule.last_enqueued_at, rule.created_at, rule.updated_at,
+                int(rule.enabled), rule.last_enqueued_at, int(rule.auto_sync_enabled),
+                rule.push_interval_seconds, rule.pull_interval_seconds, rule.last_push_at, rule.last_pull_at,
+                rule.created_at, rule.updated_at,
             ),
         )
     conn.close()
     return rule
+
+
+def list_auto_sync_rules() -> List[SyncRule]:
+    """Cross-tenant on purpose — integrations/scheduler.py's
+    poll_two_way_sync_once() own due-scan, completely separate from
+    list_active_rules() (the old product_export job path). Only rows with
+    the new auto_sync_enabled=1 gate ever come back here."""
+    conn = _connect()
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLS} FROM integration_sync_rules WHERE auto_sync_enabled = 1"
+    ).fetchall()
+    conn.close()
+    return [_row_to_rule(r) for r in rows]
+
+
+def mark_pushed(company_id: str, integration_type: str, when: Optional[float] = None) -> None:
+    conn = _connect()
+    with conn:
+        conn.execute(
+            "UPDATE integration_sync_rules SET last_push_at = ? WHERE company_id = ? AND integration_type = ?",
+            (when if when is not None else time.time(), company_id, integration_type),
+        )
+    conn.close()
+
+
+def mark_pulled(company_id: str, integration_type: str, when: Optional[float] = None) -> None:
+    conn = _connect()
+    with conn:
+        conn.execute(
+            "UPDATE integration_sync_rules SET last_pull_at = ? WHERE company_id = ? AND integration_type = ?",
+            (when if when is not None else time.time(), company_id, integration_type),
+        )
+    conn.close()
 
 
 def mark_enqueued(company_id: str, integration_type: str, when: Optional[float] = None) -> None:
