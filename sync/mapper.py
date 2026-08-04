@@ -24,7 +24,7 @@ class CommonExportModel:
     quantity: int = 1
     barcode: str = ""
     sku: str = ""
-    # Structured, not prose — brand/model/category/grade/defects are real
+    # Structured, not prose — brand/model/category/product_condition/defects are real
     # attributes a connector maps individually (to a features dict, a
     # dedicated column, a description slot, whatever that platform needs),
     # never pre-flattened into a sentence here.
@@ -44,7 +44,7 @@ def to_common_export_model(product) -> CommonExportModel:
             "brand": product.brand,
             "model": product.model,
             "category": product.category,
-            "grade": product.grade,
+            "product_condition": product.product_condition,
             "defects": list(product.defects or []),
         },
     )

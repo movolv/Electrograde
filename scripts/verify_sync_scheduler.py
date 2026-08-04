@@ -177,7 +177,7 @@ def main() -> int:
     mapping_store.upsert_mapping(
         mapping_store.FieldMapping(
             company_id=company_b.id, integration_type="isolation_check",
-            rules=[mapping_store.FieldMappingRule(source_field="grade", source_value="B", target_label="secret-b")],
+            rules=[mapping_store.FieldMappingRule(source_field="product_condition", source_value="B", target_label="secret-b")],
         )
     )
     check(

@@ -10,9 +10,9 @@
 Defaults to English; pass language="German" (etc.) to generate copy in
 another language for a specific marketplace/channel — see LANGUAGES below.
 
-This module only consumes already-decided grading output (grade, defects,
-missing_components as plain strings) — it never re-derives or influences the
-A/B/C/D grade itself. See modules/vision_grading.py for that.
+This module only consumes already-decided grading output (product_condition,
+defects, missing_components as plain strings) — it never re-derives or
+influences the A/B/C/D condition itself. See modules/vision_grading.py for that.
 """
 import re
 from dataclasses import dataclass
@@ -249,7 +249,7 @@ def generate_descriptions(
     category: str,
     spec_summary: str,
     box_contents: list,
-    grade: str,
+    product_condition: str,
     condition_type: str,
     defects: list,
     missing_components: list,
@@ -268,7 +268,7 @@ def generate_descriptions(
         f"Category: {category}\n"
         f"Spec summary: {spec_summary or 'not available'}\n"
         f"Standard box contents: {', '.join(box_contents) or 'unknown'}\n"
-        f"Condition grade: {grade} ({condition_type or 'Used'})\n"
+        f"Product condition: {product_condition} ({condition_type or 'Used'})\n"
         f"Detected defects: {', '.join(defects) or 'none detected'}\n"
         f"Missing components: {', '.join(missing_components) or 'none'}\n"
     )

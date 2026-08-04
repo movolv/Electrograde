@@ -1175,35 +1175,37 @@ if page == "🆕 New Item":
                         photo_decoded_barcodes=decoded_barcodes,
                     )
                 st.rerun()
-            st.caption("Or skip and grade manually below.")
+            st.caption("Or skip and assess condition manually below.")
 
         gr = st.session_state.grading_result
-        grade_options = ["A", "B", "C", "D"]
-        default_grade = gr.grade if gr and gr.grade in grade_options else "B"
-        grade_in = st.selectbox("Grade", grade_options, index=grade_options.index(default_grade))
-        st.caption(vision_grading.GRADE_SCALE[grade_in])
+        condition_options = ["A", "B", "C", "D"]
+        default_product_condition = gr.product_condition if gr and gr.product_condition in condition_options else "B"
+        product_condition_in = st.selectbox(
+            "Product Condition", condition_options, index=condition_options.index(default_product_condition),
+        )
+        st.caption(vision_grading.PRODUCT_CONDITION_SCALE[product_condition_in])
 
-        default_confidence = gr.grade_confidence if gr else product.grade_confidence
+        default_confidence = gr.product_condition_confidence if gr else product.product_condition_confidence
         confidence_in = st.slider(
             "AI confidence (%)",
             min_value=0,
             max_value=100,
             value=int(default_confidence),
-            help="AI's confidence in the assigned grade, based on photo quality, "
-            "clarity of visible defects, certainty about box completeness, and "
-            "how cleanly the item matches the A/B/C/D criteria. Lower photo "
+            help="AI's confidence in the assigned product condition, based on photo "
+            "quality, clarity of visible defects, certainty about box completeness, "
+            "and how cleanly the item matches the A/B/C/D criteria. Lower photo "
             "quality or borderline cases should produce a lower number.",
         )
-        st.caption(f"Grade: {grade_in}  •  AI confidence: {confidence_in}%")
+        st.caption(f"Product Condition: {product_condition_in}  •  AI confidence: {confidence_in}%")
 
-        condition_options = ["Used", "New"]
-        default_condition = gr.condition_type if gr and gr.condition_type in condition_options else (
-            product.condition_type if product.condition_type in condition_options else "Used"
+        new_used_options = ["Used", "New"]
+        default_condition = gr.condition_type if gr and gr.condition_type in new_used_options else (
+            product.condition_type if product.condition_type in new_used_options else "Used"
         )
-        condition_in = st.selectbox("New / Used", condition_options, index=condition_options.index(default_condition))
+        condition_in = st.selectbox("New / Used", new_used_options, index=new_used_options.index(default_condition))
 
-        if gr and gr.grade_reasoning:
-            st.info(gr.grade_reasoning)
+        if gr and gr.product_condition_reasoning:
+            st.info(gr.product_condition_reasoning)
 
         defects_val = "\n".join(gr.defects) if gr else "\n".join(product.defects)
         missing_val = "\n".join(gr.missing_components) if gr else "\n".join(product.missing_components)
@@ -1246,9 +1248,9 @@ if page == "🆕 New Item":
                 st.rerun()
         with col3:
             if st.button("Next ➜", type="primary", use_container_width=True):
-                product.grade = grade_in
-                product.grade_confidence = int(confidence_in)
-                product.grade_reasoning = gr.grade_reasoning if gr else ""
+                product.product_condition = product_condition_in
+                product.product_condition_confidence = int(confidence_in)
+                product.product_condition_reasoning = gr.product_condition_reasoning if gr else ""
                 product.condition_type = condition_in
                 product.defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
                 product.missing_components = [l.strip() for l in missing_in.splitlines() if l.strip()]
@@ -1270,7 +1272,7 @@ if page == "🆕 New Item":
             if st.button("💲 Estimate market price"):
                 with st.spinner("Searching for comparable prices..."):
                     st.session_state.price_estimate = pricing.estimate_price(
-                        f"{product.brand} {product.model} {product.name}".strip(), product.grade
+                        f"{product.brand} {product.model} {product.name}".strip(), product.product_condition
                     )
                 st.rerun()
 
@@ -1298,7 +1300,7 @@ if page == "🆕 New Item":
                         category=product.category,
                         spec_summary=product.spec_summary,
                         box_contents=product.box_contents,
-                        grade=product.grade,
+                        product_condition=product.product_condition,
                         condition_type=product.condition_type,
                         defects=product.defects,
                         missing_components=product.missing_components,
@@ -1385,8 +1387,8 @@ if page == "🆕 New Item":
                 "Brand": product.brand,
                 "Model": product.model,
                 "Condition": product.condition_type,
-                "Grade": product.grade,
-                "AI Confidence %": product.grade_confidence,
+                "Product Condition": product.product_condition,
+                "AI Confidence %": product.product_condition_confidence,
                 "Product Match": product.product_match,
                 "Match Confidence %": product.match_confidence,
                 "Price": product.price,
@@ -1445,7 +1447,7 @@ elif page == "📥 Import Manifest":
         "Upload an Amazon liquidation manifest (.xlsx or .csv). Only these "
         "fields are imported: Target #, Subcategory, ASIN, EAN/Barcode, Item "
         "description, Qty, Weight (kg) — everything else (brand, model, "
-        "grade, price, descriptions...) is determined later by AI + photos, "
+        "product condition, price, descriptions...) is determined later by AI + photos, "
         "never assumed from the manifest. This is purely additive — it does "
         "not replace the existing manual scan/search flow in '🆕 New Item'."
     )
@@ -1687,11 +1689,36 @@ elif page == "📦 Inventory":
     }
 
     def _render_images(p: Product):
-        cols = st.columns(4)
-        for i, img_path in enumerate(p.image_paths[:4]):
-            if os.path.exists(img_path):
-                with cols[i % 4]:
-                    st.image(img_path, use_container_width=True)
+        """Fixed 4x4 grid (16 slots, matching REVIEW_CARD_MAX_PHOTOS) so
+        the layout stays consistent regardless of how many photos a
+        product actually has — same cached-thumbnail/object-fit:cover
+        technique as the Review & Export card, plus a visible frame on
+        every tile (filled or empty) so the grid reads as organized rather
+        than ragged."""
+        photos = p.image_paths[:16]
+        for row_start in range(0, 16, 4):
+            cols = st.columns(4)
+            for col_idx, i in enumerate(range(row_start, row_start + 4)):
+                with cols[col_idx]:
+                    if i < len(photos) and os.path.exists(photos[i]):
+                        card_thumb = _ensure_card_photo(photos[i])
+                        thumb_url = _image_static_url(card_thumb) if card_thumb else None
+                        if thumb_url:
+                            st.markdown(
+                                f'<img src="{thumb_url}" style="width:100%;aspect-ratio:1/1;'
+                                f'object-fit:cover;border-radius:8px;display:block;'
+                                f'border:1px solid rgba(255,255,255,0.15);" />',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.image(photos[i], use_container_width=True)
+                    else:
+                        st.markdown(
+                            '<div style="width:100%;aspect-ratio:1/1;border-radius:8px;'
+                            'border:1px dashed rgba(255,255,255,0.18);'
+                            'background:rgba(255,255,255,0.03);"></div>',
+                            unsafe_allow_html=True,
+                        )
 
     def _delete_button(p: Product):
         if st.button("🗑️ Delete", key=f"del_{p.id}"):
@@ -1700,7 +1727,7 @@ elif page == "📦 Inventory":
             st.rerun()
 
     def _render_full_detail(p: Product, tier_label: str = ""):
-        badge = "📥 DRAFT" if p.status == "draft" else f"{p.grade or '?'} ({p.grade_confidence}%)"
+        badge = "📥 DRAFT" if p.status == "draft" else f"{p.product_condition or '?'} ({p.product_condition_confidence}%)"
         title = p.name or p.manifest_item_description or p.model_number or p.asin or p.id
         header = f"🎯 Exact {tier_label} match — {badge} • {title}" if tier_label else f"{badge} • {title}"
         st.markdown(f"### {header}")
@@ -1770,7 +1797,7 @@ elif page == "📦 Inventory":
                     st.caption(f"Other possible ASINs: {', '.join(p.asin_candidates)}")
                 st.write(f"**Condition:** {p.condition_type or '—'}")
             with c3:
-                st.write(f"**Grade:** {p.grade or '—'} ({p.grade_confidence}%)")
+                st.write(f"**Product Condition:** {p.product_condition or '—'} ({p.product_condition_confidence}%)")
                 st.write(f"**Functional test:** {p.functional_test_result or '—'}")
                 box_dims = ", ".join(
                     f"{v:g} cm" for v in (p.box_length_cm, p.box_width_cm, p.box_height_cm) if v
@@ -1989,7 +2016,7 @@ elif page == "📦 Inventory":
 
         # Manifest batch is the one filter left on the Python side — it's
         # not a displayed column, so there's nothing for the grid itself to
-        # filter on. Triage/Grade/Location used to be separate dropdowns
+        # filter on. Triage/Product Condition/Location used to be separate dropdowns
         # here too; now that they're real grid columns, the grid's own
         # per-column filters (and the quick-search box) cover that,
         # matching how Review & Export's grid works.
@@ -2022,7 +2049,7 @@ elif page == "📦 Inventory":
                     "sku": p.sku or "(none)",
                     "title": p.name or p.manifest_item_description or p.model_number or p.id,
                     "triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
-                    "grade": p.grade or "—",
+                    "product_condition": p.product_condition or "—",
                     "location": p.location or "—",
                     "price": p.price,
                     "baselinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
@@ -2070,7 +2097,7 @@ elif page == "🔍 Review & Export":
         "exported": "📤 Exported",
         "failed": "❌ Failed",
     }
-    GRADE_OPTIONS = ["A", "B", "C", "D"]
+    CONDITION_OPTIONS = ["A", "B", "C", "D"]
 
     def _review_status_of(p: Product) -> str:
         return p.review_status or "ready"
@@ -2186,7 +2213,7 @@ elif page == "🔍 Review & Export":
                     "photo_url": photo_url,
                     "sku": p.sku,
                     "name": p.name,
-                    "grade": p.grade or "—",
+                    "product_condition": p.product_condition or "—",
                     "quantity": p.quantity or 1,
                     "price": p.price or 0,
                     "status": REVIEW_STATUS_LABELS[_review_status_of(p)],
@@ -2306,10 +2333,10 @@ elif page == "🔍 Review & Export":
             with pi2:
                 model_in = st.text_input("Model", value=p.model, key=f"review_model_{p.id}")
                 category_in = st.text_input("Category", value=p.category, key=f"review_category_{p.id}")
-            grade_in = st.selectbox(
-                "Grade", GRADE_OPTIONS,
-                index=GRADE_OPTIONS.index(p.grade) if p.grade in GRADE_OPTIONS else 1,
-                key=f"review_grade_{p.id}",
+            product_condition_in = st.selectbox(
+                "Product Condition", CONDITION_OPTIONS,
+                index=CONDITION_OPTIONS.index(p.product_condition) if p.product_condition in CONDITION_OPTIONS else 1,
+                key=f"review_condition_{p.id}",
             )
 
             st.markdown("**Pricing**")
@@ -2357,8 +2384,8 @@ elif page == "🔍 Review & Export":
                 key=f"review_checklist_{p.id}",
             )
 
-            if p.grade_reasoning:
-                st.caption(f"Grade reasoning: {p.grade_reasoning}")
+            if p.product_condition_reasoning:
+                st.caption(f"Product Condition reasoning: {p.product_condition_reasoning}")
             if p.price_reasoning:
                 st.caption(f"Price reasoning: {p.price_reasoning}")
 
@@ -2446,7 +2473,7 @@ elif page == "🔍 Review & Export":
                     or model_in.strip() != p.model
                     or category_in.strip() != p.category
                     or barcode_in.strip() != current_barcode
-                    or grade_in != p.grade
+                    or product_condition_in != p.product_condition
                     or float(price_in) != float(p.price)
                     or int(quantity_in) != p.quantity
                     or desc_in.strip() != p.product_description
@@ -2467,7 +2494,7 @@ elif page == "🔍 Review & Export":
                     "model": (p.model, model_in.strip()),
                     "category": (p.category, category_in.strip()),
                     "barcode": (current_barcode, barcode_in.strip()),
-                    "grade": (p.grade, grade_in),
+                    "product_condition": (p.product_condition, product_condition_in),
                     "price": (p.price, float(price_in)),
                     "quantity": (p.quantity, int(quantity_in)),
                     "product_description": (p.product_description, desc_in.strip()),
@@ -2481,7 +2508,7 @@ elif page == "🔍 Review & Export":
                     p.ean = barcode_in.strip()
                     p.ean_source = "manual"
                     p.ean_status = "Found" if barcode_in.strip() else ""
-                p.grade = grade_in
+                p.product_condition = product_condition_in
                 p.price = float(price_in)
                 p.quantity = int(quantity_in)
                 p.product_description = desc_in.strip()
@@ -2530,7 +2557,7 @@ elif page == "📤 CSV/Excel Export":
                     "sku": p.sku or "(none)",
                     "name": p.name or p.manifest_item_description or p.model_number or p.id,
                     "brand": p.brand or "—",
-                    "grade": p.grade or "—",
+                    "product_condition": p.product_condition or "—",
                     "price": p.price,
                     "quantity": p.quantity or 1,
                 })
@@ -2871,7 +2898,7 @@ elif page == "⚙️ Settings":
             st.caption(
                 f"One-time (but safely re-runnable) import of your existing {entry.display_name} products into "
                 "ElectroGrader, so you don't have to re-enter them by hand. Imported products start as drafts "
-                "and need review (Grade/Description/Condition) before they're complete. Runs in the background — "
+                "and need review (Product Condition/Description) before they're complete. Runs in the background — "
                 "feel free to keep using the app while it imports."
             )
 

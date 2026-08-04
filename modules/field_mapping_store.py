@@ -1,5 +1,5 @@
 """Per-company, per-integration field-mapping configuration — how an
-ElectroGrader field/value (e.g. Grade "B") translates into a specific
+ElectroGrader field/value (e.g. Product Condition "B") translates into a specific
 external platform's technical field/value (e.g. condition_id="used_good"),
 plus a human-readable label for display ("Used - Good").
 
@@ -26,7 +26,7 @@ DEFAULT_PROFILE = "default"
 
 @dataclass
 class FieldMappingRule:
-    source_field: str = ""  # ElectroGrader field key, e.g. "grade"
+    source_field: str = ""  # ElectroGrader field key, e.g. "product_condition"
     source_value: str = ""  # optional specific value, e.g. "B" — "" means "the whole field"
     target_field: str = ""  # external platform's technical field key, e.g. "condition_id"
     target_value: str = ""  # external platform's technical value, e.g. "used_good"
@@ -64,6 +64,28 @@ def _connect() -> sqlite3.Connection:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_field_mappings_unique "
         "ON integration_field_mappings(company_id, integration_type, profile_name)"
     )
+
+    # Migrate older DBs: "grade" field was renamed to "product_condition"
+    # (integrations/field_registry.py). Unlike the other sync tables, a
+    # saved mapping rule lives inside the `rules` JSON blob, not a plain
+    # column — a SQL UPDATE can't reach into it, so this rewrites each
+    # affected row's JSON in Python. Idempotent: after the first run, no
+    # row has a "grade" source_field left to find.
+    for row_id, raw_rules in conn.execute(
+        "SELECT id, rules FROM integration_field_mappings WHERE rules LIKE '%\"grade\"%'"
+    ).fetchall():
+        rules = json.loads(raw_rules) if raw_rules else []
+        changed = False
+        for rule in rules:
+            if rule.get("source_field") == "grade":
+                rule["source_field"] = "product_condition"
+                changed = True
+        if changed:
+            with conn:
+                conn.execute(
+                    "UPDATE integration_field_mappings SET rules = ? WHERE id = ?",
+                    (json.dumps(rules), row_id),
+                )
     return conn
 
 

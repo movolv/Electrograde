@@ -27,8 +27,8 @@ electro-grader-pwa/
 │   ├── identifier_lookup.py    # Automatic EAN/ASIN discovery (never invents, never overwrites)
 │   ├── spec_lookup.py          # ddgs web search + scrape + AI structuring
 │   ├── ai_client.py            # Anthropic Claude wrapper (text + vision)
-│   ├── vision_grading.py       # Claude vision -> grade/defects/checklist + identity verification
-│   ├── pricing.py              # Web price search + grade multiplier
+│   ├── vision_grading.py       # Claude vision -> product condition/defects/checklist + identity verification
+│   ├── pricing.py              # Web price search + product condition multiplier
 │   ├── description_gen.py      # AI listing copy: marketplace product name + 2 English description columns
 │   ├── export.py                # Baselinker Excel/CSV export
 │   ├── integration_store.py     # Per-company integration config (encrypted credentials)
@@ -67,7 +67,7 @@ JSON-serializable record), and multi-company use:
 |---|---|---|
 | **Manifest** (unverified claim) | `manifest_import_id`, `manifest_target_no`, `manifest_subcategory`, `asin`, `manifest_barcode`, `manifest_item_description`, `manifest_qty`, `manifest_weight_kg` | Import Manifest step only, once |
 | **Identifiers** | `scanned_barcode` (decoded from a photo), `model_number` (typed, from-scratch flow) | Photo capture / from-scratch step |
-| **AI-filled** (editable after) | `brand`, `model`, `name`, `category`, `condition_type`, `grade`, `grade_confidence`, `grade_reasoning`, `price`, `price_reasoning`, `product_description`, `condition_description`, `spec_summary`, `box_contents`, `missing_components`, `defects`, `functional_checklist` | Spec lookup + vision grading + pricing + copywriting; human can edit every field afterward |
+| **AI-filled** (editable after) | `brand`, `model`, `name`, `category`, `condition_type`, `product_condition`, `product_condition_confidence`, `product_condition_reasoning`, `price`, `price_reasoning`, `product_description`, `condition_description`, `spec_summary`, `box_contents`, `missing_components`, `defects`, `functional_checklist` | Spec lookup + vision grading + pricing + copywriting; human can edit every field afterward |
 | **Verification** | `product_match` (YES/NO), `match_confidence` (0-100), `match_notes` | Vision grading step — compares the claimed identity against what photos actually show |
 | **Manual-only** (AI never touches these) | `sku`, `location`, `functional_test_result`, `box_length_cm`, `box_width_cm`, `box_height_cm` | Human only |
 | **Bookkeeping** | `id`, `company_id`, `status` (`draft`/`in_progress`/`completed`), `image_paths`, `created_at` | System |
@@ -246,7 +246,7 @@ search/export is scoped to it. This is the seam for future multi-company use
 3. *Specs* — "Fetch specs from the web" using whichever identifiers exist
    (EAN, ASIN, manifest description, or typed model number) to fill in
    brand/model/name/category/spec summary/box contents; all editable.
-4. *Grading* — "Analyze photos" for an AI-assigned grade (A–D) with a
+4. *Grading* — "Analyze photos" for an AI-assigned product condition (A–D) with a
    confidence %, New/Used condition, defects, missing components, and a
    functional test checklist — **plus manifest-vs-photo verification**:
    `Product match` (YES/NO), `Match confidence %`, and notes on what was
@@ -276,7 +276,7 @@ search/export is scoped to it. This is the seam for future multi-company use
 **Export tab** — select completed items (pending drafts are excluded) and
 download a Baselinker-ready **Excel or CSV** file with columns: `SKU, Name,
 Brand, Model, Category, Condition, EAN/Barcode, EAN Status, Manifest
-Target #, Grade, AI Confidence %, Product Match, Match Confidence %, Price,
+Target #, Product Condition, AI Confidence %, Product Match, Match Confidence %, Price,
 Location, Functional Test Result, Box Dimensions (L x W x H cm), Image
 Links, Product Description, Condition & Scratches Details, Functional Test
 Checklist, Missing Components`. The two description columns are always
@@ -355,7 +355,7 @@ integration framework existed — new setups should just use Settings.)
   again). For more reliable results, swap in SerpAPI/Google Custom Search/a
   marketplace API.
 - **Change grading scale or multipliers**: `modules/vision_grading.py`
-  (`GRADE_SCALE`) and `modules/pricing.py` (`GRADE_MULTIPLIER`).
+  (`PRODUCT_CONDITION_SCALE`) and `modules/pricing.py` (`PRODUCT_CONDITION_MULTIPLIER`).
 - **Rebrand icons**: replace `static/icons/icon-192.png` / `icon-512.png`
   with your own 192×192 / 512×512 PNGs (same filenames), or edit and rerun
   `python scripts/generate_icons.py`.

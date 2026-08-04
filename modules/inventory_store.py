@@ -101,6 +101,18 @@ def _connect() -> sqlite3.Connection:
             )
         conn.commit()
 
+    # Migrate older DBs: "grade" was renamed to "product_condition" (only
+    # the name — the A/B/C/D scale itself is unchanged). Backfill straight
+    # from the old `grade` column rather than the JSON blob, since it's
+    # already kept in exact sync on every save — simpler than the usual
+    # JSON-backfill pattern above. The old `grade` column is left in place,
+    # unused, same "additive, never destructive" migration approach used
+    # everywhere else in this codebase.
+    if "product_condition" not in existing_cols:
+        conn.execute("ALTER TABLE products ADD COLUMN product_condition TEXT")
+        conn.execute("UPDATE products SET product_condition = grade WHERE grade IS NOT NULL")
+        conn.commit()
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_company ON products(company_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_ean ON products(ean)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_asin ON products(asin)")
@@ -108,7 +120,7 @@ def _connect() -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_manifest_import_id ON products(manifest_import_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_triage_status ON products(triage_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_grade ON products(grade)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_product_condition ON products(product_condition)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
     return conn
 
@@ -116,7 +128,7 @@ def _connect() -> sqlite3.Connection:
 def _search_columns(p: Product) -> tuple:
     return (
         p.ean, p.asin, p.model_number, p.model, p.brand, p.name, p.sku, p.manifest_import_id,
-        p.triage_status, p.grade, p.location,
+        p.triage_status, p.product_condition, p.location,
     )
 
 
@@ -130,7 +142,7 @@ def save_product(product: Product) -> None:
         conn.execute(
             """INSERT OR REPLACE INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
-                manifest_import_id, triage_status, grade, location, data)
+                manifest_import_id, triage_status, product_condition, location, data)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (product.id, product.company_id, product.created_at, *_search_columns(product),
              json.dumps(product.to_dict())),
@@ -148,7 +160,7 @@ def save_products_bulk(products: List[Product]) -> None:
         conn.executemany(
             """INSERT OR REPLACE INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
-                manifest_import_id, triage_status, grade, location, data)
+                manifest_import_id, triage_status, product_condition, location, data)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(p.to_dict()))
@@ -303,7 +315,7 @@ def list_products_paginated(
     triage_status: Optional[str] = None,
     manifest_import_id: Optional[str] = None,
     location: Optional[str] = None,
-    grade: Optional[str] = None,
+    product_condition: Optional[str] = None,
     search: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
@@ -334,9 +346,9 @@ def list_products_paginated(
     if location:
         where_clauses.append("location = ?")
         params.append(location)
-    if grade:
-        where_clauses.append("grade = ?")
-        params.append(grade)
+    if product_condition:
+        where_clauses.append("product_condition = ?")
+        params.append(product_condition)
     if search and search.strip():
         like = f"%{search.strip()}%"
         where_clauses.append(

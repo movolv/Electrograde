@@ -44,7 +44,7 @@
 </head>
 <body>
 <div id="toolbar">
-  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Title, Triage, Grade, or Location" />
+  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Title, Triage, Product Condition, or Location" />
   <div id="columns-btn-wrap" style="position: relative;">
     <button id="columns-btn" type="button">☰ Columns</button>
     <div id="columns-panel"></div>
@@ -110,22 +110,22 @@ function openRow(data) {
 var defaultColDef = { sortable: true, resizable: true, filter: true };
 
 // Order matches the priority given in the spec for this table: SKU, Title,
-// Triage, Grade, Location, Price, BaseLinker — the same columns the old
-// st.dataframe-based table had, just rendered through AG Grid now.
+// Triage, Product Condition, Location, Price, BaseLinker — the same columns
+// the old st.dataframe-based table had, just rendered through AG Grid now.
 var columnDefs = [
   { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
   { field: "title", headerName: "Title", flex: 1, minWidth: 180 },
   { field: "triage", headerName: "Triage", width: 170, minWidth: 130 },
-  { field: "grade", headerName: "Grade", width: 90, minWidth: 70 },
+  { field: "product_condition", headerName: "Product Condition", width: 130, minWidth: 100 },
   { field: "location", headerName: "Location", width: 130, minWidth: 100 },
   { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
   { field: "baselinker", headerName: "BaseLinker", width: 140, minWidth: 110 },
 ];
 
-// Mobile: title + grade + price are the essentials — everything else
-// collapses away rather than needing a distinct card-view layout, same
+// Mobile: title + product_condition + price are the essentials — everything
+// else collapses away rather than needing a distinct card-view layout, same
 // approach as the Review & Export grid.
-var MOBILE_VISIBLE_FIELDS = ["title", "grade", "price"];
+var MOBILE_VISIBLE_FIELDS = ["title", "product_condition", "price"];
 var MOBILE_BREAKPOINT_PX = 700;
 var wasMobile = false;
 

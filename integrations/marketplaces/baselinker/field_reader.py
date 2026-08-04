@@ -3,7 +3,7 @@ into ElectroGrader's field vocabulary — pure function, no network/DB access.
 
 Scope is deliberately narrow: BaseLinker is the operational/channel system,
 never the product-intelligence one. This function ONLY ever returns
-quantity/price/status — never name/description/grade/defects/images/etc.,
+quantity/price/status — never name/description/product_condition/defects/images/etc.,
 even if BaseLinker's raw response happened to contain something under
 those keys. That's not a filter applied after the fact; those keys are
 simply never read here, so there's no path by which a title/description

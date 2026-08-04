@@ -170,8 +170,8 @@ def main() -> int:
         set(BaselinkerConnector.DEFAULT_SYNC_FIELDS) <= BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS | {"sku"},
     )
     check(
-        "brand/model/category/grade/defects excluded from BaselinkerConnector.DEFAULT_SYNC_FIELDS",
-        not ({"brand", "model", "category", "grade", "defects"} & set(BaselinkerConnector.DEFAULT_SYNC_FIELDS)),
+        "brand/model/category/product_condition/defects excluded from BaselinkerConnector.DEFAULT_SYNC_FIELDS",
+        not ({"brand", "model", "category", "product_condition", "defects"} & set(BaselinkerConnector.DEFAULT_SYNC_FIELDS)),
     )
 
     # ------------------------------------------------------------------- summary --

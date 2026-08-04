@@ -58,6 +58,12 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sync_logs_company ON sync_logs(company_id, product_id)"
     )
+
+    # Migrate older DBs: "grade" field was renamed to "product_condition"
+    # (integrations/field_registry.py) — keep history rows pointed at the
+    # field's current name.
+    conn.execute("UPDATE sync_logs SET field_name = 'product_condition' WHERE field_name = 'grade'")
+    conn.commit()
     return conn
 
 

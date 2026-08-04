@@ -126,11 +126,12 @@ class BaselinkerConnector(MarketplaceConnector):
     # Fields whose Synchronization-tab checkbox actually gates something in
     # mapper.build_payload() today. "sku" is deliberately absent — it's
     # always sent regardless of toggle state (see mapper.py), so its
-    # checkbox wouldn't do anything; "brand"/"model"/"category"/"grade"/
-    # "defects" have no payload destination yet (category stays the single
-    # global category_id setting; grade/defects mapping-application is
-    # future work) — see integrations/field_registry.py for the full field
-    # list these are a subset of.
+    # checkbox wouldn't do anything; "brand"/"model"/"category"/
+    # "product_condition"/"defects" have no payload destination yet
+    # (category stays the single global category_id setting;
+    # product_condition/defects mapping-application is future work) — see
+    # integrations/field_registry.py for the full field list these are a
+    # subset of.
     IMPLEMENTED_SYNC_FIELDS = {
         "name", "product_description", "condition_description",
         "image_paths", "price", "quantity", "barcode",

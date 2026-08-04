@@ -88,7 +88,7 @@ class _FakeProduct:
     brand = "Acme"
     model = "X100"
     category = "Coffee Machines"
-    grade = "B"
+    product_condition = "B"
     defects = ["Minor scratches"]
     product_description = "Desc"
     condition_description = "Scratched"
@@ -159,8 +159,8 @@ def main() -> int:
         "no BaseLinker-specific key ever appears in CommonExportModel",
         not (cem_keys & baselinker_specific_terms),
     )
-    check("attributes dict carries brand/model/category/grade/defects structured, not prose", cem.attributes == {
-        "brand": "Acme", "model": "X100", "category": "Coffee Machines", "grade": "B", "defects": ["Minor scratches"],
+    check("attributes dict carries brand/model/category/product_condition/defects structured, not prose", cem.attributes == {
+        "brand": "Acme", "model": "X100", "category": "Coffee Machines", "product_condition": "B", "defects": ["Minor scratches"],
     })
     check("title/description/price/quantity/sku/barcode carried over correctly", (
         cem.title == "Widget" and cem.description == "Desc" and cem.price == 99.99

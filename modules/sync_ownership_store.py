@@ -106,6 +106,25 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sync_conflicts_company ON sync_conflicts(company_id, product_id)"
     )
+
+    # Migrate older DBs: the "grade" field was renamed to "product_condition"
+    # (integrations/field_registry.py) — any saved ownership/conflict rows
+    # under the old key need to move with it, or they'd silently stop
+    # matching (and a saved override would look "reset" to the caller). The
+    # NOT EXISTS guard avoids ever violating sync_field_config's UNIQUE
+    # (company_id, connector_name, field_name) index, in the unlikely case a
+    # product_condition row already exists for the same pair.
+    conn.execute(
+        """UPDATE sync_field_config SET field_name = 'product_condition'
+           WHERE field_name = 'grade' AND NOT EXISTS (
+               SELECT 1 FROM sync_field_config AS existing
+               WHERE existing.company_id = sync_field_config.company_id
+                 AND existing.connector_name = sync_field_config.connector_name
+                 AND existing.field_name = 'product_condition'
+           )"""
+    )
+    conn.execute("UPDATE sync_conflicts SET field_name = 'product_condition' WHERE field_name = 'grade'")
+    conn.commit()
     return conn
 
 

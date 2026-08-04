@@ -273,7 +273,7 @@ function priceCellFormatter(params) {
 
 // Order matters: desktop's must-have set (photo, sku, name, quantity, price)
 // comes first, left to right, matching the priority given in the spec;
-// grade/status/date follow as additional desktop-only columns. Mobile hides
+// product_condition/status/date follow as additional desktop-only columns. Mobile hides
 // everything outside MOBILE_VISIBLE_FIELDS below, regardless of order.
 var columnDefs = [
   {
@@ -284,7 +284,7 @@ var columnDefs = [
   { field: "name", headerName: "Product Name", flex: 1, minWidth: 160 },
   { field: "quantity", headerName: "Qty", width: 90, minWidth: 70, type: "numericColumn" },
   { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
-  { field: "grade", headerName: "Grade", width: 90, minWidth: 70 },
+  { field: "product_condition", headerName: "Product Condition", width: 130, minWidth: 100 },
   { field: "status", headerName: "Status", width: 130, minWidth: 110 },
   { field: "date", headerName: "Date", width: 120, minWidth: 100 },
 ];

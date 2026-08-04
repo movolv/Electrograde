@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from modules import ai_client
 
-GRADE_SCALE = {
+PRODUCT_CONDITION_SCALE = {
     "A": "Like new / no visible wear, fully complete",
     "B": "Light cosmetic wear (minor scuffs/scratches), fully functional-looking, complete or near-complete",
     "C": "Noticeable cosmetic wear (visible scratches/dents), possibly missing minor accessories",
@@ -27,9 +27,9 @@ BARCODE_MISMATCH_CONFIDENCE_CAP = 20
 
 @dataclass
 class GradingResult:
-    grade: str = ""
-    grade_confidence: int = 0
-    grade_reasoning: str = ""
+    product_condition: str = ""
+    product_condition_confidence: int = 0
+    product_condition_reasoning: str = ""
     condition_type: str = ""  # "New" | "Used"
     defects: List[str] = field(default_factory=list)
     missing_components: List[str] = field(default_factory=list)
@@ -39,6 +39,13 @@ class GradingResult:
     match_notes: str = ""
 
 
+# The JSON schema keys below (grade/grade_confidence/grade_reasoning) are
+# deliberately NOT renamed to product_condition* even though the rest of the
+# codebase now uses that name — changing the wire contract with the AI model
+# is a functional change (real risk of a worse/inconsistent response to a
+# never-tested schema), not just cosmetic. Translated to product_condition*
+# immediately after parsing below (see grade_item()'s return statement); the
+# AI itself never needs to know about the rename.
 SYSTEM_PROMPT = (
     "You are an expert used-electronics quality inspector AND fraud/mismatch "
     "checker for a liquidation reseller. You will be shown several photos of "
@@ -134,7 +141,7 @@ def grade_item(
             return 0
         return max(0, min(100, n))
 
-    grade_confidence = _clamp_pct(data.get("grade_confidence", 0))
+    condition_confidence = _clamp_pct(data.get("grade_confidence", 0))
     match_confidence = _clamp_pct(data.get("match_confidence", 0))
     product_match = str(data.get("product_match", "")).strip().upper()
     match_notes = data.get("match_notes", "")
@@ -154,9 +161,9 @@ def grade_item(
             ).strip()
 
     return GradingResult(
-        grade=str(data.get("grade", "")).strip()[:1].upper(),
-        grade_confidence=grade_confidence,
-        grade_reasoning=data.get("grade_reasoning", ""),
+        product_condition=str(data.get("grade", "")).strip()[:1].upper(),
+        product_condition_confidence=condition_confidence,
+        product_condition_reasoning=data.get("grade_reasoning", ""),
         condition_type=str(data.get("condition_type", "")).strip(),
         defects=list(data.get("defects", []) or []),
         missing_components=list(data.get("missing_components", []) or []),

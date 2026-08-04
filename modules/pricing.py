@@ -3,7 +3,7 @@
 Best-effort approach with no paid market-data API required:
 1. Search the web for used-market listings of this exact model.
 2. Extract plausible price mentions from snippets via regex.
-3. Take the median of a sane range, then apply a grade multiplier.
+3. Take the median of a sane range, then apply a product-condition multiplier.
 
 This is a heuristic, not a guarantee — always shown as editable in the UI.
 """
@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from modules import web_search
 
-GRADE_MULTIPLIER = {
+PRODUCT_CONDITION_MULTIPLIER = {
     "A": 1.00,
     "B": 0.85,
     "C": 0.70,
@@ -48,10 +48,10 @@ def _search_prices(model_name: str, max_results: int = 8) -> List[float]:
     return prices
 
 
-def estimate_price(model_name: str, grade: str) -> PriceEstimate:
+def estimate_price(model_name: str, product_condition: str) -> PriceEstimate:
     prices = _search_prices(model_name)
-    grade = (grade or "B").upper()
-    multiplier = GRADE_MULTIPLIER.get(grade, 0.85)
+    product_condition = (product_condition or "B").upper()
+    multiplier = PRODUCT_CONDITION_MULTIPLIER.get(product_condition, 0.85)
 
     if not prices:
         return PriceEstimate(
@@ -79,7 +79,7 @@ def estimate_price(model_name: str, grade: str) -> PriceEstimate:
         sample_count=len(prices),
         reasoning=(
             f"Based on {len(prices)} web price mentions for '{model_name}', "
-            f"median reference price is ~${base:.2f}. Applied grade-{grade} "
+            f"median reference price is ~${base:.2f}. Applied product-condition-{product_condition} "
             f"multiplier ({multiplier:.2f}) => suggested ${suggested:.2f}."
         ),
     )

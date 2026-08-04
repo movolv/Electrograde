@@ -66,9 +66,9 @@ class Product:
     name: str = ""
     category: str = ""
     condition_type: str = ""  # "New" | "Used"
-    grade: str = ""
-    grade_confidence: int = 0
-    grade_reasoning: str = ""
+    product_condition: str = ""  # "A" | "B" | "C" | "D" — quality grade (distinct from condition_type above)
+    product_condition_confidence: int = 0
+    product_condition_reasoning: str = ""
     price: float = 0.0
     price_reasoning: str = ""
     product_description: str = ""
@@ -85,8 +85,8 @@ class Product:
     match_notes: str = ""
 
     # -- TRIAGE (disposition after testing — manual-only, distinct from
-    # `status` which tracks pipeline stage, and from `grade` which is
-    # cosmetic condition A-D) --
+    # `status` which tracks pipeline stage, and from `product_condition`
+    # which is cosmetic condition A-D) --
     triage_status: str = "testing_pending"
     # "testing_pending" | "ready_for_sale" | "needs_repair" | "for_parts" | "written_off"
 
@@ -135,4 +135,12 @@ class Product:
             # Records saved before the Review & Export gate existed but
             # already fully processed are ready for that screen now.
             known["review_status"] = "ready"
+        if "product_condition" not in known and "grade" in d:
+            # Records saved before the "grade" -> "product_condition" field
+            # rename (the JSON blob still has the old key names) — translate
+            # here so nothing is silently lost on next load. Never removed:
+            # any record saved before this point in time keeps needing this.
+            known["product_condition"] = d.get("grade", "")
+            known["product_condition_confidence"] = d.get("grade_confidence", 0)
+            known["product_condition_reasoning"] = d.get("grade_reasoning", "")
         return Product(**known)

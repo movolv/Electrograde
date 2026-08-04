@@ -54,7 +54,7 @@
 </head>
 <body>
 <div id="toolbar">
-  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Name, Brand, or Grade" />
+  <input id="quick-filter" type="text" placeholder="🔍 Search by SKU, Name, Brand, or Product Condition" />
   <div id="columns-btn-wrap" style="position: relative;">
     <button id="columns-btn" type="button">☰ Columns</button>
     <div id="columns-panel"></div>
@@ -249,7 +249,7 @@ var columnDefs = [
   { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
   { field: "name", headerName: "Name", flex: 1, minWidth: 180 },
   { field: "brand", headerName: "Brand", width: 130, minWidth: 100 },
-  { field: "grade", headerName: "Grade", width: 90, minWidth: 70 },
+  { field: "product_condition", headerName: "Product Condition", width: 130, minWidth: 100 },
   { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
   { field: "quantity", headerName: "Qty", width: 90, minWidth: 70, type: "numericColumn" },
 ];

@@ -53,7 +53,7 @@ def main() -> int:
     check("price defaults to electrograder", sync_ownership_store.get_field_owner(company_a.id, "baselinker", "price") == "electrograder")
     check("quantity defaults to the connector", sync_ownership_store.get_field_owner(company_a.id, "baselinker", "quantity") == "baselinker")
     check("status defaults to the connector", sync_ownership_store.get_field_owner(company_a.id, "baselinker", "status") == "baselinker")
-    for field_name in ("name", "product_description", "image_paths", "brand", "model", "category", "grade", "defects", "barcode"):
+    for field_name in ("name", "product_description", "image_paths", "brand", "model", "category", "product_condition", "defects", "barcode"):
         check(
             f"{field_name} defaults to electrograder",
             sync_ownership_store.get_field_owner(company_a.id, "baselinker", field_name) == "electrograder",

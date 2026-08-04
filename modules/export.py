@@ -5,9 +5,10 @@ description columns as required:
   - "Product Description"
   - "Condition & Scratches Details"
 
-Also includes "AI Confidence %" immediately after "Grade" — the AI's own
-confidence (0-100) in the assigned grade, based on photo quality, defect
-clarity, and how cleanly the item matches the grade criteria (see
+Also includes "AI Confidence %" immediately after "Product Condition" — the
+AI's own confidence (0-100) in the assigned condition, based on photo
+quality, defect clarity, and how cleanly the item matches the condition
+criteria (see
 modules/vision_grading.py for how this is computed) — plus manifest
 traceability (Target #), automatic EAN discovery status (see
 modules/identifier_lookup.py — "Found"/"Not Found"/"Needs Verification", so
@@ -44,7 +45,7 @@ COLUMNS = [
     "EAN/Barcode",
     "EAN Status",
     "Manifest Target #",
-    "Grade",
+    "Product Condition",
     "AI Confidence %",
     "Product Match",
     "Match Confidence %",
@@ -80,8 +81,8 @@ def products_to_dataframe(products: List[Product]) -> pd.DataFrame:
                 "EAN/Barcode": p.ean or p.manifest_barcode or p.scanned_barcode,
                 "EAN Status": p.ean_status,
                 "Manifest Target #": p.manifest_target_no,
-                "Grade": p.grade,
-                "AI Confidence %": p.grade_confidence,
+                "Product Condition": p.product_condition,
+                "AI Confidence %": p.product_condition_confidence,
                 "Product Match": p.product_match,
                 "Match Confidence %": p.match_confidence,
                 "Price": p.price,

@@ -18,7 +18,7 @@ _component = components.declare_component("inventory_table", path=str(_FRONTEND_
 
 
 def inventory_table(rows: list, selected_id: str = "", key: str = "inventory_table") -> dict | None:
-    """`rows`: list of dicts with id/sku/title/triage/grade/location/price/
+    """`rows`: list of dicts with id/sku/title/triage/product_condition/location/price/
     baselinker. `selected_id`: id of the row currently shown in the detail
     panel below, if any — highlighted in the grid so it's clear which row
     that panel belongs to. Returns {"open_id": <id>} when a row is clicked

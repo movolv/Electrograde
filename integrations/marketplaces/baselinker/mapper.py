@@ -49,7 +49,7 @@ def build_payload(
     identifier (used for BaseLinker's own SKU-fallback matching and our
     de-dup logic), not optional content, so it's always sent regardless of
     `fields_send`. Fields with no destination in this payload at all yet
-    (brand/model/category/grade/defects) have nothing to gate — see
+    (brand/model/category/product_condition/defects) have nothing to gate — see
     BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS.
     """
     def _wanted(field_key: str) -> bool:

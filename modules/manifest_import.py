@@ -1,7 +1,7 @@
 """Amazon liquidation manifest import.
 
 The manifest is treated purely as a *starting point* — only the 7 required
-fields are pulled in; everything else (brand, model, grade, price, etc.) is
+fields are pulled in; everything else (brand, model, product condition, price, etc.) is
 determined later by AI analysis + human review, never assumed from the
 manifest. See modules/vision_grading.py for how the manifest's claims get
 cross-checked against the photographed item.
