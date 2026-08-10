@@ -749,6 +749,7 @@ def _init_state():
         "rex_open_product_id": None,    # product id whose card is open, or None for list view
         "rex_current_page_ids": [],     # ids on the currently-loaded page only, for Previous/Next within it
         "rex_export_requested": False,  # set inside the fragment, consumed outside it to open the dialog
+        "rex_delete_requested": False,  # same pattern, opens the bulk-delete confirmation dialog
         "rex_clear_seq": 0,             # bumped to tell the grid to deselect all (no remount needed)
         "rex_focus_id": "",             # product id the grid should scroll to/highlight on next render
         "rex_last_esc_value": None,     # last value seen from esc_listener(), to detect a new Escape press
@@ -1720,9 +1721,36 @@ elif page == "🗂️ Product List":
                 out.append(prod)
         return out
 
-    @st.dialog("Export selected products to BaseLinker?")
+    @st.dialog("Export selected products")
     def _confirm_export_dialog(selected_products):
-        st.write(f"Export **{len(selected_products)}** selected product(s) to BaseLinker?")
+        # Destination is never hardcoded to BaseLinker — any connected
+        # marketplace integration is a valid target (IntegrationManager.get
+        # already accepts any integration_type). Same connected-integrations
+        # filter as _record_sync_field_changes() above.
+        connected = [
+            i for i in integration_store.list_integrations(current_user.company_id)
+            if i.integration_category == integration_store.CATEGORY_MARKETPLACE
+            and i.status == integration_store.STATUS_CONNECTED
+        ]
+        if not connected:
+            st.warning(
+                "No connected marketplace integrations. Go to Settings → "
+                "Integrations to connect one (e.g. BaseLinker)."
+            )
+            if st.button("Close", use_container_width=True, key="rex_export_none_close"):
+                st.rerun()
+            return
+
+        catalog_by_type = {c.integration_type: c for c in CATALOG}
+        dest_options = [i.integration_type for i in connected]
+        dest = st.selectbox(
+            "Export to", dest_options,
+            format_func=lambda t: catalog_by_type[t].display_name if t in catalog_by_type else t,
+            key="rex_export_destination",
+        )
+        dest_name = catalog_by_type[dest].display_name if dest in catalog_by_type else dest
+
+        st.write(f"Export **{len(selected_products)}** selected product(s) to **{dest_name}**?")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Cancel", use_container_width=True, key="rex_export_cancel"):
@@ -1741,7 +1769,7 @@ elif page == "🗂️ Product List":
                     text=f"Exporting {p.sku} ({i + 1}/{len(selected_products)})...",
                 )
                 try:
-                    result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
+                    result = IntegrationManager.get(p.company_id, dest).export_product(p)
                 except (IntegrationNotConnectedError, IntegrationNotAvailableError) as e:
                     result = ConnectorActionResult(success=False, message=str(e))
                 if result.success:
@@ -1750,8 +1778,8 @@ elif page == "🗂️ Product List":
                     ok_count += 1
                     results_box.success(f"✅ {p.sku}: {result.message}")
                     audit_store.log_audit(
-                        p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
-                        f"baselinker_product_id={result.external_id}",
+                        p.company_id, current_user.id, "EXPORT_INTEGRATION", "product", p.id,
+                        f"integration={dest} external_id={result.external_id}",
                     )
                 else:
                     p.review_status = "failed"
@@ -1761,7 +1789,7 @@ elif page == "🗂️ Product List":
                 st.session_state.rex_selected_ids.discard(p.id)
             progress.progress(1.0, text="Done.")
             integration_store.record_sync(
-                current_user.company_id, "baselinker", "bulk_export_summary",
+                current_user.company_id, dest, "bulk_export_summary",
                 status=integration_store.SYNC_STATUS_SUCCESS if not fail_count else integration_store.SYNC_STATUS_ERROR,
                 error_message=f"{ok_count} successful, {fail_count} failed" if fail_count else "",
             )
@@ -1770,6 +1798,30 @@ elif page == "🗂️ Product List":
                 st.markdown(f"**{fail_count} product(s) failed**")
             if st.button("Close", use_container_width=True, key="rex_export_done"):
                 st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
+                st.rerun()
+
+    @st.dialog("Delete selected products?")
+    def _confirm_delete_dialog(selected_products):
+        st.warning(
+            f"Permanently delete **{len(selected_products)}** selected product(s)? "
+            "This cannot be undone."
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Cancel", use_container_width=True, key="rex_delete_cancel"):
+                st.rerun()
+        with col2:
+            confirmed = st.button(
+                "🗑️ Delete", type="primary", use_container_width=True, key="rex_delete_confirm"
+            )
+        if confirmed:
+            for p in selected_products:
+                inventory_store.delete_product(p.id, p.company_id)
+                audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
+                st.session_state.rex_selected_ids.discard(p.id)
+            st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
+            st.success(f"Deleted {len(selected_products)} product(s).")
+            if st.button("Close", use_container_width=True, key="rex_delete_done"):
                 st.rerun()
 
     @st.dialog("Photo", width="large")
@@ -2424,24 +2476,84 @@ elif page == "🗂️ Product List":
     st.session_state.rex_current_page_ids = [p.id for p in products_page]
     total_pages = max(1, (total_count + REX_PAGE_SIZE - 1) // REX_PAGE_SIZE)
 
-    def _render_pagination(key_prefix: str):
-        pg1, pg2, pg3 = st.columns([1, 2, 1])
-        with pg1:
-            if st.button(
-                "◀ Previous page", disabled=st.session_state.rex_page <= 1,
-                use_container_width=True, key=f"{key_prefix}_prev",
-            ):
-                st.session_state.rex_page -= 1
-                st.rerun()
-        with pg2:
-            st.caption(f"Page {st.session_state.rex_page} of {total_pages}")
-        with pg3:
-            if st.button(
-                "Next page ▶", disabled=st.session_state.rex_page >= total_pages,
-                use_container_width=True, key=f"{key_prefix}_next",
-            ):
-                st.session_state.rex_page += 1
-                st.rerun()
+    def _render_numbered_pagination(key_prefix: str = "rex_pg"):
+        # Centered "windowed" numbered pagination — 3 pages before and
+        # after the current one, plus page 1 and the last page always
+        # visible, with "…" filling any gap. Rendered both above and below
+        # the table; key_prefix keeps the two instances' widget keys apart.
+        cur = st.session_state.rex_page
+        window = 3
+        start_w = max(1, cur - window)
+        end_w = min(total_pages, cur + window)
+        pages = sorted(set([1, total_pages] + list(range(start_w, end_w + 1))))
+
+        cells = ["prev"]
+        prev_p = None
+        for p in pages:
+            if prev_p is not None and p - prev_p > 1:
+                cells.append("ellipsis")
+            cells.append(p)
+            prev_p = p
+        cells.append("next")
+
+        # Flat, borderless look for the page-number/arrow buttons (no box
+        # around each digit), with nowrap + a min-width sized for up to
+        # 3-digit page numbers so "100" etc. never wraps onto two lines.
+        # Targets by key prefix (all these buttons use "rex_pg_*" keys, via
+        # Streamlit's "st-key-<key>" container class), not globally — other
+        # buttons on the page keep their normal look.
+        st.markdown(
+            """
+            <style>
+            div[class*="st-key-rex_pg_"] button {
+                border: none !important;
+                background: transparent !important;
+                box-shadow: none !important;
+                white-space: nowrap !important;
+                min-width: 2.6em !important;
+                padding: 2px 4px !important;
+            }
+            div[class*="st-key-rex_pg_"] button:hover:not(:disabled) {
+                background: rgba(128, 128, 128, 0.15) !important;
+                border-radius: 6px !important;
+            }
+            div[class*="st-key-rex_pg_"] button[kind="primary"] {
+                background: rgba(56, 189, 248, 0.18) !important;
+                border-radius: 6px !important;
+                font-weight: 700 !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        _left, mid, _right = st.columns([2, 3, 2])
+        with mid:
+            cols = st.columns(len(cells))
+            for col, cell in zip(cols, cells):
+                with col:
+                    if cell == "prev":
+                        if st.button("‹", disabled=cur <= 1, use_container_width=True, key=f"{key_prefix}_prev"):
+                            st.session_state.rex_page -= 1
+                            st.rerun()
+                    elif cell == "next":
+                        if st.button("›", disabled=cur >= total_pages, use_container_width=True, key=f"{key_prefix}_next"):
+                            st.session_state.rex_page += 1
+                            st.rerun()
+                    elif cell == "ellipsis":
+                        st.markdown(
+                            "<div style='text-align:center;padding-top:6px;'>…</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        if cell == cur:
+                            st.button(
+                                str(cell), type="primary", disabled=True,
+                                use_container_width=True, key=f"{key_prefix}_{cell}",
+                            )
+                        elif st.button(str(cell), use_container_width=True, key=f"{key_prefix}_{cell}"):
+                            st.session_state.rex_page = cell
+                            st.rerun()
 
     _show_list_toolbar = (
         not exact_query.strip() and total_count > 0 and st.session_state.rex_open_product_id is None
@@ -2473,21 +2585,53 @@ elif page == "🗂️ Product List":
                 st.rerun()
 
         n_selected = len(st.session_state.rex_selected_ids)
-        top1, top2, top3 = st.columns([3, 1, 1])
-        with top1:
-            st.caption(f"{total_count} product(s) total — Selected: {n_selected}")
+        # Operations/Download sit at the LEFT, directly under the Filter
+        # Products button (which is also left-aligned) — the count caption
+        # takes the remaining space on the right instead of pushing these
+        # two to the far side of the (wide-layout) table.
+        top2, top3, top1 = st.columns([1, 1, 3])
         with top2:
             with st.popover("⚙️ Operations", disabled=n_selected == 0, use_container_width=True):
+                # Flat, borderless look for this list of actions (Export,
+                # Delete Products, more to come) — no button box around
+                # each one, just left-aligned text with a subtle hover
+                # highlight. Same technique as the pagination digits
+                # above, targeted by the "rex_op_*" key prefix so it
+                # doesn't affect other buttons (Apply, Clear Selection).
+                st.markdown(
+                    """
+                    <style>
+                    div[class*="st-key-rex_op_"] button {
+                        border: none !important;
+                        background: transparent !important;
+                        box-shadow: none !important;
+                        text-align: left !important;
+                        justify-content: flex-start !important;
+                        padding: 6px 4px !important;
+                    }
+                    div[class*="st-key-rex_op_"] button:hover:not(:disabled) {
+                        background: rgba(128, 128, 128, 0.15) !important;
+                        border-radius: 6px !important;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
                 can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
                 if st.button(
-                    f"📤 Export Selected ({n_selected}) → BaseLinker",
-                    type="primary", disabled=not can_export, use_container_width=True,
-                    key="rex_export_selected_btn",
+                    "📤 Export", disabled=not can_export, use_container_width=True,
+                    key="rex_op_export",
                 ):
                     st.session_state.rex_export_requested = True
                     st.rerun()
+                if st.button(
+                    "🗑️ Delete Products", disabled=not can_export, use_container_width=True,
+                    key="rex_op_delete",
+                ):
+                    st.session_state.rex_delete_requested = True
+                    st.rerun()
                 if not can_export:
-                    st.caption("Only Admins and Reviewers can export to BaseLinker.")
+                    st.caption("Only Admins and Reviewers can export or delete.")
                 st.divider()
                 st.markdown("**Change status**")
                 cs1, cs2 = st.columns([2, 1])
@@ -2542,7 +2686,8 @@ elif page == "🗂️ Product List":
                     "URLs, or attach photos manually per listing after "
                     "import."
                 )
-        _render_pagination("rex_pg_top")
+        with top1:
+            st.caption(f"{total_count} product(s) total — Selected: {n_selected}")
 
     _active_filters = []
     if status_filter != "completed":
@@ -2615,6 +2760,8 @@ elif page == "🗂️ Product List":
                 focus_id = st.session_state.rex_focus_id
                 st.session_state.rex_focus_id = ""  # one-shot: only focus once
 
+                _render_numbered_pagination()
+
                 # The return value here isn't merged into rex_selected_ids
                 # again — that already happened at the top of this run
                 # (see _show_list_toolbar above), reading the exact same
@@ -2627,17 +2774,23 @@ elif page == "🗂️ Product List":
                     key="rex_table",
                 )
                 st.caption(
-                    "Column sort/filter/quick-search in the table above only "
-                    "apply to the current page — use the filters above the "
-                    "list to narrow across the whole inventory."
+                    "Column sort in the table above only applies to the "
+                    "current page — use the filters above the list to "
+                    "narrow across the whole inventory."
                 )
-                _render_pagination("rex_pg_bottom")
+                _render_numbered_pagination(key_prefix="rex_pg_b")
 
             if st.session_state.rex_export_requested:
                 st.session_state.rex_export_requested = False
                 selected_products = _get_selected_products()
                 if selected_products:
                     _confirm_export_dialog(selected_products)
+
+            if st.session_state.rex_delete_requested:
+                st.session_state.rex_delete_requested = False
+                selected_products = _get_selected_products()
+                if selected_products:
+                    _confirm_delete_dialog(selected_products)
 
         else:
             # -------------------------------------------------------- CARD VIEW --
