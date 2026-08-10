@@ -21,7 +21,8 @@ _component = components.declare_component("review_table", path=str(_FRONTEND_DIR
 def review_table(
     rows: list, focus_id: str = "", clear_seq: int = 0, key: str = "review_table"
 ) -> dict | None:
-    """rows: list of dicts, each with id/photo_url/sku/name/product_condition/status/date.
+    """rows: list of dicts, each with id/photo_url/sku/name/brand/product_condition/
+    triage/location/baselinker/status/date.
     focus_id: product id to scroll to/highlight on this render (e.g. just
     saved in the card), or "" for none.
     clear_seq: bump this to make the grid deselect all rows (e.g. after

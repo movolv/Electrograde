@@ -67,6 +67,7 @@ def _connect() -> sqlite3.Connection:
         "triage_status": "TEXT",
         "grade": "TEXT",
         "location": "TEXT",
+        "status": "TEXT",
     }
     added_any = False
     for col, decl in new_cols.items():
@@ -80,7 +81,7 @@ def _connect() -> sqlite3.Connection:
             "SELECT id, data FROM products WHERE ean IS NULL OR asin IS NULL "
             "OR model_number IS NULL OR model IS NULL OR brand IS NULL OR name IS NULL "
             "OR sku IS NULL OR manifest_import_id IS NULL OR triage_status IS NULL "
-            "OR grade IS NULL OR location IS NULL"
+            "OR grade IS NULL OR location IS NULL OR status IS NULL"
         ).fetchall()
         for rid, data_json in rows:
             d = json.loads(data_json)
@@ -91,12 +92,12 @@ def _connect() -> sqlite3.Connection:
             triage_status = Product.from_dict(d).triage_status
             conn.execute(
                 "UPDATE products SET ean=?, asin=?, model_number=?, model=?, brand=?, name=?, "
-                "sku=?, manifest_import_id=?, triage_status=?, grade=?, location=? WHERE id=?",
+                "sku=?, manifest_import_id=?, triage_status=?, grade=?, location=?, status=? WHERE id=?",
                 (
                     d.get("ean", ""), d.get("asin", ""), d.get("model_number", ""),
                     d.get("model", ""), d.get("brand", ""), d.get("name", ""),
                     d.get("sku", ""), d.get("manifest_import_id", ""), triage_status,
-                    d.get("grade", ""), d.get("location", ""), rid,
+                    d.get("grade", ""), d.get("location", ""), d.get("status", ""), rid,
                 ),
             )
         conn.commit()
@@ -122,13 +123,14 @@ def _connect() -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_triage_status ON products(triage_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_product_condition ON products(product_condition)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_status ON products(status)")
     return conn
 
 
 def _search_columns(p: Product) -> tuple:
     return (
         p.ean, p.asin, p.model_number, p.model, p.brand, p.name, p.sku, p.manifest_import_id,
-        p.triage_status, p.product_condition, p.location,
+        p.triage_status, p.product_condition, p.location, p.status,
     )
 
 
@@ -142,8 +144,8 @@ def save_product(product: Product) -> None:
         conn.execute(
             """INSERT OR REPLACE INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
-                manifest_import_id, triage_status, product_condition, location, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                manifest_import_id, triage_status, product_condition, location, status, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (product.id, product.company_id, product.created_at, *_search_columns(product),
              json.dumps(product.to_dict())),
         )
@@ -160,8 +162,8 @@ def save_products_bulk(products: List[Product]) -> None:
         conn.executemany(
             """INSERT OR REPLACE INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
-                manifest_import_id, triage_status, product_condition, location, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                manifest_import_id, triage_status, product_condition, location, status, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(p.to_dict()))
                 for p in products
@@ -316,7 +318,14 @@ def list_products_paginated(
     manifest_import_id: Optional[str] = None,
     location: Optional[str] = None,
     product_condition: Optional[str] = None,
-    search: Optional[str] = None,
+    status: Optional[str] = None,
+    exclude_status: Optional[str] = None,
+    sku: Optional[str] = None,
+    name: Optional[str] = None,
+    brand: Optional[str] = None,
+    model: Optional[str] = None,
+    ean: Optional[str] = None,
+    asin: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
 ) -> Tuple[List[Product], int]:
@@ -325,10 +334,12 @@ def list_products_paginated(
     loaded into Python/the browser — the thing the plain list_products()
     loop-per-row rendering can't do at 1,000-20,000 rows.
 
-    `search` is a lightweight substring match (sku/name/brand/model/ean/
-    asin) for narrowing within the current filters — for a single specific
-    lookup by exact SKU/EAN/ASIN across the *whole* inventory regardless of
-    filters, use search_products() instead.
+    `sku`/`name`/`brand`/`model`/`ean`/`asin`/`location` are each an
+    independent, lightweight substring match — every one supplied combines
+    with AND (not OR), so e.g. sku="200" + brand="Ninja" only matches rows
+    where BOTH are true. For a single specific lookup by exact SKU/EAN/ASIN
+    across the *whole* inventory regardless of filters, use
+    search_products() instead.
 
     Filters combine with AND; any left as None is skipped entirely (not
     turned into an "IS NULL" or "= ''" clause). Returns (rows_for_this_page,
@@ -344,19 +355,24 @@ def list_products_paginated(
         where_clauses.append("manifest_import_id = ?")
         params.append(manifest_import_id)
     if location:
-        where_clauses.append("location = ?")
-        params.append(location)
+        where_clauses.append("location LIKE ? COLLATE NOCASE")
+        params.append(f"%{location.strip()}%")
     if product_condition:
         where_clauses.append("product_condition = ?")
         params.append(product_condition)
-    if search and search.strip():
-        like = f"%{search.strip()}%"
-        where_clauses.append(
-            "(sku LIKE ? COLLATE NOCASE OR name LIKE ? COLLATE NOCASE OR brand LIKE ? COLLATE NOCASE "
-            "OR model LIKE ? COLLATE NOCASE OR model_number LIKE ? COLLATE NOCASE "
-            "OR ean = ? OR UPPER(asin) = UPPER(?))"
-        )
-        params.extend([like, like, like, like, like, search.strip(), search.strip()])
+    if status:
+        where_clauses.append("status = ?")
+        params.append(status)
+    if exclude_status:
+        where_clauses.append("status != ?")
+        params.append(exclude_status)
+    for field_name, field_value in (
+        ("sku", sku), ("name", name), ("brand", brand),
+        ("model", model), ("ean", ean), ("asin", asin),
+    ):
+        if field_value and field_value.strip():
+            where_clauses.append(f"{field_name} LIKE ? COLLATE NOCASE")
+            params.append(f"%{field_value.strip()}%")
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 

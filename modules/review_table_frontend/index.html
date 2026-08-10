@@ -13,20 +13,6 @@
   }
   #quick-filter:focus { outline: 2px solid #38bdf8; }
   #grid { width: 100%; height: 600px; }
-  #pagination-bar {
-    display: flex; align-items: center; justify-content: center; gap: 12px;
-    margin-bottom: 8px; color: #f3f4f6; font-size: 13px; flex-wrap: wrap;
-  }
-  #pagination-bar select {
-    padding: 4px 8px; border-radius: 6px; border: 1px solid #293548;
-    background: #1f2937; color: #f3f4f6; font-size: 13px;
-  }
-  #pagination-bar button {
-    padding: 5px 12px; border-radius: 6px; border: 1px solid #293548;
-    background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer;
-  }
-  #pagination-bar button:hover:not(:disabled) { background: #293548; }
-  #pagination-bar button:disabled { opacity: 0.4; cursor: default; }
   #columns-btn {
     padding: 6px 12px; border-radius: 6px; border: 1px solid #293548;
     background: #1f2937; color: #f3f4f6; font-size: 13px; cursor: pointer; white-space: nowrap;
@@ -39,17 +25,6 @@
   }
   #columns-panel.open { display: flex; }
   #columns-panel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #f3f4f6; cursor: pointer; }
-  .select-all-menu {
-    position: fixed; z-index: 20; display: none; flex-direction: column;
-    min-width: 240px; padding: 4px; background: #1f2937; border: 1px solid #293548;
-    border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-  }
-  .select-all-menu.open { display: flex; }
-  .select-all-menu button {
-    text-align: left; padding: 8px 10px; border: none; background: transparent;
-    color: #f3f4f6; font-size: 13px; cursor: pointer; border-radius: 4px; white-space: nowrap;
-  }
-  .select-all-menu button:hover { background: #293548; }
 </style>
 </head>
 <body>
@@ -59,19 +34,6 @@
     <button id="columns-btn" type="button">☰ Columns</button>
     <div id="columns-panel"></div>
   </div>
-</div>
-<div id="pagination-bar">
-  <label>Show
-    <select id="page-size-select">
-      <option value="10">10</option>
-      <option value="20" selected>20</option>
-      <option value="50">50</option>
-    </select>
-    per page
-  </label>
-  <button id="prev-page-btn" type="button">◀ Previous</button>
-  <span id="page-indicator">Page 1 of 1</span>
-  <button id="next-page-btn" type="button">Next ▶</button>
 </div>
 <div id="grid"></div>
 <script>
@@ -140,12 +102,18 @@ function openRow(data) {
   setComponentValue({ selected_ids: getSelectedIds(), open_id: data.id });
 }
 
-/* Custom header component for the auto-generated selection column: instead
-   of AG Grid's default header checkbox (which just toggles the current
-   page's rows), clicking it opens a small menu asking whether to select
-   all rows on this page only, or all rows across every page (matching the
-   current filter). Clicking again once everything is already selected just
-   clears the selection — no menu needed for that direction. */
+/* Custom header component for the auto-generated selection column: a
+   plain select-all-visible / deselect-all-visible toggle. This used to
+   open a menu offering "this page only" vs "all pages" — meaningful back
+   when the grid held a whole company's filtered result set and AG Grid's
+   own client-side pagination just chunked it for display. Now the grid
+   only ever holds one server-side page's worth of rows at a time (see
+   app.py's Product List), so "this page" and "all pages" would be the
+   same set of rows anyway — the menu was removed along with AG Grid's
+   client-side pagination (see the pagination:false note above) to avoid
+   presenting a distinction that no longer exists. Selecting rows beyond
+   what's currently loaded is done via the checkboxes across pages
+   (rex_selected_ids persists selections page to page — see app.py). */
 function SelectAllHeaderComponent() {}
 
 SelectAllHeaderComponent.prototype.init = function (params) {
@@ -161,63 +129,28 @@ SelectAllHeaderComponent.prototype.init = function (params) {
   this.checkbox.tabIndex = -1;
   // Purely visual: real checkboxes silently clear their own `.indeterminate`
   // flag as part of the browser's native pre-click handling, even when the
-  // click event is preventDefault()-ed — that stale-state quirk broke the
-  // second click after a "this page only" selection. Disabling pointer
-  // events on the input means every click is instead handled by eGui
-  // below, and `.checked`/`.indeterminate` are only ever set by our own
+  // click event is preventDefault()-ed. Disabling pointer events on the
+  // input means every click is instead handled by eGui below, and
+  // `.checked`/`.indeterminate` are only ever set by our own
   // updateCheckboxState(), never touched by the browser.
   this.checkbox.style.pointerEvents = "none";
   this.eGui.appendChild(this.checkbox);
-
-  this.menu = document.createElement("div");
-  this.menu.className = "select-all-menu";
-  this.pageOption = document.createElement("button");
-  this.pageOption.type = "button";
-  this.allOption = document.createElement("button");
-  this.allOption.type = "button";
-  this.menu.appendChild(this.pageOption);
-  this.menu.appendChild(this.allOption);
-  document.body.appendChild(this.menu);
-
-  this.pageOption.addEventListener("click", function (e) {
-    e.stopPropagation();
-    self.params.api.selectAllOnCurrentPage();
-    self.closeMenu();
-  });
-  this.allOption.addEventListener("click", function (e) {
-    e.stopPropagation();
-    self.params.api.selectAllFiltered();
-    self.closeMenu();
-  });
 
   this.onGuiClick = function (e) {
     e.preventDefault();
     e.stopPropagation();
     var stats = self.computeStats();
-    // Anything already selected (this page only, or all pages) -> a click
-    // just clears it, same as a normal checkbox. The menu is only for
-    // starting a new selection from empty; it's not offered again as a way
-    // to "escape" an indeterminate state, since users expect clicking a
-    // ticked/dashed box to untick it, not to see the same prompt again.
     if (stats.selected > 0) {
       self.params.api.deselectAllFiltered();
-      return;
+    } else {
+      self.params.api.selectAllFiltered();
     }
-    self.openMenu(stats);
   };
   this.eGui.addEventListener("click", this.onGuiClick);
-
-  this.onOutsideClick = function (e) {
-    if (self.menu.classList.contains("open") && !self.menu.contains(e.target) && !self.eGui.contains(e.target)) {
-      self.closeMenu();
-    }
-  };
-  document.addEventListener("click", this.onOutsideClick);
 
   this.onStateEvent = function () { self.updateCheckboxState(); };
   params.api.addEventListener("selectionChanged", this.onStateEvent);
   params.api.addEventListener("modelUpdated", this.onStateEvent);
-  params.api.addEventListener("paginationChanged", this.onStateEvent);
 
   this.updateCheckboxState();
 };
@@ -228,10 +161,7 @@ SelectAllHeaderComponent.prototype.computeStats = function () {
     total++;
     if (node.isSelected()) { selected++; }
   });
-  var pageSize = this.params.api.paginationGetPageSize();
-  var currentPage = this.params.api.paginationGetCurrentPage();
-  var onPage = Math.max(0, Math.min(pageSize, total - currentPage * pageSize));
-  return { total: total, selected: selected, onPage: onPage };
+  return { total: total, selected: selected };
 };
 
 SelectAllHeaderComponent.prototype.updateCheckboxState = function () {
@@ -240,28 +170,12 @@ SelectAllHeaderComponent.prototype.updateCheckboxState = function () {
   this.checkbox.indeterminate = stats.selected > 0 && stats.selected < stats.total;
 };
 
-SelectAllHeaderComponent.prototype.openMenu = function (stats) {
-  this.pageOption.textContent = "Select all on this page (" + stats.onPage + ")";
-  this.allOption.textContent = "Select all across all pages (" + stats.total + ")";
-  var rect = this.eGui.getBoundingClientRect();
-  this.menu.style.top = rect.bottom + "px";
-  this.menu.style.left = rect.left + "px";
-  this.menu.classList.add("open");
-};
-
-SelectAllHeaderComponent.prototype.closeMenu = function () {
-  this.menu.classList.remove("open");
-};
-
 SelectAllHeaderComponent.prototype.getGui = function () { return this.eGui; };
 SelectAllHeaderComponent.prototype.refresh = function () { return true; };
 
 SelectAllHeaderComponent.prototype.destroy = function () {
   this.params.api.removeEventListener("selectionChanged", this.onStateEvent);
   this.params.api.removeEventListener("modelUpdated", this.onStateEvent);
-  this.params.api.removeEventListener("paginationChanged", this.onStateEvent);
-  document.removeEventListener("click", this.onOutsideClick);
-  if (this.menu.parentNode) { this.menu.parentNode.removeChild(this.menu); }
 };
 
 var defaultColDef = { sortable: true, resizable: true, filter: true };
@@ -282,9 +196,13 @@ var columnDefs = [
   },
   { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
   { field: "name", headerName: "Product Name", flex: 1, minWidth: 160 },
+  { field: "brand", headerName: "Brand", width: 110, minWidth: 90 },
   { field: "quantity", headerName: "Qty", width: 90, minWidth: 70, type: "numericColumn" },
   { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
   { field: "product_condition", headerName: "Product Condition", width: 130, minWidth: 100 },
+  { field: "triage", headerName: "Triage", width: 140, minWidth: 110 },
+  { field: "location", headerName: "Location", width: 110, minWidth: 90 },
+  { field: "baselinker", headerName: "BaseLinker", width: 120, minWidth: 100 },
   { field: "status", headerName: "Status", width: 130, minWidth: 110 },
   { field: "date", headerName: "Date", width: 120, minWidth: 100 },
 ];
@@ -410,17 +328,22 @@ var gridOptions = {
     headerComponent: SelectAllHeaderComponent,
     sortable: false,
   },
-  pagination: true,
-  paginationPageSize: 20,
-  paginationPageSizeSelector: [10, 20, 50],
-  suppressPaginationPanel: true,  // using our own top, centered pagination bar instead
+  // No AG-Grid built-in pagination here (deliberately): this grid only
+  // ever receives one server-side page's worth of rows at a time (see
+  // app.py's Product List — inventory_store.list_products_paginated()),
+  // so client-side re-paginating those already-bounded rows would just
+  // add a second, confusing "Page X of Y" control on top of the real one
+  // below the table — worse, one that silently caps at whatever fits
+  // inside the current server page and can never reach the rest of the
+  // inventory. Was removed after that exact confusion was reported (grid
+  // showed "3 pages" and Next did nothing beyond them, independent of how
+  // much more data actually existed server-side).
   onSelectionChanged: reportSelection,
   onRowDoubleClicked: function (event) { openRow(event.data); },
   onCellKeyDown: function (event) {
     var key = event.event ? event.event.key : null;
     if (key === "Enter") { openRow(event.data); }
   },
-  onPaginationChanged: updatePaginationBar,
   // event.source guards against saving programmatic changes (responsive
   // column hiding, applyColumnState()'s own internal flex-width
   // recalculation, etc.) as if they were a real user preference — only
@@ -428,15 +351,6 @@ var gridOptions = {
   onColumnMoved: function (event) { if (event.finished && event.source === "uiColumnMoved") { saveColumnState(); } },
   onColumnResized: function (event) { if (event.finished && event.source === "uiColumnResized") { saveColumnState(); } },
 };
-
-function updatePaginationBar() {
-  if (!gridApi) { return; }
-  var current = gridApi.paginationGetCurrentPage();     // 0-indexed
-  var total = Math.max(1, gridApi.paginationGetTotalPages());
-  document.getElementById("page-indicator").textContent = "Page " + (current + 1) + " of " + total;
-  document.getElementById("prev-page-btn").disabled = current <= 0;
-  document.getElementById("next-page-btn").disabled = current >= total - 1;
-}
 
 document.addEventListener("DOMContentLoaded", function () {
   gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
@@ -469,16 +383,6 @@ document.addEventListener("DOMContentLoaded", function () {
     if (panel.classList.contains("open") && e.target !== btn && !panel.contains(e.target)) {
       panel.classList.remove("open");
     }
-  });
-
-  document.getElementById("page-size-select").addEventListener("change", function (e) {
-    gridApi.setGridOption("paginationPageSize", parseInt(e.target.value, 10));
-  });
-  document.getElementById("prev-page-btn").addEventListener("click", function () {
-    gridApi.paginationGoToPreviousPage();
-  });
-  document.getElementById("next-page-btn").addEventListener("click", function () {
-    gridApi.paginationGoToNextPage();
   });
 
   sendToStreamlit({ type: "streamlit:componentReady", apiVersion: 1 });
