@@ -23,7 +23,13 @@ def _client() -> anthropic.Anthropic:
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set. Add it to your environment or a .env file."
         )
-    return anthropic.Anthropic(api_key=api_key)
+    # max_retries=5 (SDK default is 2): under real multi-tenant load, many
+    # companies generating descriptions/grading at once makes a transient
+    # 429 (rate limit) or 529 (overloaded) far more likely to happen at
+    # least once in a given call — the SDK already retries these with
+    # exponential backoff internally, this just gives it more attempts
+    # before giving up and raising to the caller.
+    return anthropic.Anthropic(api_key=api_key, max_retries=5)
 
 
 def _extract_json(text: str) -> dict:

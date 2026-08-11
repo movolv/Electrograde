@@ -114,6 +114,29 @@ def _connect():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_product_condition ON products(product_condition)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_status ON products(status)")
+
+    # search_products()/list_products_paginated() filter sku/name/brand/
+    # model/model_number/ean/asin/location with "LIKE '%text%'" — a plain
+    # B-tree index (above) can't accelerate a leading-wildcard match, so
+    # Postgres falls back to a sequential scan. pg_trgm's GIN indexes
+    # below DO speed that up; the B-tree ones above stay (still used by
+    # exact-match filters like status = ? / company_id = ?), these are
+    # additive, not a replacement.
+    conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_sku_trgm ON products USING gin (sku gin_trgm_ops)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_name_trgm ON products USING gin (name gin_trgm_ops)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_brand_trgm ON products USING gin (brand gin_trgm_ops)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_model_trgm ON products USING gin (model gin_trgm_ops)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_model_number_trgm "
+        "ON products USING gin (model_number gin_trgm_ops)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_ean_trgm ON products USING gin (ean gin_trgm_ops)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_asin_trgm ON products USING gin (asin gin_trgm_ops)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_location_trgm ON products USING gin (location gin_trgm_ops)"
+    )
+
     # Unlike SQLite (which auto-commits DDL), Postgres leaves CREATE
     # TABLE/INDEX/ALTER TABLE above uncommitted until this — without it,
     # a caller that never opens a "with conn:" block (e.g. a read-only

@@ -16,6 +16,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+import anthropic
 import pandas as pd
 import requests
 from PIL import Image, ImageOps
@@ -1182,20 +1183,26 @@ if page == "🆕 New Item":
                     for img_bytes in st.session_state.captured_photos:
                         decoded_barcodes.extend(barcode_scanner.decode_barcodes(img_bytes))
 
-                    st.session_state.grading_result = vision_grading.grade_item(
-                        st.session_state.captured_photos,
-                        product.category,
-                        product.box_contents,
-                        expected_identity={
-                            "brand": product.brand,
-                            "model": product.model,
-                            "product_name": product.name,
-                            "category": product.category,
-                        },
-                        manifest_ean=product.manifest_barcode,
-                        photo_decoded_barcodes=decoded_barcodes,
-                    )
-                st.rerun()
+                    try:
+                        st.session_state.grading_result = vision_grading.grade_item(
+                            st.session_state.captured_photos,
+                            product.category,
+                            product.box_contents,
+                            expected_identity={
+                                "brand": product.brand,
+                                "model": product.model,
+                                "product_name": product.name,
+                                "category": product.category,
+                            },
+                            manifest_ean=product.manifest_barcode,
+                            photo_decoded_barcodes=decoded_barcodes,
+                        )
+                    except (anthropic.RateLimitError, anthropic.OverloadedError):
+                        st.error("AI service is busy right now. Please wait a moment and try again.")
+                    except Exception as e:
+                        st.error(f"Photo analysis failed: {e}")
+                if st.session_state.grading_result is not None:
+                    st.rerun()
             st.caption("Or skip and assess condition manually below.")
 
         gr = st.session_state.grading_result
@@ -1314,19 +1321,25 @@ if page == "🆕 New Item":
         if st.session_state.descriptions is None:
             if st.button("✍️ Generate English descriptions", type="primary", disabled=not _ai_configured()):
                 with st.spinner("Writing listing copy..."):
-                    st.session_state.descriptions = description_gen.generate_descriptions(
-                        name=product.name,
-                        brand=product.brand,
-                        model=product.model,
-                        category=product.category,
-                        spec_summary=product.spec_summary,
-                        box_contents=product.box_contents,
-                        product_condition=product.product_condition,
-                        condition_type=product.condition_type,
-                        defects=product.defects,
-                        missing_components=product.missing_components,
-                    )
-                st.rerun()
+                    try:
+                        st.session_state.descriptions = description_gen.generate_descriptions(
+                            name=product.name,
+                            brand=product.brand,
+                            model=product.model,
+                            category=product.category,
+                            spec_summary=product.spec_summary,
+                            box_contents=product.box_contents,
+                            product_condition=product.product_condition,
+                            condition_type=product.condition_type,
+                            defects=product.defects,
+                            missing_components=product.missing_components,
+                        )
+                    except (anthropic.RateLimitError, anthropic.OverloadedError):
+                        st.error("AI service is busy right now. Please wait a moment and try again.")
+                    except Exception as e:
+                        st.error(f"Description generation failed: {e}")
+                if st.session_state.descriptions is not None:
+                    st.rerun()
             st.caption("Or write everything manually below.")
 
         desc = st.session_state.descriptions
