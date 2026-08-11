@@ -56,3 +56,18 @@ def log_audit(
             (uuid.uuid4().hex[:12], company_id, user_id, action, entity, entity_id, details, time.time()),
         )
     conn.close()
+
+
+def prune_older_than(days: int = 90) -> int:
+    """Deletes audit_log rows older than `days`. Nothing calls this
+    automatically except integrations/scheduler.py's daily
+    prune_old_logs_once() — without it this table grows forever (no UI
+    reads it in bulk today, so nothing else would ever notice or shrink
+    it). Returns the number of rows deleted."""
+    cutoff = time.time() - days * 86400
+    conn = _connect()
+    with conn:
+        cur = conn.execute("DELETE FROM audit_log WHERE created_at < ?", (cutoff,))
+        count = cur.rowcount
+    conn.close()
+    return count

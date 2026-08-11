@@ -282,3 +282,18 @@ def list_sync_log(company_id: str, integration_type: str = "", limit: int = 50) 
         )
         for r in rows
     ]
+
+
+def prune_sync_log_older_than(days: int = 90) -> int:
+    """Deletes integration_sync_log rows older than `days` — called daily
+    by integrations/scheduler.py's prune_old_logs_once(). Named for the
+    specific table (this module also owns company_integrations, which is
+    NOT pruned — that's live connection state, not a log). Returns the
+    number of rows deleted."""
+    cutoff = time.time() - days * 86400
+    conn = _connect()
+    with conn:
+        cur = conn.execute("DELETE FROM integration_sync_log WHERE created_at < ?", (cutoff,))
+        count = cur.rowcount
+    conn.close()
+    return count

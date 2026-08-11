@@ -346,10 +346,13 @@ def _photo_executor() -> concurrent.futures.ThreadPoolExecutor:
     capturing the next photo doesn't have to wait for the previous one to
     finish uploading/processing — st.cache_resource keeps a single
     instance alive across reruns instead of spawning a new pool every
-    script run. Modest worker count: this is CPU-bound Pillow work
-    (EXIF transpose + resize), not I/O-bound, so more workers than cores
-    just causes contention rather than helping."""
-    return concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    script run, and it's shared by every company/user in this process, not
+    just one. This is CPU-bound Pillow work (EXIF transpose + resize), not
+    I/O-bound, so more workers than cores just causes contention rather
+    than helping — scaled to the machine's core count instead of a fixed
+    small number, capped at 8 so photo processing alone can't starve the
+    main Streamlit script threads and the sync scheduler thread of CPU."""
+    return concurrent.futures.ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2)))
 
 
 @st.cache_resource

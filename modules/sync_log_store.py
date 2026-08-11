@@ -110,3 +110,17 @@ def list_logs(company_id: str, product_id: str = "", connector_name: str = "", l
         )
         for r in rows
     ]
+
+
+def prune_older_than(days: int = 90) -> int:
+    """Deletes sync_logs rows older than `days` — called daily by
+    integrations/scheduler.py's prune_old_logs_once(). Without it this
+    table grows forever (already 80k+ rows from light dev usage alone).
+    Returns the number of rows deleted."""
+    cutoff = time.time() - days * 86400
+    conn = _connect()
+    with conn:
+        cur = conn.execute("DELETE FROM sync_logs WHERE created_at < ?", (cutoff,))
+        count = cur.rowcount
+    conn.close()
+    return count

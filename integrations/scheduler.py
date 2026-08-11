@@ -38,6 +38,16 @@ EXECUTORS: Dict[str, Callable] = {}
 # Overridable by tests that need to fast-forward time without real sleeping.
 _now = time.time
 
+# In-memory, not DB-backed: this is one long-lived background thread for
+# the whole process (see app.py's ensure_scheduler_running()), so a plain
+# module variable is enough to keep the actual DELETE work to once/day
+# instead of every 30s tick. A process restart just means it may prune a
+# little earlier than a full 24h later — harmless, since pruning is
+# idempotent (there's nothing left to delete twice).
+_last_prune_at = 0.0
+_PRUNE_INTERVAL_SECONDS = 86400  # once/day
+_LOG_RETENTION_DAYS = 90
+
 
 def poll_once() -> int:
     """Scans every company's enabled, non-manual sync rules and enqueues a
@@ -135,6 +145,30 @@ def poll_two_way_sync_once() -> int:
     return processed
 
 
+def prune_old_logs_once(days: int = _LOG_RETENTION_DAYS) -> int:
+    """Deletes audit_log/sync_logs/integration_sync_log rows older than
+    `days`, at most once per _PRUNE_INTERVAL_SECONDS — without this, all
+    three grow forever (see modules/audit_store.py, sync_log_store.py,
+    integration_store.py's prune_*() functions this calls). Returns 0
+    without touching the DB at all when called again before the interval
+    has elapsed, so it's cheap to call on every scheduler tick."""
+    global _last_prune_at
+    now = _now()
+    if now - _last_prune_at < _PRUNE_INTERVAL_SECONDS:
+        return 0
+    from modules import audit_store, integration_store, sync_log_store
+
+    total = (
+        audit_store.prune_older_than(days)
+        + sync_log_store.prune_older_than(days)
+        + integration_store.prune_sync_log_older_than(days)
+    )
+    _last_prune_at = now
+    if total:
+        logger.info("Pruned %d log row(s) older than %d days", total, days)
+    return total
+
+
 def run_forever(poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
     """The background loop. A tick failing outright (e.g. a transient DB
     hiccup) is logged and swallowed — one bad tick must never kill the
@@ -145,6 +179,7 @@ def run_forever(poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
             poll_once()
             process_due_jobs()
             poll_two_way_sync_once()
+            prune_old_logs_once()
         except Exception:
             logger.exception("Sync scheduler tick failed")
         time.sleep(poll_interval)

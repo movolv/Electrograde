@@ -128,7 +128,10 @@ def _get_pool() -> ConnectionPool:
                 "ELECTROGRADER_DATABASE_URL (or DATABASE_URL) is not set — "
                 "point it at a postgresql://user:password@host/dbname connection string."
             )
-        _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=True)
+        # Postgres's own max_connections defaults to 100 — 25 leaves plenty
+        # of headroom for verify_*.py scripts, pgAdmin, and any other tool
+        # connecting to the same server at the same time.
+        _pool = ConnectionPool(DATABASE_URL, min_size=2, max_size=25, open=True)
     return _pool
 
 
