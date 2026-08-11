@@ -89,6 +89,7 @@ class _ConnectionWrapper:
 
     def __init__(self, pool: ConnectionPool):
         self._pool = pool
+        self._conn = None  # set only after getconn() succeeds — see __del__
         self._conn = pool.getconn()
 
     def execute(self, sql, params=None):
@@ -108,7 +109,25 @@ class _ConnectionWrapper:
         self._conn.rollback()
 
     def close(self):
-        self._pool.putconn(self._conn)
+        if self._conn is not None:
+            conn, self._conn = self._conn, None
+            self._pool.putconn(conn)
+
+    def __del__(self):
+        # Safety net: every existing store-module call site does
+        # "conn = _connect(); ...; conn.close()" with no try/finally — a
+        # pattern inherited from SQLite, where a leaked connection was
+        # harmless (sqlite3.Connection.__del__ just closes the local file
+        # handle, and SQLite has no fixed-size pool to exhaust). Under a
+        # bounded Postgres pool, an uncaught exception between _connect()
+        # and .close() would otherwise permanently strand one connection
+        # out of the pool instead of just that one call failing — enough
+        # of those over time (network hiccups, bad data, anything that
+        # raises) and the whole pool exhausts, so every DB call in the
+        # app starts timing out until the process is restarted. This
+        # returns it on garbage collection instead, same safety sqlite3
+        # already gave this exact call pattern for free.
+        self.close()
 
     def __enter__(self):
         self._conn.__enter__()
