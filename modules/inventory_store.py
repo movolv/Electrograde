@@ -226,14 +226,29 @@ def delete_products_by_manifest(
     return len(to_delete)
 
 
-def list_products(company_id: str) -> List[Product]:
+def list_products(company_id: str, status: Optional[str] = None) -> List[Product]:
     conn = _connect()
-    rows = conn.execute(
-        "SELECT data FROM products WHERE company_id = ? ORDER BY created_at DESC",
-        (company_id,),
-    ).fetchall()
+    if status:
+        rows = conn.execute(
+            "SELECT data FROM products WHERE company_id = ? AND status = ? ORDER BY created_at DESC",
+            (company_id, status),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT data FROM products WHERE company_id = ? ORDER BY created_at DESC",
+            (company_id,),
+        ).fetchall()
     conn.close()
     return [Product.from_dict(json.loads(r[0])) for r in rows]
+
+
+def list_skus(company_id: str) -> set:
+    """Just SKUs — no JSON deserialization, no full Product hydration.
+    Existence-check use (e.g. catalog-import dedup), not for display."""
+    conn = _connect()
+    rows = conn.execute("SELECT sku FROM products WHERE company_id = ?", (company_id,)).fetchall()
+    conn.close()
+    return {r[0] for r in rows if r[0]}
 
 
 def get_product(product_id: str, company_id: str) -> Optional[Product]:

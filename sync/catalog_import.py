@@ -28,7 +28,7 @@ def preview_import(company_id: str, connector_name: str) -> dict:
         return {"new": [], "existing": []}
 
     catalog = connector.fetch_catalog()
-    existing_skus = {p.sku for p in inventory_store.list_products(company_id) if p.sku}
+    existing_skus = inventory_store.list_skus(company_id)
 
     new_items = [item for item in catalog if item.sku not in existing_skus]
     existing_items = [item for item in catalog if item.sku in existing_skus]

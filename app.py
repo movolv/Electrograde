@@ -354,15 +354,20 @@ def _photo_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 @st.cache_resource
 def _import_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """One shared background worker for bulk catalog imports (see
+    """Shared background worker pool for bulk catalog imports (see
     _run_import_job() below), same st.cache_resource singleton pattern as
     _photo_executor() — one instance for the whole process, so the "Import
     N products" button can submit work and return immediately instead of
     blocking the browser session for however long the import takes.
-    max_workers=1: only one import should ever run per process at a time
-    (the UI also guards against starting a second one while one is active,
-    see _render_catalog_import_section)."""
-    return concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    max_workers=4: this pool is shared across every company in a
+    multi-tenant deployment, not just one — a single worker would
+    serialize ALL companies' imports through one queue, so importing
+    100k products for one company would make every other company wait.
+    Per-(company, connector) duplicate-import prevention is a separate,
+    already-existing guard (see _render_catalog_import_section, checks
+    catalog_import_job_store's RUNNING status) and is unaffected by this
+    number — it still only ever allows one run per company+connector."""
+    return concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 
 @st.cache_resource
@@ -916,10 +921,7 @@ if page == "🆕 New Item":
         )
 
         if source.startswith("📥"):
-            drafts = [
-                p for p in inventory_store.list_products(st.session_state.company_id)
-                if p.status == "draft"
-            ]
+            drafts = inventory_store.list_products(st.session_state.company_id, status="draft")
             if not drafts:
                 st.info(
                     "No pending manifest items for this company. Use '📥 Import Manifest' "

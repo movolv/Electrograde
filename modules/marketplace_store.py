@@ -12,11 +12,13 @@ change.
 
 Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
+import json
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from modules import db
+from modules.models import Product
 
 STATUS_NOT_LISTED = "not_listed"
 STATUS_LISTED = "listed"
@@ -147,3 +149,22 @@ def delete_listings_for_product(product_id: str, company_id: str) -> int:
         count = cur.rowcount
     conn.close()
     return count
+
+
+def list_products_with_listing(company_id: str, marketplace: str) -> List[Product]:
+    """Products that actually have a real external listing for this
+    marketplace — one indexed JOIN instead of loading every product for
+    the company and checking each one's listing individually (the old
+    N+1 pattern integrations/scheduler.py's pull-sync used to use, which
+    meant one DB round-trip per product on top of loading the whole
+    company's catalog into memory)."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT p.data FROM products p
+           JOIN marketplace_listings m ON m.product_id = p.id AND m.company_id = p.company_id
+           WHERE p.company_id = ? AND m.marketplace = ?
+             AND m.external_listing_id IS NOT NULL AND m.external_listing_id != ''""",
+        (company_id, marketplace),
+    ).fetchall()
+    conn.close()
+    return [Product.from_dict(json.loads(r[0])) for r in rows]
