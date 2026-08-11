@@ -14,3 +14,4 @@ onnxruntime>=1.16  # rembg's inference backend — not pulled in automatically b
 opencv-python-headless>=4.9  # classical CV for modules/image_pipeline (perspective, sharpness/exposure scoring, reflection inpainting)
 scipy>=1.11  # connected-component analysis, also pulled in transitively by rembg
 cryptography>=42.0  # Fernet encryption for integration credentials at rest (modules/crypto.py)
+psycopg[binary,pool]>=3.1  # PostgreSQL driver + connection pool (modules/db.py)

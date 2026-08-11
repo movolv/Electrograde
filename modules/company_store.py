@@ -1,22 +1,22 @@
-"""SQLite-backed company (tenant) persistence — the root of the multi-tenant
+"""PostgreSQL-backed company (tenant) persistence — the root of the multi-tenant
 model. Every other tenant-scoped table (products, users, manifest batches,
 repair events, marketplace listings) points at a row here via company_id.
 
-Shares the same SQLite file as modules/inventory_store.py (data/inventory.db,
-overridable via ELECTROGRADER_DB_PATH) but in its own table, following the
-identical _connect()/CREATE TABLE IF NOT EXISTS/CREATE INDEX IF NOT EXISTS
+Shares the same PostgreSQL database as every other modules/*_store.py
+(modules/db.py, connection string via ELECTROGRADER_DATABASE_URL) but in
+its own table, following the identical _connect()/CREATE TABLE IF NOT
+EXISTS/CREATE INDEX IF NOT EXISTS
 pattern used throughout modules/*_store.py — no ORM, no FK constraints (this
 project enforces tenant scoping at the application layer everywhere, not in
 the schema; see scripts/verify_tenant_isolation.py).
 """
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 STATUS_ACTIVE = "active"
 STATUS_SUSPENDED = "suspended"
@@ -47,18 +47,18 @@ class Company:
         return Company(**known)
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS companies (
             id TEXT PRIMARY KEY,
-            created_at REAL,
+            created_at DOUBLE PRECISION,
             data TEXT
         )
         """
     )
+    conn.commit()
     return conn
 
 

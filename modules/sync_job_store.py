@@ -17,16 +17,17 @@ retrying) job per (company_id, integration_type, job_type)" at the DB
 layer — cheap today (one process, one worker thread), and exactly the
 guard that matters the day a second worker/process exists.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+import psycopg
+
+from modules import db
 
 JOB_TYPE_PRODUCT_EXPORT = "product_export"
 JOB_TYPE_IMAGE_UPLOAD = "image_upload"
@@ -70,9 +71,8 @@ class SyncJob:
     finished_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_jobs (
@@ -85,13 +85,13 @@ def _connect() -> sqlite3.Connection:
             status TEXT NOT NULL DEFAULT 'pending',
             attempts INTEGER NOT NULL DEFAULT 0,
             max_attempts INTEGER NOT NULL DEFAULT 3,
-            next_attempt_at REAL NOT NULL DEFAULT 0,
+            next_attempt_at DOUBLE PRECISION NOT NULL DEFAULT 0,
             error_message TEXT NOT NULL DEFAULT '',
             payload TEXT NOT NULL DEFAULT '{}',
-            created_at REAL,
-            updated_at REAL,
-            started_at REAL,
-            finished_at REAL
+            created_at DOUBLE PRECISION,
+            updated_at DOUBLE PRECISION,
+            started_at DOUBLE PRECISION,
+            finished_at DOUBLE PRECISION
         )
         """
     )
@@ -104,6 +104,7 @@ def _connect() -> sqlite3.Connection:
         "ON sync_jobs(company_id, integration_type, job_type) "
         "WHERE status IN ('pending', 'running', 'retrying')"
     )
+    conn.commit()
     return conn
 
 
@@ -167,7 +168,7 @@ def create_job(
                     job.started_at or None, job.finished_at or None,
                 ),
             )
-    except sqlite3.IntegrityError:
+    except psycopg.IntegrityError:
         conn.close()
         return None
     conn.close()

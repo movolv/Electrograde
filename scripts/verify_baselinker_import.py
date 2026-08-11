@@ -16,7 +16,7 @@ correctly:
     correctly;
   - full cross-tenant isolation.
 
-Runs against a throwaway scratch database (ELECTROGRADER_DB_PATH), set
+Runs against a throwaway scratch PostgreSQL database (ELECTROGRADER_DATABASE_URL), set
 *before* importing any modules.*_store / integrations / sync module — same
 convention as every other verify_*.py script in this repo.
 
@@ -24,12 +24,13 @@ convention as every other verify_*.py script in this repo.
 """
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_import_test_")
-os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "test.db")
+from scripts._pg_test_helper import make_scratch_database  # noqa: E402
+
+_DATABASE_URL, _drop_scratch_db = make_scratch_database("baselinker_import")
+os.environ["ELECTROGRADER_DATABASE_URL"] = _DATABASE_URL
 os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
 
 from modules import (  # noqa: E402
@@ -94,7 +95,7 @@ integration_manager._CATALOG_BY_TYPE["test_fake_mp"] = integration_manager.Catal
 
 
 def main() -> int:
-    print(f"Scratch DB: {os.environ['ELECTROGRADER_DB_PATH']}\n")
+    print(f"Scratch DB: {_DATABASE_URL}\n")
 
     company_a = company_store.create_company("Import Test Co A", user_limit=10)
     company_b = company_store.create_company("Import Test Co B", user_limit=10)
@@ -204,9 +205,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import shutil
     try:
         exit_code = main()
     finally:
-        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+        _drop_scratch_db()
     raise SystemExit(exit_code)

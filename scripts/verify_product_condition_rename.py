@@ -15,7 +15,7 @@ record's data:
     correctly move "grade" rows (including the field_mapping JSON-blob
     case) to "product_condition", and are idempotent (safe to run twice).
 
-Runs against a throwaway scratch database (ELECTROGRADER_DB_PATH), set
+Runs against a throwaway scratch PostgreSQL database (ELECTROGRADER_DATABASE_URL), set
 *before* importing any modules.*_store / integrations / sync module — same
 convention as every other verify_*.py script in this repo.
 
@@ -24,17 +24,18 @@ convention as every other verify_*.py script in this repo.
 import json
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_condition_rename_test_")
-os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "test.db")
+from scripts._pg_test_helper import make_scratch_database  # noqa: E402
+
+_DATABASE_URL, _drop_scratch_db = make_scratch_database("product_condition_rename")
+os.environ["ELECTROGRADER_DATABASE_URL"] = _DATABASE_URL
 os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
 
 from modules.models import Product  # noqa: E402
 from modules import (  # noqa: E402
-    field_mapping_store, inventory_store, product_change_log_store,
+    db, field_mapping_store, inventory_store, product_change_log_store,
     sync_log_store, sync_ownership_store, sync_queue_store,
 )
 from integrations.field_registry import SYNCABLE_FIELDS, SYNC_OWNERSHIP_FIELDS  # noqa: E402
@@ -53,7 +54,7 @@ def check(label: str, condition: bool) -> None:
 
 
 def main() -> int:
-    print(f"Scratch DB: {os.environ['ELECTROGRADER_DB_PATH']}\n")
+    print(f"Scratch DB: {_DATABASE_URL}\n")
 
     # --------------------------------------------------------- field_registry --
     print("-- field_registry.py: renamed, not duplicated --")
@@ -94,7 +95,7 @@ def main() -> int:
     check("save/reload round-trips product_condition via the new column + JSON blob", reloaded.product_condition == "B")
 
     conn = inventory_store._connect()
-    col_names = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
+    col_names = db.table_columns(conn, "products")
     check("products table has a product_condition column", "product_condition" in col_names)
     check("old grade column is left in place (additive-only migration)", "grade" in col_names)
     conn.close()
@@ -162,9 +163,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import shutil
     try:
         exit_code = main()
     finally:
-        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+        _drop_scratch_db()
     raise SystemExit(exit_code)

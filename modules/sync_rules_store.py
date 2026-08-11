@@ -12,17 +12,15 @@ but not to decide *what* that job does (the job body itself is still a
 Phase 2+ concern, per integration).
 
 One row per (company_id, integration_type) — same shape as
-modules/integration_store.py's CompanyIntegration. Shares the same SQLite
-file as modules/inventory_store.py.
+modules/integration_store.py's CompanyIntegration. Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 FREQUENCY_MANUAL = "manual"
 FREQUENCY_EVERY_15_MIN = "every_15_min"
@@ -88,9 +86,8 @@ class SyncRule:
     updated_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS integration_sync_rules (
@@ -104,9 +101,9 @@ def _connect() -> sqlite3.Connection:
             fields_receive TEXT NOT NULL DEFAULT '[]',
             automation_triggers TEXT NOT NULL DEFAULT '[]',
             enabled INTEGER NOT NULL DEFAULT 1,
-            last_enqueued_at REAL NOT NULL DEFAULT 0,
-            created_at REAL,
-            updated_at REAL
+            last_enqueued_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+            created_at DOUBLE PRECISION,
+            updated_at DOUBLE PRECISION
         )
         """
     )
@@ -123,7 +120,7 @@ def _connect() -> sqlite3.Connection:
     # compatibility — to mark those as configured=1 immediately rather than
     # silently falling back to "legacy" for a company that already made a
     # real choice.
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(integration_sync_rules)")}
+    existing_cols = db.table_columns(conn, "integration_sync_rules")
     if "fields_send_configured" not in existing_cols:
         conn.execute(
             "ALTER TABLE integration_sync_rules ADD COLUMN fields_send_configured INTEGER NOT NULL DEFAULT 0"
@@ -132,7 +129,6 @@ def _connect() -> sqlite3.Connection:
             "UPDATE integration_sync_rules SET fields_send_configured = 1 "
             "WHERE fields_send IS NOT NULL AND fields_send NOT IN ('[]', '')"
         )
-        conn.commit()
 
     # Migrate older DBs (shipped before real two-way sync automation
     # existed). auto_sync_enabled defaults to 0 for every row, including
@@ -141,10 +137,10 @@ def _connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN auto_sync_enabled INTEGER NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN push_interval_seconds INTEGER NOT NULL DEFAULT 60")
         conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN pull_interval_seconds INTEGER NOT NULL DEFAULT 300")
-        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN last_push_at REAL NOT NULL DEFAULT 0")
-        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN last_pull_at REAL NOT NULL DEFAULT 0")
-        conn.commit()
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN last_push_at DOUBLE PRECISION NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE integration_sync_rules ADD COLUMN last_pull_at DOUBLE PRECISION NOT NULL DEFAULT 0")
 
+    conn.commit()
     return conn
 
 
@@ -227,12 +223,24 @@ def upsert_rule(rule: SyncRule) -> SyncRule:
 
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO integration_sync_rules
+            """INSERT INTO integration_sync_rules
                (id, company_id, integration_type, frequency, direction, conflict_handling,
                 fields_send, fields_send_configured, fields_receive, automation_triggers, enabled,
                 last_enqueued_at, auto_sync_enabled, push_interval_seconds, pull_interval_seconds,
                 last_push_at, last_pull_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, integration_type = EXCLUDED.integration_type,
+                   frequency = EXCLUDED.frequency, direction = EXCLUDED.direction,
+                   conflict_handling = EXCLUDED.conflict_handling, fields_send = EXCLUDED.fields_send,
+                   fields_send_configured = EXCLUDED.fields_send_configured,
+                   fields_receive = EXCLUDED.fields_receive, automation_triggers = EXCLUDED.automation_triggers,
+                   enabled = EXCLUDED.enabled, last_enqueued_at = EXCLUDED.last_enqueued_at,
+                   auto_sync_enabled = EXCLUDED.auto_sync_enabled,
+                   push_interval_seconds = EXCLUDED.push_interval_seconds,
+                   pull_interval_seconds = EXCLUDED.pull_interval_seconds,
+                   last_push_at = EXCLUDED.last_push_at, last_pull_at = EXCLUDED.last_pull_at,
+                   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at""",
             (
                 rule.id, rule.company_id, rule.integration_type, rule.frequency, rule.direction,
                 rule.conflict_handling, json.dumps(rule.fields_send or []), int(rule.fields_send_configured),

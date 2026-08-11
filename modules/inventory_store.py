@@ -1,4 +1,4 @@
-"""SQLite-backed inventory persistence — the single source of truth. There
+"""PostgreSQL-backed inventory persistence — the single source of truth. There
 is no persistent Excel mirror anymore (removed: it was one shared file
 across every company, a real cross-tenant exposure once more than one
 company has data); Excel/CSV export is generated on demand from this
@@ -14,19 +14,10 @@ save) instead of relying on scanning/deserializing the full JSON blob for
 every row — see search_products().
 """
 import json
-import os
-import sqlite3
-from pathlib import Path
 from typing import List, Optional, Tuple
 
+from modules import db
 from modules.models import Product
-
-# Overridable so scripts/verify_tenant_isolation.py (and any other script
-# that needs a throwaway DB) can point every store module — they all import
-# DB_PATH from here — at an isolated scratch file instead of the real one,
-# just by setting this env var before any modules.*_store module is
-# imported. No effect on the normal `streamlit run` path.
-DB_PATH = Path(os.environ.get("ELECTROGRADER_DB_PATH") or (Path(__file__).resolve().parent.parent / "data" / "inventory.db"))
 
 # Search result tiers, in priority order (see search_products()).
 MATCH_TIER_SKU = "sku"
@@ -38,22 +29,21 @@ MATCH_TIER_BRAND_NAME = "brand_name"
 DEFAULT_SKU_RANGE_START = 2000
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS products (
             id TEXT PRIMARY KEY,
             company_id TEXT NOT NULL DEFAULT 'default',
-            created_at REAL,
+            created_at DOUBLE PRECISION,
             data TEXT
         )
         """
     )
 
     # Migrate older DBs, adding denormalized search columns as needed.
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
+    existing_cols = db.table_columns(conn, "products")
     new_cols = {
         "company_id": "TEXT NOT NULL DEFAULT 'default'",
         "ean": "TEXT",
@@ -124,6 +114,11 @@ def _connect() -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_product_condition ON products(product_condition)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_status ON products(status)")
+    # Unlike SQLite (which auto-commits DDL), Postgres leaves CREATE
+    # TABLE/INDEX/ALTER TABLE above uncommitted until this — without it,
+    # a caller that never opens a "with conn:" block (e.g. a read-only
+    # list/get function) would roll the schema setup back on conn.close().
+    conn.commit()
     return conn
 
 
@@ -135,17 +130,24 @@ def _search_columns(p: Product) -> tuple:
 
 
 def save_product(product: Product) -> None:
-    """Saves to SQLite — the single source of truth. No Excel mirror to
+    """Saves to PostgreSQL — the single source of truth. No Excel mirror to
     keep in sync anymore; export a spreadsheet on demand instead (see
     modules/export.py) if one is needed."""
     assert product.company_id, "Product.company_id must be set before saving — never save an orphaned record."
     conn = _connect()
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO products
+            """INSERT INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
                 manifest_import_id, triage_status, product_condition, location, status, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, created_at = EXCLUDED.created_at,
+                   ean = EXCLUDED.ean, asin = EXCLUDED.asin, model_number = EXCLUDED.model_number,
+                   model = EXCLUDED.model, brand = EXCLUDED.brand, name = EXCLUDED.name,
+                   sku = EXCLUDED.sku, manifest_import_id = EXCLUDED.manifest_import_id,
+                   triage_status = EXCLUDED.triage_status, product_condition = EXCLUDED.product_condition,
+                   location = EXCLUDED.location, status = EXCLUDED.status, data = EXCLUDED.data""",
             (product.id, product.company_id, product.created_at, *_search_columns(product),
              json.dumps(product.to_dict())),
         )
@@ -160,10 +162,17 @@ def save_products_bulk(products: List[Product]) -> None:
     conn = _connect()
     with conn:
         conn.executemany(
-            """INSERT OR REPLACE INTO products
+            """INSERT INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
                 manifest_import_id, triage_status, product_condition, location, status, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, created_at = EXCLUDED.created_at,
+                   ean = EXCLUDED.ean, asin = EXCLUDED.asin, model_number = EXCLUDED.model_number,
+                   model = EXCLUDED.model, brand = EXCLUDED.brand, name = EXCLUDED.name,
+                   sku = EXCLUDED.sku, manifest_import_id = EXCLUDED.manifest_import_id,
+                   triage_status = EXCLUDED.triage_status, product_condition = EXCLUDED.product_condition,
+                   location = EXCLUDED.location, status = EXCLUDED.status, data = EXCLUDED.data""",
             [
                 (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(p.to_dict()))
                 for p in products
@@ -280,11 +289,11 @@ def search_products(query: str, company_id: str) -> List[Tuple[Product, str]]:
     _add(_run("ean = ?", [q]), MATCH_TIER_EAN)
     _add(_run("UPPER(asin) = UPPER(?)", [q]), MATCH_TIER_ASIN)
     _add(
-        _run("model_number LIKE ? COLLATE NOCASE OR model LIKE ? COLLATE NOCASE", [like, like]),
+        _run("model_number ILIKE ? OR model ILIKE ?", [like, like]),
         MATCH_TIER_MODEL,
     )
     _add(
-        _run("brand LIKE ? COLLATE NOCASE OR name LIKE ? COLLATE NOCASE", [like, like]),
+        _run("brand ILIKE ? OR name ILIKE ?", [like, like]),
         MATCH_TIER_BRAND_NAME,
     )
 
@@ -355,7 +364,7 @@ def list_products_paginated(
         where_clauses.append("manifest_import_id = ?")
         params.append(manifest_import_id)
     if location:
-        where_clauses.append("location LIKE ? COLLATE NOCASE")
+        where_clauses.append("location ILIKE ?")
         params.append(f"%{location.strip()}%")
     if product_condition:
         where_clauses.append("product_condition = ?")
@@ -371,7 +380,7 @@ def list_products_paginated(
         ("model", model), ("ean", ean), ("asin", asin),
     ):
         if field_value and field_value.strip():
-            where_clauses.append(f"{field_name} LIKE ? COLLATE NOCASE")
+            where_clauses.append(f"{field_name} ILIKE ?")
             params.append(f"%{field_value.strip()}%")
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""

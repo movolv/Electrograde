@@ -14,7 +14,7 @@ modules/sync_log_store.py, sync/conflict_resolver.py) works correctly:
     sync_logs and (for the non-owner-changed cases) sync_conflicts;
   - full cross-tenant isolation on the new sync_logs table.
 
-Runs against a throwaway scratch database (ELECTROGRADER_DB_PATH), set
+Runs against a throwaway scratch PostgreSQL database (ELECTROGRADER_DATABASE_URL), set
 *before* importing any modules.*_store / sync module — same convention as
 scripts/verify_sync_ownership.py.
 
@@ -22,12 +22,13 @@ scripts/verify_sync_ownership.py.
 """
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_two_way_sync_test_")
-os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "test.db")
+from scripts._pg_test_helper import make_scratch_database  # noqa: E402
+
+_DATABASE_URL, _drop_scratch_db = make_scratch_database("two_way_sync")
+os.environ["ELECTROGRADER_DATABASE_URL"] = _DATABASE_URL
 os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
 
 from modules import company_store, sync_log_store, sync_ownership_store  # noqa: E402
@@ -47,7 +48,7 @@ def check(label: str, condition: bool) -> None:
 
 
 def main() -> int:
-    print(f"Scratch DB: {os.environ['ELECTROGRADER_DB_PATH']}\n")
+    print(f"Scratch DB: {_DATABASE_URL}\n")
 
     company_a = company_store.create_company("Two-Way Sync Test Co A", user_limit=10)
     company_b = company_store.create_company("Two-Way Sync Test Co B", user_limit=10)
@@ -173,9 +174,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import shutil
     try:
         exit_code = main()
     finally:
-        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+        _drop_scratch_db()
     raise SystemExit(exit_code)

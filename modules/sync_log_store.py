@@ -11,15 +11,14 @@ today's live app calls that function yet (no real BaseLinker incoming-change
 API exists), so this table is normally empty in production, same as
 sync_conflicts before it.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 
 @dataclass
@@ -36,9 +35,8 @@ class SyncLogEntry:
     created_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_logs (
@@ -51,7 +49,7 @@ def _connect() -> sqlite3.Connection:
             new_value TEXT NOT NULL DEFAULT '',
             direction TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
-            created_at REAL
+            created_at DOUBLE PRECISION
         )
         """
     )

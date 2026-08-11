@@ -9,15 +9,14 @@ SQLite connection (the same convention as every other modules/*_store.py),
 so the background worker thread writing progress and the main Streamlit
 thread reading it never share a connection.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
 import json
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 STATUS_RUNNING = "running"
 STATUS_SUCCESS = "success"
@@ -40,9 +39,8 @@ class CatalogImportJob:
     finished_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS catalog_import_jobs (
@@ -54,12 +52,13 @@ def _connect() -> sqlite3.Connection:
             skipped INTEGER NOT NULL DEFAULT 0,
             error_count INTEGER NOT NULL DEFAULT 0,
             errors TEXT NOT NULL DEFAULT '[]',
-            started_at REAL,
-            finished_at REAL,
+            started_at DOUBLE PRECISION,
+            finished_at DOUBLE PRECISION,
             PRIMARY KEY (company_id, connector_name)
         )
         """
     )
+    conn.commit()
     return conn
 
 
@@ -92,10 +91,14 @@ def start_job(company_id: str, connector_name: str, total: int) -> None:
     conn = _connect()
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO catalog_import_jobs
+            """INSERT INTO catalog_import_jobs
                (company_id, connector_name, status, total, imported, skipped, error_count, errors,
                 started_at, finished_at)
-               VALUES (?, ?, ?, ?, 0, 0, 0, '[]', ?, NULL)""",
+               VALUES (?, ?, ?, ?, 0, 0, 0, '[]', ?, NULL)
+               ON CONFLICT (company_id, connector_name) DO UPDATE SET
+                   status = EXCLUDED.status, total = EXCLUDED.total, imported = EXCLUDED.imported,
+                   skipped = EXCLUDED.skipped, error_count = EXCLUDED.error_count, errors = EXCLUDED.errors,
+                   started_at = EXCLUDED.started_at, finished_at = EXCLUDED.finished_at""",
             (company_id, connector_name, STATUS_RUNNING, total, now),
         )
     conn.close()

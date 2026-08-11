@@ -25,16 +25,14 @@ explicitly reads `record.credentials["token"]` into a log line; see
 scripts/verify_tenant_isolation.py for the raw-column proof that
 encryption-at-rest actually happens regardless of that gap.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules import crypto
-from modules.inventory_store import DB_PATH
+from modules import crypto, db
 
 CATEGORY_MARKETPLACE = "marketplace"
 CATEGORY_SERVICE = "service"
@@ -79,9 +77,8 @@ class SyncLogEntry:
     created_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS company_integrations (
@@ -92,9 +89,9 @@ def _connect() -> sqlite3.Connection:
             status TEXT NOT NULL DEFAULT 'disconnected',
             credentials TEXT NOT NULL DEFAULT '',
             settings TEXT NOT NULL DEFAULT '{}',
-            created_at REAL,
-            updated_at REAL,
-            last_sync_at REAL
+            created_at DOUBLE PRECISION,
+            updated_at DOUBLE PRECISION,
+            last_sync_at DOUBLE PRECISION
         )
         """
     )
@@ -104,10 +101,9 @@ def _connect() -> sqlite3.Connection:
     )
 
     # Migrate older DBs (Phase 1/2 shipped this table without this column).
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(company_integrations)")}
+    existing_cols = db.table_columns(conn, "company_integrations")
     if "token_expires_at" not in existing_cols:
-        conn.execute("ALTER TABLE company_integrations ADD COLUMN token_expires_at REAL NOT NULL DEFAULT 0")
-        conn.commit()
+        conn.execute("ALTER TABLE company_integrations ADD COLUMN token_expires_at DOUBLE PRECISION NOT NULL DEFAULT 0")
 
     conn.execute(
         """
@@ -120,7 +116,7 @@ def _connect() -> sqlite3.Connection:
             external_id TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT '',
             error_message TEXT NOT NULL DEFAULT '',
-            created_at REAL
+            created_at DOUBLE PRECISION
         )
         """
     )
@@ -128,6 +124,7 @@ def _connect() -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_integration_sync_log_company "
         "ON integration_sync_log(company_id, integration_type)"
     )
+    conn.commit()
     return conn
 
 
@@ -193,10 +190,16 @@ def upsert_integration(integration: CompanyIntegration) -> CompanyIntegration:
 
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO company_integrations
+            """INSERT INTO company_integrations
                (id, company_id, integration_type, integration_category, status, credentials,
                 settings, created_at, updated_at, last_sync_at, token_expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, integration_type = EXCLUDED.integration_type,
+                   integration_category = EXCLUDED.integration_category, status = EXCLUDED.status,
+                   credentials = EXCLUDED.credentials, settings = EXCLUDED.settings,
+                   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at,
+                   last_sync_at = EXCLUDED.last_sync_at, token_expires_at = EXCLUDED.token_expires_at""",
             (
                 integration.id, integration.company_id, integration.integration_type,
                 integration.integration_category, integration.status,

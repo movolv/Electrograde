@@ -3,21 +3,19 @@ system. Records the key lifecycle events across products, manifests,
 BaseLinker exports, and users/sessions (see the ACTION_* constants used
 throughout app.py/modules/auth.py); no UI reads this table yet. Same
 _connect()/CREATE TABLE pattern as every other modules/*_store.py, sharing
-modules/inventory_store.py's DB_PATH.
+modules/db.py's shared connection pool.
 
 Every row is tenant-scoped via company_id — there is no cross-company
 audit view, matching the rest of this codebase's isolation model.
 """
-import sqlite3
 import time
 import uuid
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS audit_log (
@@ -28,18 +26,18 @@ def _connect() -> sqlite3.Connection:
             entity TEXT NOT NULL,
             entity_id TEXT NOT NULL DEFAULT '',
             details TEXT NOT NULL DEFAULT '',
-            created_at REAL
+            created_at DOUBLE PRECISION
         )
         """
     )
 
     # Migrate older DBs (Phase 1 shipped this table without `details`).
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    existing_cols = db.table_columns(conn, "audit_log")
     if "details" not in existing_cols:
         conn.execute("ALTER TABLE audit_log ADD COLUMN details TEXT NOT NULL DEFAULT ''")
-        conn.commit()
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_company ON audit_log(company_id)")
+    conn.commit()
     return conn
 
 

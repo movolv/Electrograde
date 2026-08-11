@@ -10,16 +10,15 @@ named, switchable mapping sets) is a pure addition, not a schema rewrite.
 
 Pure storage — nothing reads `rules` yet to actually transform outgoing
 payloads; integrations/marketplaces/baselinker/mapper.py is untouched in
-this phase. Shares the same SQLite file as modules/inventory_store.py.
+this phase. Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 DEFAULT_PROFILE = "default"
 
@@ -44,9 +43,8 @@ class FieldMapping:
     updated_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS integration_field_mappings (
@@ -55,8 +53,8 @@ def _connect() -> sqlite3.Connection:
             integration_type TEXT NOT NULL,
             profile_name TEXT NOT NULL DEFAULT 'default',
             rules TEXT NOT NULL DEFAULT '[]',
-            created_at REAL,
-            updated_at REAL
+            created_at DOUBLE PRECISION,
+            updated_at DOUBLE PRECISION
         )
         """
     )
@@ -86,6 +84,7 @@ def _connect() -> sqlite3.Connection:
                     "UPDATE integration_field_mappings SET rules = ? WHERE id = ?",
                     (json.dumps(rules), row_id),
                 )
+    conn.commit()
     return conn
 
 
@@ -134,9 +133,13 @@ def upsert_mapping(mapping: FieldMapping) -> FieldMapping:
 
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO integration_field_mappings
+            """INSERT INTO integration_field_mappings
                (id, company_id, integration_type, profile_name, rules, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, integration_type = EXCLUDED.integration_type,
+                   profile_name = EXCLUDED.profile_name, rules = EXCLUDED.rules,
+                   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at""",
             (
                 mapping.id, mapping.company_id, mapping.integration_type, mapping.profile_name,
                 json.dumps([vars(r) for r in mapping.rules]), mapping.created_at, mapping.updated_at,

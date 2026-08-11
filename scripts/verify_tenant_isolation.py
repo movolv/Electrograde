@@ -7,25 +7,26 @@ schema itself stops a future function from being added without a
 `company_id` filter. Re-run this any time a new store function is added,
 not just once.
 
-Runs against a throwaway scratch database (via the ELECTROGRADER_DB_PATH
-env var override in modules/inventory_store.py), set *before* importing any
-modules.*_store module — they each bind DB_PATH at import time, so setting
-the env var after import would silently miss them.
+Runs against a throwaway scratch PostgreSQL database (via the
+ELECTROGRADER_DATABASE_URL env var override in modules/db.py), set *before*
+importing any modules.*_store module — modules/db.py's connection pool is
+bound at first use, so setting the env var after import would silently
+miss it.
 
     python scripts/verify_tenant_isolation.py
 """
 import os
-import shutil
-import sqlite3
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_isolation_test_")
-os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "isolation_test.db")
+from scripts._pg_test_helper import make_scratch_database  # noqa: E402
 
+_DATABASE_URL, _drop_scratch_db = make_scratch_database("isolation")
+os.environ["ELECTROGRADER_DATABASE_URL"] = _DATABASE_URL
 os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
+
+import psycopg  # noqa: E402
 
 from modules import auth, auth_store, company_store, inventory_store  # noqa: E402
 from modules import manifest_store, marketplace_store, repair_store  # noqa: E402
@@ -46,7 +47,7 @@ def check(label: str, condition: bool) -> None:
 
 
 def main() -> int:
-    print(f"Scratch DB: {os.environ['ELECTROGRADER_DB_PATH']}\n")
+    print(f"Scratch DB: {_DATABASE_URL}\n")
 
     # ---------------------------------------------------------- companies --
     print("-- companies & users --")
@@ -254,7 +255,7 @@ def main() -> int:
     )
 
     print("\n-- integration_store: credentials must be encrypted at rest, not just query-filtered --")
-    raw_conn = sqlite3.connect(os.environ["ELECTROGRADER_DB_PATH"])
+    raw_conn = psycopg.connect(_DATABASE_URL)
     raw_rows = raw_conn.execute("SELECT company_id, credentials FROM company_integrations").fetchall()
     raw_conn.close()
     check("at least one company_integrations row exists to check", len(raw_rows) > 0)
@@ -290,5 +291,5 @@ if __name__ == "__main__":
     try:
         exit_code = main()
     finally:
-        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+        _drop_scratch_db()
     raise SystemExit(exit_code)

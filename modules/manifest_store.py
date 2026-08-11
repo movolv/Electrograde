@@ -14,13 +14,12 @@ history, product sync — have an obvious place to add fields/functions
 without restructuring what's here.
 """
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 STATUS_PROCESSING = "processing"
 STATUS_IMPORTED = "imported"
@@ -40,15 +39,14 @@ class ManifestBatch:
     error_message: str = ""
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS manifest_batches (
             id TEXT PRIMARY KEY,
             company_id TEXT NOT NULL DEFAULT 'default',
-            imported_at REAL,
+            imported_at DOUBLE PRECISION,
             data TEXT
         )
         """
@@ -56,6 +54,7 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_manifest_batches_company ON manifest_batches(company_id)"
     )
+    conn.commit()
     return conn
 
 
@@ -65,7 +64,9 @@ def save_batch(batch: ManifestBatch) -> None:
     conn = _connect()
     with conn:
         conn.execute(
-            "INSERT OR REPLACE INTO manifest_batches (id, company_id, imported_at, data) VALUES (?, ?, ?, ?)",
+            """INSERT INTO manifest_batches (id, company_id, imported_at, data) VALUES (?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, imported_at = EXCLUDED.imported_at, data = EXCLUDED.data""",
             (
                 batch.id,
                 batch.company_id,

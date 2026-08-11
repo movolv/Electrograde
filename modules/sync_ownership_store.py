@@ -16,16 +16,15 @@ Two tables:
   - sync_conflicts: schema-only prep for a future "the two sides disagree"
     record — nothing populates this automatically in this phase.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from integrations.field_registry import SYNC_OWNERSHIP_FIELDS
-from modules.inventory_store import DB_PATH
+from modules import db
 
 
 @dataclass
@@ -59,9 +58,8 @@ class SyncConflict:
     timestamp: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_field_config (
@@ -71,8 +69,8 @@ def _connect() -> sqlite3.Connection:
             field_name TEXT NOT NULL,
             source_system TEXT NOT NULL,
             sync_enabled INTEGER NOT NULL DEFAULT 1,
-            created_at REAL,
-            updated_at REAL
+            created_at DOUBLE PRECISION,
+            updated_at DOUBLE PRECISION
         )
         """
     )
@@ -83,10 +81,9 @@ def _connect() -> sqlite3.Connection:
 
     # Migrate older DBs (initial Sync Ownership shipped this table without
     # conflict_policy).
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(sync_field_config)")}
+    existing_cols = db.table_columns(conn, "sync_field_config")
     if "conflict_policy" not in existing_cols:
         conn.execute("ALTER TABLE sync_field_config ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT ''")
-        conn.commit()
 
     conn.execute(
         """
@@ -99,7 +96,7 @@ def _connect() -> sqlite3.Connection:
             electrograder_value TEXT NOT NULL DEFAULT '',
             baselinker_value TEXT NOT NULL DEFAULT '',
             resolution TEXT NOT NULL DEFAULT '',
-            timestamp REAL
+            timestamp DOUBLE PRECISION
         )
         """
     )
@@ -292,10 +289,15 @@ def upsert_field_config(
 
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO sync_field_config
+            """INSERT INTO sync_field_config
                (id, company_id, connector_name, field_name, source_system, sync_enabled, conflict_policy,
                 created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, connector_name = EXCLUDED.connector_name,
+                   field_name = EXCLUDED.field_name, source_system = EXCLUDED.source_system,
+                   sync_enabled = EXCLUDED.sync_enabled, conflict_policy = EXCLUDED.conflict_policy,
+                   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at""",
             (
                 record_id, company_id, connector_name, field_name, source_system, int(sync_enabled),
                 conflict_policy, created_at, now,

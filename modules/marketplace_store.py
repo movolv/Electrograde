@@ -10,14 +10,13 @@ rows here with marketplace="baselinker" — an eBay/WooCommerce connector
 writes marketplace="ebay"/"woocommerce" rows to this SAME table, no schema
 change.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 STATUS_NOT_LISTED = "not_listed"
 STATUS_LISTED = "listed"
@@ -39,9 +38,8 @@ class MarketplaceListing:
     error_message: str = ""
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS marketplace_listings (
@@ -50,9 +48,9 @@ def _connect() -> sqlite3.Connection:
             company_id TEXT NOT NULL DEFAULT 'default',
             external_listing_id TEXT,
             status TEXT NOT NULL DEFAULT 'not_listed',
-            price REAL,
+            price DOUBLE PRECISION,
             url TEXT,
-            last_synced_at REAL,
+            last_synced_at DOUBLE PRECISION,
             error_message TEXT,
             PRIMARY KEY (product_id, marketplace)
         )
@@ -64,7 +62,7 @@ def _connect() -> sqlite3.Connection:
     # column and backfill existing rows from their owning product's
     # company_id (the only source of truth available for legacy rows; a
     # listing can't outlive/precede the product it belongs to).
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(marketplace_listings)")}
+    existing_cols = db.table_columns(conn, "marketplace_listings")
     if "company_id" not in existing_cols:
         conn.execute("ALTER TABLE marketplace_listings ADD COLUMN company_id TEXT NOT NULL DEFAULT 'default'")
         conn.execute(
@@ -72,10 +70,10 @@ def _connect() -> sqlite3.Connection:
             "  SELECT products.company_id FROM products WHERE products.id = marketplace_listings.product_id"
             ") WHERE EXISTS (SELECT 1 FROM products WHERE products.id = marketplace_listings.product_id)"
         )
-        conn.commit()
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_marketplace_listings_product ON marketplace_listings(product_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_marketplace_listings_company ON marketplace_listings(company_id)")
+    conn.commit()
     return conn
 
 
@@ -99,10 +97,14 @@ def upsert_listing(listing: MarketplaceListing) -> None:
     conn = _connect()
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO marketplace_listings
+            """INSERT INTO marketplace_listings
                (product_id, marketplace, company_id, external_listing_id, status, price, url,
                 last_synced_at, error_message)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (product_id, marketplace) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, external_listing_id = EXCLUDED.external_listing_id,
+                   status = EXCLUDED.status, price = EXCLUDED.price, url = EXCLUDED.url,
+                   last_synced_at = EXCLUDED.last_synced_at, error_message = EXCLUDED.error_message""",
             (
                 listing.product_id, listing.marketplace, listing.company_id, listing.external_listing_id,
                 listing.status, listing.price, listing.url, listing.last_synced_at,

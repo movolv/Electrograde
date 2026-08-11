@@ -11,15 +11,14 @@ grained actor within that system (e.g. "user:<id>", "system:pull_sync";
 future: "system:manifest_import"/"system:grading"/"system:ai_processing"/
 "system:bulk_update").
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 SOURCE_ELECTROGRADER = "electrograder"
 SOURCE_BASELINKER = "baselinker"
@@ -38,9 +37,8 @@ class ProductChangeEntry:
     created_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS product_change_log (
@@ -52,7 +50,7 @@ def _connect() -> sqlite3.Connection:
             new_value TEXT NOT NULL DEFAULT '',
             source_system TEXT NOT NULL DEFAULT '',
             changed_by TEXT NOT NULL DEFAULT '',
-            created_at REAL
+            created_at DOUBLE PRECISION
         )
         """
     )

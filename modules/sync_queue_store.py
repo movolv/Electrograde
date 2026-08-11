@@ -6,15 +6,14 @@ module itself is untouched; this is a parallel table for field-level Push
 work, not a job-type addition to it (sync_jobs is about whole-product
 product_export jobs; sync_queue is about individual field changes).
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 STATUS_PENDING = "pending"
 STATUS_PROCESSING = "processing"
@@ -43,9 +42,8 @@ class SyncQueueItem:
     processed_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_queue (
@@ -60,10 +58,10 @@ def _connect() -> sqlite3.Connection:
             status TEXT NOT NULL DEFAULT 'pending',
             attempts INTEGER NOT NULL DEFAULT 0,
             max_attempts INTEGER NOT NULL DEFAULT 3,
-            next_attempt_at REAL NOT NULL DEFAULT 0,
+            next_attempt_at DOUBLE PRECISION NOT NULL DEFAULT 0,
             error_message TEXT NOT NULL DEFAULT '',
-            created_at REAL,
-            processed_at REAL
+            created_at DOUBLE PRECISION,
+            processed_at DOUBLE PRECISION
         )
         """
     )

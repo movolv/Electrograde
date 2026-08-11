@@ -9,15 +9,14 @@ direction, and what happened last time"), not a log. The two coexist by
 design, the same way integration_sync_log and sync_jobs already coexist
 (state machine vs. history) elsewhere in this codebase.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 from sync.status import DIRECTION_EXPORT, STATUS_PENDING
 
 
@@ -36,9 +35,8 @@ class SyncRecordRow:
     updated_at: float = 0.0
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_records (
@@ -48,11 +46,11 @@ def _connect() -> sqlite3.Connection:
             connector_name TEXT NOT NULL,
             direction TEXT NOT NULL DEFAULT 'export',
             sync_status TEXT NOT NULL DEFAULT 'pending',
-            last_sync_time REAL NOT NULL DEFAULT 0,
+            last_sync_time DOUBLE PRECISION NOT NULL DEFAULT 0,
             error_message TEXT NOT NULL DEFAULT '',
             external_id TEXT NOT NULL DEFAULT '',
-            created_at REAL,
-            updated_at REAL
+            created_at DOUBLE PRECISION,
+            updated_at DOUBLE PRECISION
         )
         """
     )
@@ -61,6 +59,7 @@ def _connect() -> sqlite3.Connection:
         "ON sync_records(company_id, product_id, connector_name, direction)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_records_company ON sync_records(company_id, product_id)")
+    conn.commit()
     return conn
 
 
@@ -126,10 +125,16 @@ def upsert_record(record) -> None:
 
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO sync_records
+            """INSERT INTO sync_records
                (id, company_id, product_id, connector_name, direction, sync_status,
                 last_sync_time, error_message, external_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   company_id = EXCLUDED.company_id, product_id = EXCLUDED.product_id,
+                   connector_name = EXCLUDED.connector_name, direction = EXCLUDED.direction,
+                   sync_status = EXCLUDED.sync_status, last_sync_time = EXCLUDED.last_sync_time,
+                   error_message = EXCLUDED.error_message, external_id = EXCLUDED.external_id,
+                   created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at""",
             (
                 record_id, record.company_id, record.product_id, record.connector_name, record.direction,
                 record.sync_status, record.last_sync_time, record.error_message, record.external_id,

@@ -3,15 +3,14 @@ repaired more than once over its life. Deliberately its own table rather
 than a field on Product (see modules/models.py), because this is a genuine
 one-to-many relationship.
 
-Shares the same SQLite file as modules/inventory_store.py.
+Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
 """
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 
 @dataclass
@@ -25,18 +24,17 @@ class RepairEvent:
     technician: str = ""
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS repair_events (
             id TEXT PRIMARY KEY,
             product_id TEXT NOT NULL,
             company_id TEXT NOT NULL DEFAULT 'default',
-            occurred_at REAL,
+            occurred_at DOUBLE PRECISION,
             description TEXT,
-            cost REAL,
+            cost DOUBLE PRECISION,
             technician TEXT
         )
         """
@@ -46,7 +44,7 @@ def _connect() -> sqlite3.Connection:
     # ALTER TABLE + backfill pattern as modules/inventory_store.py and
     # modules/marketplace_store.py, backfilling from the owning product's
     # company_id (the only source of truth available for legacy rows).
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(repair_events)")}
+    existing_cols = db.table_columns(conn, "repair_events")
     if "company_id" not in existing_cols:
         conn.execute("ALTER TABLE repair_events ADD COLUMN company_id TEXT NOT NULL DEFAULT 'default'")
         conn.execute(
@@ -54,10 +52,10 @@ def _connect() -> sqlite3.Connection:
             "  SELECT products.company_id FROM products WHERE products.id = repair_events.product_id"
             ") WHERE EXISTS (SELECT 1 FROM products WHERE products.id = repair_events.product_id)"
         )
-        conn.commit()
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_repair_events_product ON repair_events(product_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_repair_events_company ON repair_events(company_id)")
+    conn.commit()
     return conn
 
 
@@ -66,9 +64,13 @@ def add_repair_event(event: RepairEvent) -> None:
     conn = _connect()
     with conn:
         conn.execute(
-            """INSERT OR REPLACE INTO repair_events
+            """INSERT INTO repair_events
                (id, product_id, company_id, occurred_at, description, cost, technician)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET
+                   product_id = EXCLUDED.product_id, company_id = EXCLUDED.company_id,
+                   occurred_at = EXCLUDED.occurred_at, description = EXCLUDED.description,
+                   cost = EXCLUDED.cost, technician = EXCLUDED.technician""",
             (event.id, event.product_id, event.company_id, event.occurred_at,
              event.description, event.cost, event.technician),
         )

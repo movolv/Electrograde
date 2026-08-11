@@ -1,6 +1,6 @@
-"""SQLite-backed persistence for users and sessions. Same _connect()/CREATE
-TABLE pattern as every other modules/*_store.py, sharing
-modules/inventory_store.py's DB_PATH. Pure data access — password hashing,
+"""PostgreSQL-backed persistence for users and sessions. Same _connect()/
+CREATE TABLE pattern as every other modules/*_store.py, sharing
+modules/db.py's shared connection pool. Pure data access — password hashing,
 login, and session-token semantics live in modules/auth.py, which is the
 only module that should import this one directly for auth purposes.
 
@@ -12,13 +12,12 @@ look a user up by email alone without knowing which company first — see
 get_users_by_email() and modules/auth.py's verify_login().
 """
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 
-from modules.inventory_store import DB_PATH
+from modules import db
 
 
 @dataclass
@@ -50,16 +49,15 @@ class SessionRow:
     last_seen_at: float
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _connect():
+    conn = db.connect()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             company_id TEXT NOT NULL,
             email TEXT NOT NULL,
-            created_at REAL,
+            created_at DOUBLE PRECISION,
             data TEXT
         )
         """
@@ -75,19 +73,20 @@ def _connect() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
-            created_at REAL,
-            expires_at REAL NOT NULL,
-            last_seen_at REAL
+            created_at DOUBLE PRECISION,
+            expires_at DOUBLE PRECISION NOT NULL,
+            last_seen_at DOUBLE PRECISION
         )
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
+    conn.commit()
     return conn
 
 
 def create_user(user: User) -> None:
-    """Raises sqlite3.IntegrityError on a duplicate (company_id, email) —
+    """Raises psycopg.errors.UniqueViolation on a duplicate (company_id, email) —
     modules/auth.py.register_user() is expected to check first and raise a
     friendlier ValueError, but the DB-level constraint is the real backstop."""
     conn = _connect()

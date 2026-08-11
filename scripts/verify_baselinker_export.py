@@ -11,26 +11,26 @@ export payload) is backward-compatible and correct:
   - connecting a brand-new integration seeds a sensible default
     configuration automatically.
 
-Runs against a throwaway scratch database (ELECTROGRADER_DB_PATH), set
-*before* importing any modules.*_store / integrations module — same
+Runs against a throwaway scratch PostgreSQL database (ELECTROGRADER_DATABASE_URL),
+set *before* importing any modules.*_store / integrations module — same
 convention as scripts/verify_tenant_isolation.py.
 
     python scripts/verify_baselinker_export.py
 """
 import os
-import shutil
-import sqlite3
 import sys
-import tempfile
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_SCRATCH_DIR = tempfile.mkdtemp(prefix="electrograder_baselinker_export_test_")
-os.environ["ELECTROGRADER_DB_PATH"] = os.path.join(_SCRATCH_DIR, "test.db")
+from scripts._pg_test_helper import make_scratch_database  # noqa: E402
+
+_DATABASE_URL, _drop_scratch_db = make_scratch_database("baselinker_export")
+os.environ["ELECTROGRADER_DATABASE_URL"] = _DATABASE_URL
 os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
 
-from modules import company_store, sync_rules_store  # noqa: E402
+import psycopg  # noqa: E402
+
+from modules import company_store, db, sync_rules_store  # noqa: E402
 from integrations import manager as integration_manager  # noqa: E402
 from integrations.marketplaces.baselinker import mapper  # noqa: E402
 from integrations.marketplaces.baselinker.client import BaselinkerConnector  # noqa: E402
@@ -70,7 +70,7 @@ _CONFIG = {"inventory_id": 1, "category_id": 2, "tax_rate": 23, "price_group_id"
 
 
 def main() -> int:
-    print(f"Scratch DB: {os.environ['ELECTROGRADER_DB_PATH']}\n")
+    print(f"Scratch DB: {_DATABASE_URL}\n")
 
     company_a = company_store.create_company("Export Test Co A", user_limit=10)
     company_b = company_store.create_company("Export Test Co B", user_limit=10)
@@ -116,16 +116,15 @@ def main() -> int:
 
     # ------------------------------------------------------- migration backfill --
     print("\n-- migration backfill: pre-Phase-2 row gets configured=1 retroactively --")
-    # sync_rules_store.DB_PATH is bound at import time (from
-    # modules.inventory_store.DB_PATH) — reassigning the env var mid-script
-    # would NOT redirect it, so this test monkeypatches the module-level
-    # DB_PATH directly to point at a separate scratch DB that pre-dates the
-    # fields_send_configured column, proving the one-time ALTER+backfill
-    # runs correctly on first _connect() against that older schema.
-    backfill_dir = tempfile.mkdtemp(prefix="electrograder_backfill_test_")
-    backfill_db = os.path.join(backfill_dir, "test.db")
-    conn = sqlite3.connect(backfill_db)
-    conn.execute(
+    # modules/db.py's DATABASE_URL is a module-level singleton (one shared
+    # pool for the whole process) — there's no more per-module DB_PATH to
+    # monkeypatch, so this test instead points the WHOLE db module at a
+    # second scratch database that pre-dates the fields_send_configured
+    # column, proving the one-time ALTER+backfill runs correctly on first
+    # _connect() against that older schema, then points it back.
+    backfill_url, backfill_drop = make_scratch_database("baselinker_export_backfill")
+    backfill_admin = psycopg.connect(backfill_url, autocommit=True)
+    backfill_admin.execute(
         """CREATE TABLE integration_sync_rules (
             id TEXT PRIMARY KEY, company_id TEXT NOT NULL, integration_type TEXT NOT NULL,
             frequency TEXT NOT NULL DEFAULT 'manual', direction TEXT NOT NULL DEFAULT 'push',
@@ -135,24 +134,25 @@ def main() -> int:
             last_enqueued_at REAL NOT NULL DEFAULT 0, created_at REAL, updated_at REAL
         )"""
     )
-    conn.execute(
+    backfill_admin.execute(
         "INSERT INTO integration_sync_rules (id, company_id, integration_type, fields_send, created_at, updated_at) "
         "VALUES ('old1', 'oldco', 'baselinker', '[\"name\",\"price\"]', 1.0, 1.0)"
     )
-    conn.execute(
+    backfill_admin.execute(
         "INSERT INTO integration_sync_rules (id, company_id, integration_type, fields_send, created_at, updated_at) "
         "VALUES ('old2', 'oldco', 'deepl', '[]', 1.0, 1.0)"
     )
-    conn.commit()
-    conn.close()
+    backfill_admin.close()
 
-    _original_db_path = sync_rules_store.DB_PATH
-    sync_rules_store.DB_PATH = Path(backfill_db)
+    _original_database_url = db.DATABASE_URL
+    db.close_pool()
+    db.DATABASE_URL = backfill_url
     try:
         old_rule_nonempty = sync_rules_store.get_rule("oldco", "baselinker")
         old_rule_empty = sync_rules_store.get_rule("oldco", "deepl")
     finally:
-        sync_rules_store.DB_PATH = _original_db_path
+        db.close_pool()
+        db.DATABASE_URL = _original_database_url
     check(
         "pre-existing row with non-empty fields_send backfilled to configured=True",
         old_rule_nonempty is not None and old_rule_nonempty.fields_send_configured is True,
@@ -161,7 +161,7 @@ def main() -> int:
         "pre-existing row with empty fields_send stays configured=False",
         old_rule_empty is not None and old_rule_empty.fields_send_configured is False,
     )
-    shutil.rmtree(backfill_dir, ignore_errors=True)
+    backfill_drop()
 
     # ------------------------------------------------------------- default config --
     print("\n-- default configuration seeded on first connect() --")
@@ -187,5 +187,5 @@ if __name__ == "__main__":
     try:
         exit_code = main()
     finally:
-        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+        _drop_scratch_db()
     raise SystemExit(exit_code)
