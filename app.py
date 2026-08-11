@@ -750,6 +750,10 @@ def _init_state():
         "rex_current_page_ids": [],     # ids on the currently-loaded page only, for Previous/Next within it
         "rex_export_requested": False,  # set inside the fragment, consumed outside it to open the dialog
         "rex_delete_requested": False,  # same pattern, opens the bulk-delete confirmation dialog
+        "rex_bulk_edit_requested": False,  # same pattern, opens the Bulk Edit dialog
+        "rex_status_requested": False,     # same pattern, opens the Change Status dialog
+        "rex_bulkedit_preview": None,      # {"field","action","raw_value","rows"} from the last Preview click
+        "rex_ops_popover_seq": 0,          # bumped to force the Operations popover closed when a dialog opens
         "rex_clear_seq": 0,             # bumped to tell the grid to deselect all (no remount needed)
         "rex_focus_id": "",             # product id the grid should scroll to/highlight on next render
         "rex_last_esc_value": None,     # last value seen from esc_listener(), to detect a new Escape press
@@ -1688,6 +1692,50 @@ elif page == "🗂️ Product List":
         "written_off": "❌ Written off",
     }
     BULK_STATUS_OPTIONS = ["draft", "in_progress", "completed"]
+    # Only fields that already exist on Product and make sense to overwrite
+    # in bulk (never SKU/barcode/photos/AI-generated/per-product text —
+    # those are always product-specific, never mass-edited).
+    BULK_EDIT_FIELDS = {
+        "price": "Price",
+        "category": "Category",
+        "brand": "Brand",
+        "product_condition": "Grade / Condition",
+        "quantity": "Quantity",
+        "location": "Warehouse / Shelf",
+    }
+    PRICE_ACTIONS = {
+        "set": "Set price", "inc_amount": "Increase by €", "dec_amount": "Decrease by €",
+        "inc_pct": "Increase by %", "dec_pct": "Decrease by %",
+    }
+    QUANTITY_ACTIONS = {"set": "Set quantity", "inc_amount": "Increase by", "dec_amount": "Decrease by"}
+
+    def _bulk_edit_compute(field: str, action: str, raw_value, current):
+        """Pure — no side effects. Returns (new_value, error_or_None). Both
+        the Preview table and the Apply loop call this exact function, so
+        they can never disagree with each other."""
+        if field == "price":
+            try:
+                v = float(raw_value)
+            except (TypeError, ValueError):
+                return None, "Invalid number"
+            new = {
+                "set": v, "inc_amount": current + v, "dec_amount": current - v,
+                "inc_pct": current * (1 + v / 100), "dec_pct": current * (1 - v / 100),
+            }[action]
+            new = round(new, 2)
+            return (new, None) if new > 0 else (None, "Price must stay above €0")
+        if field == "quantity":
+            try:
+                v = int(raw_value)
+            except (TypeError, ValueError):
+                return None, "Invalid number"
+            new = {"set": v, "inc_amount": current + v, "dec_amount": current - v}[action]
+            return (new, None) if new >= 1 else (None, "Quantity must stay at least 1")
+        if field == "product_condition":
+            return raw_value, None
+        # category / brand / location: free-text "set" only
+        v = (raw_value or "").strip()
+        return (v, None) if v else (None, "Value cannot be empty")
     REX_PAGE_SIZE = 50
     # Server-side-paginated query (inventory_store.list_products_paginated) —
     # unlike the old two pages' plain list_products(company_id) + Python
@@ -1822,6 +1870,135 @@ elif page == "🗂️ Product List":
             st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
             st.success(f"Deleted {len(selected_products)} product(s).")
             if st.button("Close", use_container_width=True, key="rex_delete_done"):
+                st.rerun()
+
+    @st.dialog("Bulk Edit")
+    def _confirm_bulk_edit_dialog(selected_products):
+        st.write(f"**Bulk Edit — {len(selected_products)} selected products**")
+        field = st.selectbox(
+            "Field to edit", list(BULK_EDIT_FIELDS), format_func=lambda k: BULK_EDIT_FIELDS[k],
+            key="rex_bulkedit_field",
+        )
+
+        # Each control is keyed by field, so switching the field dropdown
+        # always lands on a fresh widget (no stale value carried over from
+        # a previous field) without any manual reset code.
+        if field in ("price", "quantity"):
+            actions = PRICE_ACTIONS if field == "price" else QUANTITY_ACTIONS
+            action = st.selectbox(
+                "Action", list(actions), format_func=lambda k: actions[k],
+                key=f"rex_bulkedit_action_{field}",
+            )
+            raw_value = st.number_input(
+                "Value", step=0.5 if field == "price" else 1,
+                key=f"rex_bulkedit_value_{field}",
+            )
+        elif field == "product_condition":
+            action = "set"
+            raw_value = st.selectbox("New Grade", CONDITION_OPTIONS, key=f"rex_bulkedit_value_{field}")
+        else:  # category / brand / location
+            action = "set"
+            raw_value = st.text_input("New value", key=f"rex_bulkedit_value_{field}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Cancel", use_container_width=True, key="rex_bulkedit_cancel"):
+                st.session_state.rex_bulkedit_preview = None
+                st.rerun()
+        with col2:
+            if st.button("Preview Changes", type="primary", use_container_width=True, key="rex_bulkedit_preview_btn"):
+                rows = []
+                for p in selected_products:
+                    current = getattr(p, field)
+                    new_value, error = _bulk_edit_compute(field, action, raw_value, current)
+                    rows.append({
+                        "product_id": p.id, "sku": p.sku, "name": p.name,
+                        "current": current, "new_value": new_value, "error": error,
+                    })
+                st.session_state.rex_bulkedit_preview = {
+                    "field": field, "action": action, "raw_value": raw_value, "rows": rows,
+                }
+                st.rerun()
+
+        preview = st.session_state.get("rex_bulkedit_preview")
+        # Only trust a preview that matches exactly what's currently
+        # selected above — if the user tweaked the field/action/value after
+        # previewing, the stale preview is hidden until they preview again,
+        # so Apply can never run against an out-of-date computation.
+        if preview and preview["field"] == field and preview["action"] == action and preview["raw_value"] == raw_value:
+            n_errors = sum(1 for r in preview["rows"] if r["error"])
+            st.dataframe(
+                [
+                    {
+                        "Product": r["sku"] or r["name"] or r["product_id"],
+                        "Current": r["current"],
+                        "New": r["new_value"] if not r["error"] else f"⚠ {r['error']}",
+                    }
+                    for r in preview["rows"]
+                ],
+                hide_index=True, use_container_width=True,
+            )
+            if n_errors:
+                st.caption(f"{n_errors} product(s) will be skipped due to the errors shown above.")
+
+            acol1, acol2 = st.columns(2)
+            with acol1:
+                if st.button("Cancel", use_container_width=True, key="rex_bulkedit_preview_cancel"):
+                    st.session_state.rex_bulkedit_preview = None
+                    st.rerun()
+            with acol2:
+                apply_clicked = st.button(
+                    "Apply Changes", type="primary", use_container_width=True, key="rex_bulkedit_apply",
+                )
+            if apply_clicked:
+                by_id = {p.id: p for p in selected_products}
+                ok_count, fail_count = 0, 0
+                for r in preview["rows"]:
+                    if r["error"]:
+                        fail_count += 1
+                        continue
+                    p = by_id[r["product_id"]]
+                    old_value = getattr(p, field)
+                    setattr(p, field, r["new_value"])
+                    if field != "location":
+                        _record_sync_field_changes(p, {field: (old_value, r["new_value"])}, current_user.id)
+                    inventory_store.save_product(p)
+                    audit_store.log_audit(
+                        p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
+                        f"{field} -> {r['new_value']} (bulk edit)",
+                    )
+                    ok_count += 1
+                st.session_state.rex_bulkedit_preview = None
+                st.session_state.rex_clear_seq += 1
+                if fail_count:
+                    st.success(f"{ok_count} products updated successfully. {fail_count} products could not be updated.")
+                else:
+                    st.success(f"Successfully updated {ok_count} products.")
+                if st.button("Close", use_container_width=True, key="rex_bulkedit_done"):
+                    st.rerun()
+
+    @st.dialog("Change Status")
+    def _confirm_change_status_dialog(selected_products):
+        st.write(f"Change status for **{len(selected_products)}** selected products")
+        new_status = st.selectbox("New Status", BULK_STATUS_OPTIONS, key="rex_status_value")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Cancel", use_container_width=True, key="rex_status_cancel"):
+                st.rerun()
+        with col2:
+            confirmed = st.button(
+                "Apply Status Change", type="primary", use_container_width=True, key="rex_status_confirm"
+            )
+        if confirmed:
+            for p in selected_products:
+                p.status = new_status
+                inventory_store.save_product(p)
+                audit_store.log_audit(
+                    p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, f"status -> {new_status}",
+                )
+            st.session_state.rex_clear_seq += 1
+            st.success(f"Successfully changed status for {len(selected_products)} products.")
+            if st.button("Close", use_container_width=True, key="rex_status_done"):
                 st.rerun()
 
     @st.dialog("Photo", width="large")
@@ -2591,7 +2768,16 @@ elif page == "🗂️ Product List":
         # two to the far side of the (wide-layout) table.
         top2, top3, top1 = st.columns([1, 1, 3])
         with top2:
-            with st.popover("⚙️ Operations", disabled=n_selected == 0, use_container_width=True):
+            # key includes rex_ops_popover_seq: st.popover has no direct
+            # "close programmatically" API, but a popover keeps its open/
+            # closed UI state tied to its key across reruns — remounting it
+            # under a new key (bumped by every button below that opens a
+            # dialog) forces a fresh, closed popover instead of it staying
+            # open behind the dialog that was just triggered.
+            with st.popover(
+                "⚙️ Operations", disabled=n_selected == 0, use_container_width=True,
+                key=f"rex_ops_popover_{st.session_state.rex_ops_popover_seq}",
+            ):
                 # Flat, borderless look for this list of actions (Export,
                 # Delete Products, more to come) — no button box around
                 # each one, just left-aligned text with a subtle hover
@@ -2609,51 +2795,70 @@ elif page == "🗂️ Product List":
                         justify-content: flex-start !important;
                         padding: 6px 4px !important;
                     }
+                    /* text-align/justify-content on the <button> alone
+                    doesn't left-align its label — Streamlit wraps the
+                    label in its own centered flex div/p inside the
+                    button, which needs the same override or it keeps
+                    winning. */
+                    div[class*="st-key-rex_op_"] button > div,
+                    div[class*="st-key-rex_op_"] button p {
+                        justify-content: flex-start !important;
+                        text-align: left !important;
+                        width: 100% !important;
+                    }
                     div[class*="st-key-rex_op_"] button:hover:not(:disabled) {
                         background: rgba(128, 128, 128, 0.15) !important;
                         border-radius: 6px !important;
+                    }
+                    /* The popover PANEL itself (not just the buttons in
+                    it) still has Streamlit's default bordered/shadowed
+                    box look. It renders through a React portal, so it's
+                    not a DOM descendant of anything keyed above — matched
+                    instead by its aria-label, which Streamlit sets to the
+                    same text as the "⚙️ Operations" trigger, so this only
+                    ever targets this one popover (not "⬇️ Download" or any
+                    other). Result: a plain floating list of words, no box. */
+                    div[data-testid="stPopoverBody"][aria-label="⚙️ Operations"] {
+                        border: none !important;
+                        box-shadow: none !important;
+                        border-radius: 0 !important;
+                    }
+                    /* Uniform gap between every word in the list — the
+                    st.divider() lines previously used to separate groups
+                    added their own (larger, inconsistent) margin, making
+                    some pairs look closer together than others. */
+                    div[class*="st-key-rex_op_"] {
+                        margin: 2px 0 !important;
                     }
                     </style>
                     """,
                     unsafe_allow_html=True,
                 )
                 can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
+                if st.button("✏️ Bulk Edit", use_container_width=True, key="rex_op_bulk_edit"):
+                    st.session_state.rex_bulk_edit_requested = True
+                    st.session_state.rex_ops_popover_seq += 1
+                    st.rerun()
+                if st.button("🔄 Change Status", use_container_width=True, key="rex_op_change_status"):
+                    st.session_state.rex_status_requested = True
+                    st.session_state.rex_ops_popover_seq += 1
+                    st.rerun()
                 if st.button(
                     "📤 Export", disabled=not can_export, use_container_width=True,
                     key="rex_op_export",
                 ):
                     st.session_state.rex_export_requested = True
+                    st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
                 if st.button(
                     "🗑️ Delete Products", disabled=not can_export, use_container_width=True,
                     key="rex_op_delete",
                 ):
                     st.session_state.rex_delete_requested = True
+                    st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
                 if not can_export:
                     st.caption("Only Admins and Reviewers can export or delete.")
-                st.divider()
-                st.markdown("**Change status**")
-                cs1, cs2 = st.columns([2, 1])
-                with cs1:
-                    new_bulk_status = st.selectbox(
-                        "New status", BULK_STATUS_OPTIONS,
-                        key="rex_bulk_status_value", label_visibility="collapsed",
-                    )
-                with cs2:
-                    if st.button("Apply", key="rex_bulk_status_apply", use_container_width=True):
-                        for prod in _get_selected_products():
-                            prod.status = new_bulk_status
-                            inventory_store.save_product(prod)
-                            audit_store.log_audit(
-                                current_user.company_id, current_user.id, "UPDATE_PRODUCT", "product",
-                                prod.id, f"status -> {new_bulk_status}",
-                            )
-                        st.success(f"Updated {n_selected} product(s) to '{new_bulk_status}'.")
-                        st.session_state.rex_clear_seq += 1
-                        st.session_state["_rex_skip_table_merge"] = True
-                        st.rerun()
-                st.divider()
                 if st.button("✖ Clear Selection", use_container_width=True, key="rex_clear_selection"):
                     st.session_state.rex_selected_ids = set()
                     st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
@@ -2791,6 +2996,19 @@ elif page == "🗂️ Product List":
                 selected_products = _get_selected_products()
                 if selected_products:
                     _confirm_delete_dialog(selected_products)
+
+            if st.session_state.rex_bulk_edit_requested:
+                st.session_state.rex_bulk_edit_requested = False
+                st.session_state.rex_bulkedit_preview = None  # start each open clean
+                selected_products = _get_selected_products()
+                if selected_products:
+                    _confirm_bulk_edit_dialog(selected_products)
+
+            if st.session_state.rex_status_requested:
+                st.session_state.rex_status_requested = False
+                selected_products = _get_selected_products()
+                if selected_products:
+                    _confirm_change_status_dialog(selected_products)
 
         else:
             # -------------------------------------------------------- CARD VIEW --
