@@ -66,6 +66,7 @@ class Product:
     name: str = ""
     category: str = ""
     condition_type: str = ""  # "New" | "Used"
+    color: str = ""  # e.g. "Black" — determined from photos by vision_grading.grade_item()
     product_condition: str = ""  # "A" | "B" | "C" | "D" — quality grade (distinct from condition_type above)
     product_condition_confidence: int = 0
     product_condition_reasoning: str = ""

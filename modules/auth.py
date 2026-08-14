@@ -15,7 +15,7 @@ from typing import Optional
 
 import bcrypt
 
-from modules import audit_store, company_store, auth_store
+from modules import audit_store, company_store, auth_store, platform_admin_store
 from modules.auth_store import User
 
 ROLE_ADMIN = "admin"
@@ -89,6 +89,8 @@ def verify_login(email: str, password: str) -> Optional[User]:
             continue
         if not _company_is_active(user.company_id):
             continue
+        user.last_login_at = time.time()
+        auth_store.update_user(user)
         audit_store.log_audit(user.company_id, user.id, "LOGIN", "user", user.id)
         return user
     return None
@@ -135,3 +137,42 @@ def require_role(user: User, *allowed_roles: str) -> None:
     st.error + st.stop(), typically)."""
     if user.role not in allowed_roles:
         raise PermissionError(f"Role {user.role!r} is not permitted here (need one of {allowed_roles!r}).")
+
+
+# ---------------------------------------------------------------------------
+# Platform layer — Super Admin authorization. Deliberately layered ON TOP of
+# everything above rather than woven into it: being a Super Admin is an
+# independent fact about a User (a row in platform_admin_store), never a
+# company-scoped `role` value, and never bypasses company_id tenant scoping
+# anywhere else in the codebase. See scripts/superadmin_cli.py for the only
+# sanctioned way to create/recover the first one, and app.py's "🏢
+# Companies" page for the only UI surface that checks this.
+# ---------------------------------------------------------------------------
+
+def is_super_admin(user_id: str) -> bool:
+    admin = platform_admin_store.get_by_user_id(user_id)
+    return admin is not None and admin.is_active
+
+
+def require_super_admin(user: User) -> None:
+    """Raises PermissionError if the user isn't an active platform Super
+    Admin — same calling convention as require_role() above."""
+    if not is_super_admin(user.id):
+        raise PermissionError("Super Admin access required.")
+
+
+def is_pending_company_login(email: str, password: str) -> bool:
+    """For a nicer login-page message only — tells the caller whether a
+    failed login was specifically because the account's company is still
+    PENDING approval (rather than a wrong password), WITHOUT changing
+    verify_login()'s own behavior/return contract at all. Deliberately
+    duplicates verify_login()'s password-check loop rather than modifying
+    it — this is a read-only, UI-messaging concern, not an auth decision."""
+    email = email.strip().lower()
+    for user in auth_store.get_users_by_email(email):
+        if not user.active or not verify_password(password, user.password_hash):
+            continue
+        company = company_store.get_company(user.company_id)
+        if company is not None and company.status == company_store.STATUS_PENDING:
+            return True
+    return False

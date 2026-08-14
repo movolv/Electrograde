@@ -31,6 +31,7 @@ class GradingResult:
     product_condition_confidence: int = 0
     product_condition_reasoning: str = ""
     condition_type: str = ""  # "New" | "Used"
+    color: str = ""  # e.g. "Black" — the item's primary/dominant color as seen in the photos
     defects: List[str] = field(default_factory=list)
     missing_components: List[str] = field(default_factory=list)
     functional_checklist: List[str] = field(default_factory=list)
@@ -65,6 +66,10 @@ SYSTEM_PROMPT = (
     '"grade_confidence": int (0-100), '
     '"grade_reasoning": str (1-3 sentences explaining the grade), '
     '"condition_type": "New"|"Used", '
+    '"color": str (the item\'s primary/dominant color as seen in the photos, '
+    'e.g. "Black", "White", "Silver" — a short, common color name, not a '
+    'marketing name; empty string if genuinely not determinable from the '
+    'photos), '
     '"defects": [str, ...] (each a specific visible flaw, e.g. '
     '"1cm scratch on top-left corner of lid"), '
     '"missing_components": [str, ...] (only list items you can positively '
@@ -165,6 +170,7 @@ def grade_item(
         product_condition_confidence=condition_confidence,
         product_condition_reasoning=data.get("grade_reasoning", ""),
         condition_type=str(data.get("condition_type", "")).strip(),
+        color=str(data.get("color", "")).strip(),
         defects=list(data.get("defects", []) or []),
         missing_components=list(data.get("missing_components", []) or []),
         functional_checklist=list(data.get("functional_checklist", []) or []),

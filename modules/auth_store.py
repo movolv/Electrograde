@@ -30,6 +30,8 @@ class User:
     role: str = "employee"  # "admin" | "employee" | "reviewer"
     active: bool = True
     created_at: float = field(default_factory=time.time)
+    updated_at: float = 0.0
+    last_login_at: float = 0.0  # stamped by auth.verify_login() on success
 
     def to_dict(self) -> dict:
         return asdict(self)

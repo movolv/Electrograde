@@ -11,8 +11,9 @@ not ground truth — the result here is later cross-checked against the
 actual photographed item in modules/vision_grading.py. If nothing usable is
 found, the caller should fall back to manual entry in the UI.
 """
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Tuple
 
 from modules import ai_client, web_search
 
@@ -26,6 +27,60 @@ class SpecResult:
     spec_summary: str = ""
     box_contents: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SpecPreview:
+    """Deliberately a SEPARATE type from SpecResult — a quick_guess() value
+    is never written to st.session_state.spec_result or any product.* field,
+    only shown in the UI as an unconfirmed candidate while lookup() (the
+    unchanged, AI-backed "deep" path) runs in the background."""
+    product_name_guess: str = ""
+    brand_guess: str = ""
+    model_guess: str = ""
+
+
+def quick_guess(hits: list) -> SpecPreview:
+    """LEVEL 1: no Claude, no page fetch — a rough heuristic straight off
+    the top web_search.search() result's title, for an instant "candidate
+    found (unconfirmed)" UI preview only. lookup() below remains the only
+    function whose result is ever actually kept."""
+    if not hits:
+        return SpecPreview()
+    title = (hits[0].get("title") or "").strip()
+    if not title:
+        return SpecPreview()
+    words = title.split()
+    brand_guess = words[0] if words else ""
+    # First subsequent word containing a digit is usually a model number
+    # (e.g. "Bosch MS8CM6110 Hand Blender" -> "MS8CM6110") — rough, but this
+    # is preview-only and never written to a canonical field.
+    model_guess = next((w for w in words[1:] if any(ch.isdigit() for ch in w)), "")
+    return SpecPreview(product_name_guess=title, brand_guess=brand_guess, model_guess=model_guess)
+
+
+def _gather_query_snippets(query: str, max_results: int = 3) -> Tuple[List[str], List[str]]:
+    """One query's worth of search + page-fetch, gathered the exact same
+    way lookup() always has (same SOURCE/PAGE CONTENT formatting, same
+    "only count a source if its page actually returned text" rule) — pulled
+    out so lookup() can run this once per query CONCURRENTLY instead of one
+    query fully finishing before the next starts."""
+    raw: List[str] = []
+    sources: List[str] = []
+    hits = web_search.search(query, max_results=max_results)
+    urls = [h.get("href") or h.get("link") for h in hits if (h.get("href") or h.get("link"))]
+    pages = web_search.fetch_pages_parallel(urls) if urls else {}
+    for hit in hits:
+        url = hit.get("href") or hit.get("link")
+        title = hit.get("title", "")
+        body = hit.get("body", "")
+        raw.append(f"SOURCE: {title}\n{body}")
+        if url:
+            page_text = pages.get(url, "")
+            if page_text:
+                raw.append(f"PAGE CONTENT ({url}):\n{page_text}")
+                sources.append(url)
+    return raw, sources
 
 
 def lookup(
@@ -49,19 +104,18 @@ def lookup(
         f"{primary} what's in the box",
     ]
 
+    # The two queries are independent (different search terms, no data
+    # dependency between them) — run them concurrently, and fetch each
+    # query's hit pages concurrently too (fetch_pages_parallel), instead of
+    # one search-then-fetch-each-page-in-turn chain. Same queries, same
+    # max_results, same page-fetch behavior/content as before — this only
+    # changes the ORDER work happens in, not what's gathered.
     raw_snippets = []
     sources = []
-    for q in queries:
-        for hit in web_search.search(q, max_results=3):
-            url = hit.get("href") or hit.get("link")
-            title = hit.get("title", "")
-            body = hit.get("body", "")
-            raw_snippets.append(f"SOURCE: {title}\n{body}")
-            if url:
-                page_text = web_search.fetch_page_text(url)
-                if page_text:
-                    raw_snippets.append(f"PAGE CONTENT ({url}):\n{page_text}")
-                    sources.append(url)
+    with ThreadPoolExecutor(max_workers=len(queries)) as executor:
+        for raw, srcs in executor.map(_gather_query_snippets, queries):
+            raw_snippets.extend(raw)
+            sources.extend(srcs)
 
     if not raw_snippets:
         return SpecResult(sources=[])

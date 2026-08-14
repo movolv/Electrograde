@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import streamlit as st
@@ -36,9 +37,11 @@ from modules import (
     image_pipeline,
     integration_store,
     inventory_store,
+    lookup_cache_store,
     manifest_import,
     manifest_store,
     marketplace_store,
+    platform_admin_store,
     pricing,
     product_change_log_store,
     pwa,
@@ -50,6 +53,7 @@ from modules import (
     sync_queue_store,
     sync_rules_store,
     vision_grading,
+    web_search,
 )
 from integrations import field_registry, scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
@@ -375,6 +379,19 @@ def _import_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 
 @st.cache_resource
+def _lookup_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Shared background worker pool for Step 3's deep spec/identifier
+    lookup (see _deep_enrich below) — same st.cache_resource singleton
+    pattern as _photo_executor()/_import_executor(). This is I/O-bound work
+    (waiting on DDGS/page fetches/the Claude API, not CPU), so — unlike
+    _photo_executor — more workers than CPU cores doesn't cause contention;
+    sized for many companies' "Fetch specs" clicks landing here concurrently
+    at the 100-company scale target, same reasoning as _import_executor's
+    4 (shared across every company, not just one)."""
+    return concurrent.futures.ThreadPoolExecutor(max_workers=16)
+
+
+@st.cache_resource
 def ensure_scheduler_running() -> threading.Thread:
     """Starts the one background sync-scheduler thread for this process —
     st.cache_resource guarantees exactly one Thread ever gets created no
@@ -540,6 +557,347 @@ def _render_photo_gallery(product):
             st.rerun()
 
 
+# --------------------------------------------- Step 3 Fast-First lookup --
+#
+# Level 0: lookup_cache_store — instant, cross-tenant cache hit.
+# Level 1: _run_fast_layer — synchronous, ~1-3s target. Deterministic
+#          (checksum + cross-source-agreement) EAN extraction straight from
+#          already-fetched search snippets, no page fetch, no Claude.
+# Level 2-4: _deep_enrich — submitted to _lookup_executor() and run in the
+#          background. Calls the EXISTING, UNCHANGED find_identifiers()/
+#          spec_lookup.lookup() — same queries, same page fetches, same
+#          Claude calls, same fallback behavior as before this redesign.
+#
+# See the approved plan (purring-dancing-gem.md) for the full rationale.
+
+
+@dataclass
+class _FastLayerResult:
+    preview: spec_lookup.SpecPreview
+    has_candidate: bool
+    ean_hits: list
+    asin_hits: list
+
+
+def _run_fast_layer(product: Product) -> _FastLayerResult:
+    """LEVEL 1 — synchronous. Runs the deterministic EAN/ASIN search
+    (identifier_lookup.fast_ensure_identifiers, which itself parallelizes
+    its EAN vs ASIN searches) concurrently with a specs search used only
+    for quick_guess()'s heuristic preview — so this whole call costs about
+    one search's latency, not three run back-to-back."""
+    brand = product.brand
+    model = product.model or product.model_number
+    product_name = product.name or product.manifest_item_description
+    other_info = product.category or product.manifest_subcategory
+    query_terms = " ".join(t for t in [brand, model, product_name, other_info] if t and t.strip())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        ident_future = executor.submit(
+            identifier_lookup.fast_ensure_identifiers,
+            product, brand=brand, model=model, product_name=product_name, other_info=other_info,
+        )
+        specs_future = executor.submit(web_search.search, f"{query_terms} specifications") if query_terms else None
+
+        ident_info = ident_future.result()
+        spec_hits = specs_future.result() if specs_future is not None else []
+
+    preview = spec_lookup.quick_guess(spec_hits or ident_info.get("ean_hits") or ident_info.get("asin_hits") or [])
+    has_candidate = bool(
+        preview.product_name_guess or preview.brand_guess
+        or ident_info.get("ean_pending_candidate") or product.ean
+    )
+    return _FastLayerResult(
+        preview=preview, has_candidate=has_candidate,
+        ean_hits=ident_info.get("ean_hits", []), asin_hits=ident_info.get("asin_hits", []),
+    )
+
+
+def _deep_enrich(snapshot: dict, ean_hits: list, asin_hits: list):
+    """LEVEL 2-4 — runs inside _lookup_executor()'s background thread.
+    Works PURELY from the immutable `snapshot` dict — never touches a live
+    Product object, so it's safe to run even after the user has moved on to
+    a different item (see _resolve_lookup_enrichment for how the result is
+    later, safely, applied). ean_hits/asin_hits (already fetched by Level 1)
+    are accepted but not otherwise used here — spec_lookup.lookup() and
+    find_identifiers() (both unchanged) redo their own full search, exactly
+    as before this redesign; nothing about their search/fallback/Claude
+    behavior is skipped or altered."""
+    sr = spec_lookup.lookup(
+        ean=snapshot["ean"] or snapshot["manifest_barcode"] or snapshot["scanned_barcode"],
+        asin=snapshot["asin"],
+        model_number=snapshot["model_number"],
+        item_description=snapshot["manifest_item_description"],
+    )
+    # find_identifiers() is the existing, UNCHANGED, PURE function (does not
+    # mutate its arguments) — safe to call from a background thread.
+    # ensure_identifiers() (which DOES mutate a Product) is deliberately NOT
+    # called here — it stays reserved for its one existing call site
+    # (manifest post-import auto-lookup), unchanged.
+    ident = identifier_lookup.find_identifiers(
+        brand=sr.brand or snapshot["brand"],
+        model=sr.model or snapshot["model"] or snapshot["model_number"],
+        product_name=sr.product_name or snapshot["product_name"],
+        other_info=sr.category or snapshot["category"],
+        need_ean=not snapshot["ean"],
+        need_asin=not snapshot["asin"],
+    )
+    return sr, ident
+
+
+def _cache_entry_from(snapshot: dict, sr: "spec_lookup.SpecResult", ident: "identifier_lookup.IdentifierResult") -> lookup_cache_store.LookupCacheEntry:
+    return lookup_cache_store.LookupCacheEntry(
+        ean=ident.ean or snapshot["ean"],
+        asin=ident.asin or snapshot["asin"],
+        brand=sr.brand or snapshot["brand"],
+        model=sr.model or snapshot["model"],
+        product_name=sr.product_name or snapshot["product_name"],
+        category=sr.category or snapshot["category"],
+        spec_summary=sr.spec_summary,
+        box_contents=sr.box_contents,
+        ean_confidence="high" if ident.ean else "",
+        asin_confidence="high" if ident.asin else "",
+        sources=sr.sources,
+    )
+
+
+def _spec_result_from_cache(cached: lookup_cache_store.LookupCacheEntry) -> "spec_lookup.SpecResult":
+    return spec_lookup.SpecResult(
+        product_name=cached.product_name, brand=cached.brand, model=cached.model,
+        category=cached.category, spec_summary=cached.spec_summary,
+        box_contents=cached.box_contents, sources=["cache"],
+    )
+
+
+def _apply_cached_result(product: Product, cached: lookup_cache_store.LookupCacheEntry) -> None:
+    """Same 'only fill blank fields' priority as everywhere else in this
+    flow (NEPĀRKĀPJAMS rule 4) — a cache hit is real, previously-confirmed
+    data, but still never overwrites something already on the product."""
+    if not product.ean and cached.ean:
+        product.ean = cached.ean
+        product.ean_status = "Found"
+        product.ean_source = "cache"
+    if not product.asin and cached.asin:
+        product.asin = cached.asin
+        product.asin_status = "Found"
+        product.asin_source = "cache"
+
+
+def _resolve_lookup_enrichment():
+    """Polls every in-flight background job in lookup_enrich_jobs (there
+    can be more than one if the user moved on to a new item before an
+    earlier job finished — see the lookup_enrich_jobs session_state
+    comment). Called every rerun regardless of wizard step (the safety
+    net), plus every second from _render_spec_lookup_status while Step 3 is
+    on screen.
+
+    UI state (lookup_stage/spec_result) is only ever touched for a job that
+    still belongs to the CURRENTLY displayed product — a job left behind by
+    an item the user has already saved/discarded is applied silently (DB
+    reload + re-save, or dropped if never saved) without disturbing
+    whatever the user is looking at now (NEPĀRKĀPJAMS rules 5 and 6)."""
+    jobs = st.session_state.lookup_enrich_jobs
+    if not jobs:
+        return
+
+    # Whether this call resolved a job for the product CURRENTLY on screen
+    # — if so, a full rerun is forced below. Necessary specifically because
+    # this function is also called every second from inside
+    # _render_spec_lookup_status's own run_every tick: a fragment's
+    # run_every auto-rerun is SCOPED to just that fragment, so setting
+    # st.session_state.spec_result there updates the status text (which
+    # lives inside the fragment) but does NOT re-execute the surrounding
+    # Step 3 code that reads spec_result into the name/brand/model/EAN
+    # form fields — those stayed rendered with their stale (pre-
+    # resolution) values until some unrelated full rerun happened. Observed
+    # live: status flipped to "Verified" but the fields under it stayed
+    # blank. Forcing a full st.rerun() here (harmless to also do when
+    # called from the top-level safety net, before Step 3's fields have
+    # even rendered yet in that same pass) makes the whole page catch up
+    # in one step.
+    resolved_for_current = False
+
+    still_pending = []
+    for job in jobs:
+        future = job["future"]
+        if not future.done():
+            still_pending.append(job)
+            continue
+
+        snap = job["snapshot"]
+        current_product = st.session_state.product
+        is_current = current_product.id == snap["product_id"] and current_product.company_id == snap["company_id"]
+
+        try:
+            sr, ident = future.result()
+        except Exception as e:
+            if is_current:
+                st.session_state.lookup_stage = "done"
+                st.session_state.lookup_enrich_error = str(e)
+                resolved_for_current = True
+            continue
+
+        lookup_cache_store.upsert(_cache_entry_from(snap, sr, ident))
+
+        if is_current:
+            target = current_product
+        else:
+            # User has moved on to a different item. If this one was
+            # already persisted, reload the authoritative DB copy (not
+            # session state) and re-save it with the enrichment — never
+            # silently lose it (NEPĀRKĀPJAMS rule 5). If it was never
+            # saved, there's nothing to apply it to; the cache write above
+            # is still useful for the next lookup of the same product.
+            target = inventory_store.get_product(snap["product_id"], snap["company_id"])
+
+        if target is not None:
+            if not target.name:
+                target.name = sr.product_name
+            if not target.brand:
+                target.brand = sr.brand
+            if not target.model:
+                target.model = sr.model
+            if not target.category:
+                target.category = sr.category
+            if not target.spec_summary:
+                target.spec_summary = sr.spec_summary
+            if not target.box_contents:
+                target.box_contents = sr.box_contents
+            if not target.ean and ident.ean:
+                target.ean = ident.ean
+                target.ean_status = ident.ean_status
+                target.ean_source = ident.ean_source
+            if not target.asin and ident.asin:
+                target.asin = ident.asin
+                target.asin_status = ident.asin_status
+                target.asin_source = ident.asin_source
+
+            if is_current:
+                if st.session_state.spec_result is None:
+                    st.session_state.spec_result = sr
+            else:
+                inventory_store.save_product(target)
+
+        if is_current:
+            st.session_state.lookup_stage = "done"
+            resolved_for_current = True
+
+    st.session_state.lookup_enrich_jobs = still_pending
+
+    if resolved_for_current:
+        st.rerun()
+
+
+def _ean_retry_search(snapshot: dict) -> "identifier_lookup.IdentifierResult":
+    """Runs in _lookup_executor()'s background thread. A narrower, EAN-only
+    re-attempt submitted from Step 4 ("Analyze photos") when the EAN is
+    still blank after both Step 3's lookup AND the photo-decoded-barcode
+    check — uses whatever brand/model/category is known BY THEN, which is
+    often more accurate than what Step 3's own EAN search had to work with
+    (Step 3's background enrichment has usually had time to resolve and
+    correct brand/model by this point), combined with
+    identifier_lookup.find_identifiers' retry_on_empty behavior."""
+    return identifier_lookup.find_identifiers(
+        brand=snapshot["brand"],
+        model=snapshot["model"] or snapshot["model_number"],
+        product_name=snapshot["product_name"],
+        other_info=snapshot["category"],
+        need_ean=True,
+        need_asin=False,
+    )
+
+
+def _resolve_ean_retry():
+    """Same product-identity-safety pattern as _resolve_lookup_enrichment
+    (survives Next/Save/discard, reloads+resaves an already-persisted
+    product, never touches a different current product), narrowed to the
+    ean_retry_jobs list. Never overwrites an already-set EAN — by the time
+    this resolves, that value could be a manual edit, Step 3's own result,
+    or the Step 4 photo-decoded barcode, all of which take priority.
+    Best-effort/silent on failure: this is already a last-resort retry, so
+    a failure here just leaves the EAN exactly as it already was, with
+    nothing new to tell the user."""
+    jobs = st.session_state.ean_retry_jobs
+    if not jobs:
+        return
+
+    resolved_for_current = False
+    still_pending = []
+    for job in jobs:
+        future = job["future"]
+        if not future.done():
+            still_pending.append(job)
+            continue
+
+        snap = job["snapshot"]
+        current_product = st.session_state.product
+        is_current = current_product.id == snap["product_id"] and current_product.company_id == snap["company_id"]
+
+        try:
+            ident = future.result()
+        except Exception:
+            continue
+
+        if ident.ean:
+            lookup_cache_store.upsert(lookup_cache_store.LookupCacheEntry(
+                ean=ident.ean, brand=snap["brand"], model=snap["model"],
+                ean_confidence="high" if ident.ean_status == identifier_lookup.STATUS_FOUND else "",
+            ))
+
+        target = current_product if is_current else inventory_store.get_product(snap["product_id"], snap["company_id"])
+
+        if target is not None and not target.ean and ident.ean:
+            target.ean = ident.ean
+            target.ean_status = ident.ean_status
+            target.ean_source = ident.ean_source
+            if is_current:
+                resolved_for_current = True
+            else:
+                inventory_store.save_product(target)
+
+    st.session_state.ean_retry_jobs = still_pending
+    if resolved_for_current:
+        st.rerun()
+
+
+@st.fragment(run_every=1)
+def _render_spec_lookup_status(product: Product):
+    """Honest, non-final status while Level 2-4 runs in the background
+    (NEPĀRKĀPJAMS rule 6) — same run_every=1 polling pattern as
+    _render_photo_gallery.
+
+    Called UNCONDITIONALLY on every Step 3 render (mirroring
+    _render_photo_gallery, which is likewise always called and returns
+    early internally) rather than only once lookup_stage != "idle". A
+    fragment mounted for the FIRST time inside the very same script run
+    that a full st.rerun() (from the "Fetch specs" button, outside any
+    fragment) triggered was observed to never establish its client-side
+    run_every auto-refresh timer — the status then froze on whatever it
+    showed at that first render (e.g. "Candidate found (unconfirmed)")
+    even though the background job went on to finish correctly seconds
+    later; only an unrelated full rerun (e.g. a manual page reload) would
+    reveal the real, already-resolved state. Mounting this fragment on
+    every Step 3 visit — before lookup_stage ever leaves "idle" — gives it
+    a chance to establish that timer well before any button-triggered full
+    rerun happens, same as the proven-working Step 2 gallery."""
+    _resolve_lookup_enrichment()
+    stage = st.session_state.lookup_stage
+    if stage == "idle":
+        return
+    if stage == "searching":
+        st.info("🔎 Searching...")
+    elif stage == "candidate_found":
+        p = st.session_state.lookup_preview
+        label = " ".join(t for t in [p.brand_guess, p.model_guess] if t) if p else ""
+        st.info(f"Candidate found (unconfirmed): {label}" if label else "Candidate found (unconfirmed)")
+    elif stage in ("verifying", "enriching"):
+        st.info("⏳ Verifying / enriching specifications...")
+    elif stage == "done":
+        if st.session_state.lookup_enrich_error:
+            st.warning(f"Background enrichment failed: {st.session_state.lookup_enrich_error}")
+        else:
+            st.success("✅ Verified")
+
+
 def _style_photo_uploader():
     """Restyles Step 2's st.file_uploader into a single big branded
     "Take a Photo" button instead of Streamlit's default dashed dropzone +
@@ -690,26 +1048,70 @@ def _resolve_current_user():
 
 def _render_login_form():
     st.title("📱 ElectroGrader")
-    st.subheader("Log in")
-    with st.form("login_form"):
-        email_in = st.text_input("Email")
-        password_in = st.text_input("Password", type="password")
-        if st.form_submit_button("Log in", type="primary", use_container_width=True):
-            user = auth.verify_login(email_in, password_in)
-            if user is None:
-                st.error("Invalid email or password.")
+
+    mode = st.radio("mode", ["Log in", "Register a new company"], label_visibility="collapsed", horizontal=True)
+
+    if mode == "Log in":
+        st.subheader("Log in")
+        with st.form("login_form"):
+            email_in = st.text_input("Email")
+            password_in = st.text_input("Password", type="password")
+            if st.form_submit_button("Log in", type="primary", use_container_width=True):
+                user = auth.verify_login(email_in, password_in)
+                if user is None:
+                    # A correct password for a still-PENDING company's account
+                    # is a different situation than a wrong password — worth
+                    # a distinct message, without changing verify_login()'s
+                    # own pass/fail behavior at all (see
+                    # auth.is_pending_company_login()'s docstring).
+                    if auth.is_pending_company_login(email_in, password_in):
+                        st.warning("Your company registration is pending approval. You'll be able to log in once it's approved.")
+                    else:
+                        st.error("Invalid email or password.")
+                else:
+                    token = auth.create_session(user.id)
+                    auth_cookie.set_session_cookie(token, auth.SESSION_TTL_SECONDS)
+                    st.session_state["auth_user"] = user
+                    st.session_state["auth_token"] = token
+                    # The cookie is set via a small injected iframe's own script
+                    # (see modules/auth_cookie.py) — an immediate st.rerun() can
+                    # tear the page down before the browser has actually loaded
+                    # and executed that script, silently dropping the cookie.
+                    # A brief pause gives it time to run first.
+                    time.sleep(0.35)
+                    st.rerun()
+        return
+
+    # ---- Register a new company ----
+    st.subheader("Register a new company")
+    st.caption("A platform Super Admin reviews and approves new companies before you can log in.")
+    with st.form("company_signup_form"):
+        company_name_in = st.text_input("Company name")
+        plan_in = st.selectbox(
+            "Plan", ["Trial", "Standard"],
+            help="No plan-specific limits yet — this just records your choice for later.",
+        )
+        admin_name_in = st.text_input("Your name")
+        admin_email_in = st.text_input("Your email")
+        admin_password_in = st.text_input("Your password", type="password")
+        if st.form_submit_button("Register", type="primary", use_container_width=True):
+            if not company_name_in.strip() or not admin_name_in.strip() or not admin_email_in.strip() or not admin_password_in:
+                st.error("All fields are required.")
+            elif company_store.get_company_by_slug(company_name_in):
+                st.error(f"A company named '{company_name_in.strip()}' already exists. Please choose a different name.")
             else:
-                token = auth.create_session(user.id)
-                auth_cookie.set_session_cookie(token, auth.SESSION_TTL_SECONDS)
-                st.session_state["auth_user"] = user
-                st.session_state["auth_token"] = token
-                # The cookie is set via a small injected iframe's own script
-                # (see modules/auth_cookie.py) — an immediate st.rerun() can
-                # tear the page down before the browser has actually loaded
-                # and executed that script, silently dropping the cookie.
-                # A brief pause gives it time to run first.
-                time.sleep(0.35)
-                st.rerun()
+                try:
+                    company = company_store.create_company(
+                        name=company_name_in.strip(), plan=plan_in.lower(), status=company_store.STATUS_PENDING,
+                    )
+                    user = auth.register_user(
+                        company_id=company.id, name=admin_name_in.strip(), email=admin_email_in.strip(),
+                        password=admin_password_in, role=auth.ROLE_ADMIN,
+                    )
+                    audit_store.log_audit(company.id, user.id, "COMPANY_SIGNUP", "company", company.id)
+                    st.success("Registration submitted — pending approval. You'll be able to log in once approved.")
+                except ValueError as e:
+                    st.error(str(e))
 
 
 current_user = _resolve_current_user()
@@ -745,6 +1147,25 @@ def _init_state():
                                            # was too low-res to fill the
                                            # frame without blurring
         "spec_result": None,
+        # Fast-First Step 3 lookup UI state — tied to whichever product is
+        # CURRENTLY displayed (unlike lookup_enrich_jobs below, which
+        # outlives it). "idle"|"searching"|"candidate_found"|"verifying"|
+        # "enriching"|"done" — see _render_spec_lookup_status.
+        "lookup_stage": "idle",
+        "lookup_preview": None,     # spec_lookup.SpecPreview | None — unconfirmed, UI-only
+        "lookup_enrich_error": None,
+        # List of {"future": Future, "snapshot": dict} — NOT reset by
+        # reset_wizard(). A background enrichment job survives moving on to
+        # a different item (Next/Save/discard) so it can still finish and
+        # update the right product later (or just populate the shared
+        # cache) — see _resolve_lookup_enrichment. A list rather than a
+        # single slot because a second lookup (for a new item) must never
+        # clobber the handle to a still-running one from a previous item.
+        "lookup_enrich_jobs": [],
+        # Same shape/survival rules as lookup_enrich_jobs above, but for the
+        # narrower Step 4 "still no EAN" background retry — see
+        # _ean_retry_search/_resolve_ean_retry.
+        "ean_retry_jobs": [],
         "grading_result": None,
         "price_estimate": None,
         "descriptions": None,
@@ -808,6 +1229,14 @@ def reset_wizard():
     st.session_state.camera_session_id += 1
     st.session_state.photo0_low_res_warning = False
     st.session_state.spec_result = None
+    # Deliberately NOT reset here: lookup_enrich_jobs, ean_retry_jobs. A
+    # background enrichment/retry started for the item just saved/
+    # discarded may still be running — it must be left alone to finish and
+    # resolve itself via the DB-reload path, not be silently dropped just
+    # because the wizard moved on to a new item (NEPĀRKĀPJAMS rule 5).
+    st.session_state.lookup_stage = "idle"
+    st.session_state.lookup_preview = None
+    st.session_state.lookup_enrich_error = None
     st.session_state.grading_result = None
     st.session_state.price_estimate = None
     st.session_state.descriptions = None
@@ -894,6 +1323,11 @@ if current_user.role == auth.ROLE_ADMIN:
     _nav_pages.insert(1, "📥 Import Manifest")
     _nav_pages.append("👥 Manage Users")
     _nav_pages.append("⚙️ Settings")
+# Platform Super Admin — independent of current_user.role/company (see
+# modules/auth.py's is_super_admin()); a user can be a plain "employee" in
+# their own company and still be a platform Super Admin.
+if auth.is_super_admin(current_user.id):
+    _nav_pages.append("🏢 Companies")
 page = st.sidebar.radio(
     "Navigate",
     _nav_pages,
@@ -914,6 +1348,15 @@ if page == "🆕 New Item":
     st.progress((st.session_state.wizard_step - 1) / (len(steps) - 1), text=steps[st.session_state.wizard_step - 1])
 
     product: Product = st.session_state.product
+
+    # Safety net: resolves any Step 3 background lookup jobs that finished
+    # since the last rerun, regardless of which wizard step is on screen
+    # right now — this is what lets background enrichment survive the user
+    # clicking "Next" past Step 3 before it's done (NEPĀRKĀPJAMS rule 5).
+    # Cheap no-op when lookup_enrich_jobs is empty.
+    _resolve_lookup_enrichment()
+    # Same safety net for the narrower Step 4+ EAN-only retry.
+    _resolve_ean_retry()
 
     # ---- Step 1: Identify — from a manifest draft, or from scratch ----
     if st.session_state.wizard_step == 1:
@@ -1072,33 +1515,61 @@ if page == "🆕 New Item":
 
         _render_photo_gallery(product)
 
-    # ---- Step 3: Web spec lookup ----
+    # ---- Step 3: Web spec lookup (Fast-First) ----
     elif st.session_state.wizard_step == 3:
         st.subheader("Specifications & box contents")
         st.caption("Automated web lookup — review and edit before continuing.")
 
-        if st.session_state.spec_result is None:
+        # Button only offered when idle/failed for THIS product — while a
+        # lookup is in progress (searching/candidate_found/verifying/
+        # enriching) it stays hidden so a second click can't submit a
+        # duplicate background job for the same product. "done" with
+        # spec_result still None means the background job errored out
+        # (see _render_spec_lookup_status) — allow retrying in that case.
+        show_button = st.session_state.spec_result is None and st.session_state.lookup_stage in ("idle", "done")
+        if show_button:
             if st.button("🔎 Fetch specs from the web", type="primary", disabled=not _ai_configured()):
-                with st.spinner("Searching and reading sources..."):
-                    sr = spec_lookup.lookup(
-                        ean=product.ean or product.manifest_barcode or product.scanned_barcode,
-                        asin=product.asin,
-                        model_number=product.model_number,
-                        item_description=product.manifest_item_description,
-                    )
-                    st.session_state.spec_result = sr
-                # Automatic EAN/ASIN discovery — no separate button, never
-                # overwrites anything already known (e.g. from the manifest).
-                with st.spinner("Checking EAN/ASIN..."):
-                    identifier_lookup.ensure_identifiers(
-                        product,
-                        brand=sr.brand,
-                        model=sr.model,
-                        product_name=sr.product_name,
-                        other_info=sr.category,
-                    )
+                st.session_state.lookup_stage = "searching"
+                st.session_state.lookup_enrich_error = None
+                cached = lookup_cache_store.get_best_match(
+                    ean=product.ean or product.manifest_barcode or product.scanned_barcode,
+                    asin=product.asin,
+                    brand=product.brand,
+                    model=product.model or product.model_number,
+                    description=product.manifest_item_description,
+                )
+                if cached:
+                    # LEVEL 0 — instant cache hit, no search at all.
+                    _apply_cached_result(product, cached)
+                    st.session_state.spec_result = _spec_result_from_cache(cached)
+                    st.session_state.lookup_stage = "done"
+                else:
+                    with st.spinner("Searching..."):
+                        fast = _run_fast_layer(product)
+                    st.session_state.lookup_preview = fast.preview
+                    st.session_state.lookup_stage = "candidate_found" if fast.has_candidate else "verifying"
+
+                    # LEVEL 2-4 — background. The snapshot is an immutable
+                    # dict, not the live `product` object, so the
+                    # background thread never touches anything the user
+                    # might already have moved past by the time it finishes
+                    # (NEPĀRKĀPJAMS rule 5, see _resolve_lookup_enrichment).
+                    snapshot = {
+                        "product_id": product.id, "company_id": product.company_id,
+                        "ean": product.ean, "asin": product.asin,
+                        "brand": product.brand, "model": product.model,
+                        "model_number": product.model_number, "product_name": product.name,
+                        "manifest_barcode": product.manifest_barcode,
+                        "scanned_barcode": product.scanned_barcode,
+                        "manifest_item_description": product.manifest_item_description,
+                        "category": product.category,
+                    }
+                    future = _lookup_executor().submit(_deep_enrich, snapshot, fast.ean_hits, fast.asin_hits)
+                    st.session_state.lookup_enrich_jobs.append({"future": future, "snapshot": snapshot})
                 st.rerun()
             st.caption("Or skip and fill the fields in manually below.")
+
+        _render_spec_lookup_status(product)
 
         sr = st.session_state.spec_result
         name_val = sr.product_name if sr else product.name
@@ -1183,6 +1654,47 @@ if page == "🆕 New Item":
                     for img_bytes in st.session_state.captured_photos:
                         decoded_barcodes.extend(barcode_scanner.decode_barcodes(img_bytes))
 
+                    # A barcode decoded straight from one of the item's own
+                    # photos (e.g. a box/label shot among the front/back/
+                    # sides photos from Step 2) is a direct physical read of
+                    # the real EAN — more trustworthy than any web search
+                    # result, and effectively free here since these photos
+                    # are already being decoded for the manifest cross-check
+                    # below. Only fills a still-blank EAN (existing data
+                    # always wins), and only a checksum-valid candidate is
+                    # ever accepted — pyzbar can occasionally misread a
+                    # digit, and the checksum catches that the same way it
+                    # catches a bad OCR'd number from a web page.
+                    if not product.ean:
+                        for code in decoded_barcodes:
+                            if identifier_lookup.looks_like_ean(code) and identifier_lookup.validate_gtin_checksum(code):
+                                product.ean = code
+                                product.ean_status = identifier_lookup.STATUS_FOUND
+                                product.ean_source = "scanned from photo"
+                                break
+
+                    # Still nothing — one more background attempt, now with
+                    # whatever brand/model/category is known by this point
+                    # (often more accurate than what was available when
+                    # Step 3's own EAN search ran, since Step 3's background
+                    # enrichment has usually resolved by now). Runs in
+                    # _lookup_executor() same as Step 3 — doesn't block this
+                    # spinner or anything after it.
+                    if not product.ean:
+                        already_pending = any(
+                            j["snapshot"]["product_id"] == product.id and j["snapshot"]["company_id"] == product.company_id
+                            for j in st.session_state.ean_retry_jobs
+                        )
+                        if not already_pending:
+                            ean_retry_snapshot = {
+                                "product_id": product.id, "company_id": product.company_id,
+                                "brand": product.brand, "model": product.model,
+                                "model_number": product.model_number, "product_name": product.name,
+                                "category": product.category,
+                            }
+                            ean_retry_future = _lookup_executor().submit(_ean_retry_search, ean_retry_snapshot)
+                            st.session_state.ean_retry_jobs.append({"future": ean_retry_future, "snapshot": ean_retry_snapshot})
+
                     try:
                         st.session_state.grading_result = vision_grading.grade_item(
                             st.session_state.captured_photos,
@@ -1204,6 +1716,12 @@ if page == "🆕 New Item":
                 if st.session_state.grading_result is not None:
                     st.rerun()
             st.caption("Or skip and assess condition manually below.")
+
+        if not product.ean and any(
+            j["snapshot"]["product_id"] == product.id and j["snapshot"]["company_id"] == product.company_id
+            for j in st.session_state.ean_retry_jobs
+        ):
+            st.caption("🔎 Still looking for the EAN in the background — will fill in automatically if found.")
 
         gr = st.session_state.grading_result
         condition_options = ["A", "B", "C", "D"]
@@ -1231,6 +1749,12 @@ if page == "🆕 New Item":
             product.condition_type if product.condition_type in new_used_options else "Used"
         )
         condition_in = st.selectbox("New / Used", new_used_options, index=new_used_options.index(default_condition))
+
+        default_color = (gr.color if gr and gr.color else "") or product.color
+        color_in = st.text_input(
+            "Color", value=default_color,
+            help="Determined from the photos by AI — correct manually if needed.",
+        )
 
         if gr and gr.product_condition_reasoning:
             st.info(gr.product_condition_reasoning)
@@ -1280,6 +1804,7 @@ if page == "🆕 New Item":
                 product.product_condition_confidence = int(confidence_in)
                 product.product_condition_reasoning = gr.product_condition_reasoning if gr else ""
                 product.condition_type = condition_in
+                product.color = color_in.strip()
                 product.defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
                 product.missing_components = [l.strip() for l in missing_in.splitlines() if l.strip()]
                 product.functional_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
@@ -3889,3 +4414,142 @@ elif page == "⚙️ Settings":
                                 use_container_width=True,
                             ):
                                 _confirm_disconnect_integration_dialog(record.integration_type, entry.display_name)
+
+# =========================================================== COMPANIES ===
+elif page == "🏢 Companies":
+    st.title("🏢 Companies")
+    # Guards direct page-state navigation too, not just the nav menu itself
+    # (auth.is_super_admin() gates whether "🏢 Companies" even appears in
+    # _nav_pages above — this re-checks independently, same defense-in-
+    # depth pattern as every other role-gated page in this file).
+    try:
+        auth.require_super_admin(current_user)
+    except PermissionError:
+        st.error("Super Admins only.")
+        st.stop()
+
+    st.caption(
+        "Company metadata only — this page never shows another company's "
+        "products, inventory, or business data."
+    )
+
+    all_companies = company_store.list_companies()
+    pending = [c for c in all_companies if c.status == company_store.STATUS_PENDING]
+    active = [c for c in all_companies if c.status == company_store.STATUS_ACTIVE]
+    suspended = [c for c in all_companies if c.status == company_store.STATUS_SUSPENDED]
+
+    def _company_line(c):
+        created = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
+        st.write(f"**{c.name}**  ·  plan: {c.plan}  ·  users: {c.user_limit}  ·  products: {c.product_limit}  ·  created: {created}")
+
+    if pending:
+        st.subheader("🟡 Pending approval")
+        for c in pending:
+            with st.container(border=True):
+                _company_line(c)
+                admins = [u for u in auth_store.list_users_for_company(c.id) if u.role == auth.ROLE_ADMIN]
+                admin_label = ", ".join(f"{u.name} <{u.email}>" for u in admins) or "(no admin found)"
+                st.caption(f"Admin: {admin_label}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Approve", key=f"approve_{c.id}", use_container_width=True):
+                        c.status = company_store.STATUS_ACTIVE
+                        c.updated_at = time.time()
+                        company_store.update_company(c)
+                        audit_store.log_audit(c.id, current_user.id, "COMPANY_APPROVED", "company", c.id)
+                        st.rerun()
+                with col2:
+                    if st.button("❌ Reject", key=f"reject_{c.id}", use_container_width=True):
+                        c.status = company_store.STATUS_SUSPENDED
+                        c.updated_at = time.time()
+                        company_store.update_company(c)
+                        audit_store.log_audit(c.id, current_user.id, "COMPANY_DISABLED", "company", c.id, "rejected at signup")
+                        st.rerun()
+        st.divider()
+
+    st.subheader("🟢 Active companies")
+    if not active:
+        st.caption("None.")
+    for c in active:
+        with st.container(border=True):
+            _company_line(c)
+            if st.button("⏸ Suspend", key=f"suspend_{c.id}"):
+                c.status = company_store.STATUS_SUSPENDED
+                c.updated_at = time.time()
+                company_store.update_company(c)
+                audit_store.log_audit(c.id, current_user.id, "COMPANY_DISABLED", "company", c.id)
+                st.rerun()
+
+    st.subheader("🔴 Suspended companies")
+    if not suspended:
+        st.caption("None.")
+    for c in suspended:
+        with st.container(border=True):
+            _company_line(c)
+            if st.button("▶ Reactivate", key=f"reactivate_{c.id}"):
+                c.status = company_store.STATUS_ACTIVE
+                c.updated_at = time.time()
+                company_store.update_company(c)
+                audit_store.log_audit(c.id, current_user.id, "COMPANY_APPROVED", "company", c.id, "reactivated")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Platform Admins")
+    platform_admins = platform_admin_store.list_all()
+    active_admin_count = platform_admin_store.count_active()
+    for pa in platform_admins:
+        pa_user = auth_store.get_user_by_id(pa.user_id)
+        label = f"{pa_user.name} <{pa_user.email}>" if pa_user else f"(missing user {pa.user_id})"
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write(f"{label} — {'active' if pa.is_active else 'inactive'}")
+        with col2:
+            if pa.is_active:
+                # Hard-blocked in this UI if it would leave zero active
+                # Super Admins — the platform invariant (count >= 1) is
+                # enforced here unconditionally, same as the CLI's
+                # `disable` command (scripts/superadmin_cli.py).
+                disable_blocked = active_admin_count <= 1
+                if st.button("Disable", key=f"disable_admin_{pa.id}", disabled=disable_blocked, use_container_width=True):
+                    platform_admin_store.set_active(pa.id, False)
+                    audit_store.log_audit(
+                        pa_user.company_id if pa_user else "unknown", current_user.id,
+                        "SUPERADMIN_DISABLED", "user", pa.user_id,
+                    )
+                    st.rerun()
+                if disable_blocked:
+                    st.caption("Can't disable the only active Super Admin.")
+            else:
+                if st.button("Enable", key=f"enable_admin_{pa.id}", use_container_width=True):
+                    platform_admin_store.set_active(pa.id, True)
+                    audit_store.log_audit(
+                        pa_user.company_id if pa_user else "unknown", current_user.id,
+                        "SUPERADMIN_ENABLED", "user", pa.user_id,
+                    )
+                    st.rerun()
+
+    st.markdown("**Grant Super Admin**")
+    st.caption("The user must already have a regular account in some company — this never creates a new user.")
+    with st.form("grant_super_admin_form", clear_on_submit=True):
+        grant_email = st.text_input("Existing user's email")
+        if st.form_submit_button("Grant Super Admin"):
+            matches = auth_store.get_users_by_email(grant_email.strip().lower())
+            if not matches:
+                st.error("No existing user found with that email.")
+            else:
+                target_user = matches[0]
+                if len(matches) > 1:
+                    st.warning(f"Multiple accounts share this email across companies — granting to company {target_user.company_id!r}.")
+                existing = platform_admin_store.get_by_user_id(target_user.id)
+                if existing and existing.is_active:
+                    st.info(f"{target_user.email} is already an active Super Admin.")
+                elif existing:
+                    platform_admin_store.set_active(existing.id, True)
+                    audit_store.log_audit(target_user.company_id, current_user.id, "SUPERADMIN_ENABLED", "user", target_user.id)
+                    st.success(f"Reactivated {target_user.email} as a Super Admin.")
+                    st.rerun()
+                else:
+                    platform_admin_store.create(target_user.id)
+                    audit_store.log_audit(target_user.company_id, current_user.id, "PLATFORM_ROLE_CHANGED", "user", target_user.id, "granted Super Admin")
+                    st.success(f"{target_user.email} is now a Super Admin.")
+                    st.rerun()
