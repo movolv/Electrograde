@@ -285,6 +285,22 @@ def get_product(product_id: str, company_id: str) -> Optional[Product]:
     return Product.from_dict(json.loads(row[0]))
 
 
+def get_product_by_sku(company_id: str, sku: str) -> Optional[Product]:
+    """Exact-match SKU lookup (same tier-1 logic search_products() uses),
+    single-purpose for the Orders page's "click a SKU to open its product
+    card" navigation — not a general search entry point."""
+    if not sku:
+        return None
+    conn = _connect()
+    row = conn.execute(
+        "SELECT data FROM products WHERE UPPER(sku) = UPPER(?) AND company_id = ? LIMIT 1", (sku, company_id)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return Product.from_dict(json.loads(row[0]))
+
+
 def search_products(query: str, company_id: str) -> List[Tuple[Product, str]]:
     """Fast, indexed, priority-ordered search across the whole inventory.
 

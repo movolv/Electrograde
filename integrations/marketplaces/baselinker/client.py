@@ -26,7 +26,7 @@ from typing import Optional, Set
 import requests
 
 from integrations.base import ConnectionTestResult, ConnectorActionResult, ImportedProductData, MarketplaceConnector
-from integrations.marketplaces.baselinker import import_products, mapper, sync
+from integrations.marketplaces.baselinker import import_products, mapper, order_mapper, sync
 from modules import sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
@@ -104,12 +104,37 @@ def list_all_product_ids(config: dict) -> list:
 
 
 def get_orders(config: dict, date_confirmed_from: float) -> list:
-    """Real getOrders call. Prepared but not wired into any Pull decision
-    this pass — no SYNC_OWNERSHIP_FIELDS field maps to order data yet."""
-    data = _call(
-        "getOrders", {"date_confirmed_from": int(date_confirmed_from)}, config["token"],
-    )
-    return data.get("orders", []) or []
+    """Real getOrders call, paginated via id_from — BaseLinker returns at
+    most 100 orders per call, same loop-until-empty-page shape as
+    list_all_product_ids() above. date_confirmed_from bounds the pull to
+    orders confirmed at/after that unix timestamp; id_from then advances
+    strictly by the highest order_id seen so a single sync run never
+    re-fetches or skips a page even if new orders land mid-pull."""
+    orders: list = []
+    id_from = 0
+    while True:
+        data = _call(
+            "getOrders",
+            {"date_confirmed_from": int(date_confirmed_from), "id_from": id_from},
+            config["token"],
+        )
+        page = data.get("orders", []) or []
+        if not page:
+            break
+        orders.extend(page)
+        id_from = max(o.get("order_id", 0) for o in page) + 1
+        if len(page) < 100:
+            break
+    return orders
+
+
+def get_order_statuses(config: dict) -> dict:
+    """Real getOrderStatusList call — maps order_status_id -> the
+    customer-facing status label. Fetched fresh on every order sync (one
+    cheap call) rather than cached, since a company can rename its statuses
+    in BaseLinker at any time."""
+    data = _call("getOrderStatusList", {}, config["token"])
+    return {s["id"]: (s.get("name_for_customer") or s.get("name", "")) for s in (data.get("statuses") or [])}
 
 
 class BaselinkerConnector(MarketplaceConnector):
@@ -319,3 +344,19 @@ class BaselinkerConnector(MarketplaceConnector):
             return import_products.fetch_all_products(self._config())
         except (BaseLinkerAPIError, requests.RequestException):
             return []
+
+    # ---- Order sync -----------------------------------------------------
+
+    def fetch_orders(self, since: float) -> list:
+        """Real order fetch — List[modules.models.Order], normalized via
+        order_mapper.map_order(). [] on any API failure, same honest-empty/
+        never-raise convention as fetch_catalog() above (the scheduler's
+        poll_order_sync_once() treats [] as "nothing new this cycle", not
+        an error worth surfacing)."""
+        config = self._config()
+        try:
+            raw_orders = get_orders(config, date_confirmed_from=since)
+            status_labels = get_order_statuses(config)
+        except (BaseLinkerAPIError, requests.RequestException):
+            return []
+        return [order_mapper.map_order(raw, status_labels, self.company_id) for raw in raw_orders]

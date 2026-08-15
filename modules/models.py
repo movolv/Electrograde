@@ -145,3 +145,89 @@ class Product:
             known["product_condition_confidence"] = d.get("grade_confidence", 0)
             known["product_condition_reasoning"] = d.get("grade_reasoning", "")
         return Product(**known)
+
+
+@dataclass
+class OrderAddress:
+    full_name: str = ""
+    company: str = ""
+    address: str = ""
+    city: str = ""
+    postcode: str = ""
+    state: str = ""
+    country: str = ""
+    country_code: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "OrderAddress":
+        known = {k: v for k, v in (d or {}).items() if k in OrderAddress.__dataclass_fields__}
+        return OrderAddress(**known)
+
+
+@dataclass
+class OrderItem:
+    name: str = ""
+    sku: str = ""
+    ean: str = ""
+    quantity: int = 1
+    price: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "OrderItem":
+        known = {k: v for k, v in (d or {}).items() if k in OrderItem.__dataclass_fields__}
+        return OrderItem(**known)
+
+
+@dataclass
+class Order:
+    """A pulled-in order from a connected marketplace/service integration —
+    see integrations/base.py's MarketplaceConnector.fetch_orders() and
+    modules/order_store.py. Deliberately integration-agnostic: nothing here
+    (or in order_store.py, or the Orders page) ever assumes BaseLinker —
+    that mapping lives entirely in each connector's own order_mapper.py.
+    """
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    company_id: str = ""
+    integration_type: str = ""  # which ElectroGrader connector synced this: "baselinker", later "woocommerce"...
+    marketplace: str = ""  # normalized channel code for filtering/the grid column: "amazon", "allegro", "shop"...
+    external_order_id: str = ""  # source system's stable order id (upsert key, with company_id+integration_type)
+    order_number: str = ""  # "Number (in shop)" — the shop-visible order number
+    order_source: str = ""  # human-readable source description (e.g. BaseLinker's order_source_info)
+    customer_name: str = ""
+    email: str = ""
+    phone: str = ""
+    items: List[OrderItem] = field(default_factory=list)
+    item_count: int = 0
+    items_summary: str = ""  # e.g. "3x USB Cable, 1x Charger" — for the list column
+    price_total: float = 0.0
+    currency: str = ""
+    shipping_method: str = ""
+    delivery_address: OrderAddress = field(default_factory=OrderAddress)
+    invoice_address: OrderAddress = field(default_factory=OrderAddress)
+    order_date: float = 0.0
+    status_id: int = 0
+    status_label: str = ""
+    status_updated_at: float = 0.0
+    customer_comments: str = ""
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "Order":
+        known = {k: v for k, v in d.items() if k in Order.__dataclass_fields__}
+        if "items" in known:
+            known["items"] = [OrderItem.from_dict(i) for i in (known["items"] or [])]
+        if "delivery_address" in known:
+            known["delivery_address"] = OrderAddress.from_dict(known["delivery_address"])
+        if "invoice_address" in known:
+            known["invoice_address"] = OrderAddress.from_dict(known["invoice_address"])
+        return Order(**known)

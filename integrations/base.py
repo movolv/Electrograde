@@ -249,6 +249,17 @@ class MarketplaceConnector(IntegrationConnector):
         import yet" — the same honest-empty pattern as pull_state()'s {}."""
         return []
 
+    # ---- Order sync ------------------------------------------------------
+
+    def fetch_orders(self, since: float) -> list:
+        """Fetches orders placed/updated at or after `since` (unix time),
+        normalized into List[modules.models.Order] — the Orders page and
+        integrations/scheduler.py's poll_order_sync_once() only ever call
+        this generic method, never a specific connector's raw API. []
+        (the default) means "this connector doesn't support order sync yet"
+        — same honest-empty convention as fetch_catalog() above."""
+        return []
+
 
 class ServiceConnector(IntegrationConnector):
     """A non-marketplace external service (translation, AI, shipping...).

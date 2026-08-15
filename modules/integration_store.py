@@ -62,6 +62,12 @@ class CompanyIntegration:
     # token refresh — always 0 today (BaseLinker/DeepL use static tokens with
     # no expiry), read/written by nothing yet.
     token_expires_at: float = 0.0
+    # Order-sync cursor — deliberately separate from last_sync_at (the
+    # product/catalog export cursor above), so a slow/failed order sync can
+    # never affect (or be affected by) product export timing. Set only by
+    # touch_orders_last_sync(), read by integrations/scheduler.py's
+    # poll_order_sync_once() to decide which companies are due.
+    orders_last_sync_at: float = 0.0
 
 
 @dataclass
@@ -104,6 +110,8 @@ def _connect():
     existing_cols = db.table_columns(conn, "company_integrations")
     if "token_expires_at" not in existing_cols:
         conn.execute("ALTER TABLE company_integrations ADD COLUMN token_expires_at DOUBLE PRECISION NOT NULL DEFAULT 0")
+    if "orders_last_sync_at" not in existing_cols:
+        conn.execute("ALTER TABLE company_integrations ADD COLUMN orders_last_sync_at DOUBLE PRECISION NOT NULL DEFAULT 0")
 
     conn.execute(
         """
@@ -130,7 +138,7 @@ def _connect():
 
 _SELECT_COLS = (
     "id, company_id, integration_type, integration_category, status, credentials, "
-    "settings, created_at, updated_at, last_sync_at, token_expires_at"
+    "settings, created_at, updated_at, last_sync_at, token_expires_at, orders_last_sync_at"
 )
 
 
@@ -143,7 +151,7 @@ def _row_to_integration(r: tuple) -> CompanyIntegration:
         credentials=crypto.decrypt_dict(r[5]) if r[5] else {},
         settings=json.loads(r[6]) if r[6] else {},
         created_at=r[7] or 0.0, updated_at=r[8] or 0.0, last_sync_at=r[9] or 0.0,
-        token_expires_at=r[10] or 0.0,
+        token_expires_at=r[10] or 0.0, orders_last_sync_at=r[11] or 0.0,
     )
 
 
@@ -192,21 +200,22 @@ def upsert_integration(integration: CompanyIntegration) -> CompanyIntegration:
         conn.execute(
             """INSERT INTO company_integrations
                (id, company_id, integration_type, integration_category, status, credentials,
-                settings, created_at, updated_at, last_sync_at, token_expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                settings, created_at, updated_at, last_sync_at, token_expires_at, orders_last_sync_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (id) DO UPDATE SET
                    company_id = EXCLUDED.company_id, integration_type = EXCLUDED.integration_type,
                    integration_category = EXCLUDED.integration_category, status = EXCLUDED.status,
                    credentials = EXCLUDED.credentials, settings = EXCLUDED.settings,
                    created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at,
-                   last_sync_at = EXCLUDED.last_sync_at, token_expires_at = EXCLUDED.token_expires_at""",
+                   last_sync_at = EXCLUDED.last_sync_at, token_expires_at = EXCLUDED.token_expires_at,
+                   orders_last_sync_at = EXCLUDED.orders_last_sync_at""",
             (
                 integration.id, integration.company_id, integration.integration_type,
                 integration.integration_category, integration.status,
                 crypto.encrypt_dict(integration.credentials) if integration.credentials else "",
                 json.dumps(integration.settings or {}),
                 integration.created_at, integration.updated_at, integration.last_sync_at,
-                integration.token_expires_at,
+                integration.token_expires_at, integration.orders_last_sync_at,
             ),
         )
     conn.close()
@@ -235,6 +244,34 @@ def touch_last_sync(company_id: str, integration_type: str) -> None:
             (time.time(), company_id, integration_type),
         )
     conn.close()
+
+
+def touch_orders_last_sync(company_id: str, integration_type: str) -> None:
+    """Advances the order-sync cursor only — never touches last_sync_at
+    (the separate product/catalog export cursor), see the
+    orders_last_sync_at field's docstring on CompanyIntegration."""
+    conn = _connect()
+    with conn:
+        conn.execute(
+            "UPDATE company_integrations SET orders_last_sync_at = ? WHERE company_id = ? AND integration_type = ?",
+            (time.time(), company_id, integration_type),
+        )
+    conn.close()
+
+
+def list_connected_companies(integration_type: str) -> List[CompanyIntegration]:
+    """Cross-tenant on purpose — for the scheduler's own periodic scan
+    across every company, same convention as
+    sync_rules_store.list_active_rules() (internal infra, not a
+    user-facing per-company query like get_integration()/list_integrations()
+    above)."""
+    conn = _connect()
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLS} FROM company_integrations WHERE integration_type = ? AND status = ?",
+        (integration_type, STATUS_CONNECTED),
+    ).fetchall()
+    conn.close()
+    return [_row_to_integration(r) for r in rows]
 
 
 def record_sync(

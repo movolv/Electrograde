@@ -160,75 +160,99 @@ function priceCellFormatter(params) {
   return (v === null || v === undefined || v === "") ? "" : "$" + Number(v).toFixed(2);
 }
 
-// Order matters: desktop's must-have set (photo, sku, name, quantity, price)
-// comes first, left to right, matching the priority given in the spec;
-// product_condition/status/date follow as additional desktop-only columns. Mobile hides
-// everything outside MOBILE_VISIBLE_FIELDS below, regardless of order.
-var columnDefs = [
-  {
-    field: "photo_url", headerName: "Photo", cellRenderer: photoCellRenderer,
-    width: 110, minWidth: 60, maxWidth: 400, sortable: false, filter: false, resizable: true,
-  },
-  { field: "sku", headerName: "SKU", width: 110, minWidth: 90 },
-  { field: "name", headerName: "Product Name", flex: 1, minWidth: 160 },
-  { field: "brand", headerName: "Brand", width: 110, minWidth: 90 },
-  { field: "quantity", headerName: "Qty", width: 90, minWidth: 70, type: "numericColumn" },
-  { field: "price", headerName: "Price", width: 100, minWidth: 80, type: "numericColumn", valueFormatter: priceCellFormatter },
-  { field: "product_condition", headerName: "Product Condition", width: 130, minWidth: 100 },
-  { field: "triage", headerName: "Triage", width: 140, minWidth: 110 },
-  { field: "location", headerName: "Location", width: 110, minWidth: 90 },
-  { field: "baselinker", headerName: "BaseLinker", width: 120, minWidth: 100 },
-  { field: "status", headerName: "Status", width: 130, minWidth: 110 },
-  { field: "date", headerName: "Date", width: 120, minWidth: 100 },
-];
+// Column definitions come from Python (args.column_defs) rather than being
+// hardcoded here, so this one grid infrastructure — wire protocol,
+// selection column, responsive collapsing, column-state persistence,
+// double-click/Enter-to-open — is shared by every caller (Product List,
+// Orders, ...) instead of duplicated per page. Each Python-supplied column
+// is {field, headerName, width, minWidth, maxWidth, flex, type,
+// resizable}; `type` resolves through this small registry rather than
+// trying to pass a JS function through JSON (which isn't possible).
+var CELL_TYPE_EXTRAS = {
+  photo: { cellRenderer: photoCellRenderer, sortable: false, filter: false },
+  price: { type: "numericColumn", valueFormatter: priceCellFormatter },
+  numeric: { type: "numericColumn" },
+  text: {},
+};
 
-// Mobile: show only the essentials (checkbox column is separate/always
-// shown). Everything else collapses away rather than needing a distinct
-// card-view layout — same grid, same data, fewer visible columns, and
-// compact widths so those few columns actually fit a phone screen without
-// a horizontal scroll (their normal desktop widths alone still add up to
+function buildColumnDefs(columns) {
+  return (columns || []).map(function (col) {
+    var extras = CELL_TYPE_EXTRAS[col.type] || {};
+    return Object.assign(
+      {
+        field: col.field,
+        headerName: col.headerName,
+        width: col.width,
+        minWidth: col.minWidth,
+        maxWidth: col.maxWidth,
+        flex: col.flex,
+        resizable: col.resizable !== false,
+        _kind: col.type,  // kept for buildResponsiveColumnDefs()'s mobile-width logic below — not an AG Grid option
+      },
+      extras,
+    );
+  });
+}
+
+// Mobile: show only the columns the caller listed in mobile_fields (the
+// checkbox selection column is separate/always shown) — same grid, same
+// data, fewer visible columns, with compact widths on the "photo"/"price"
+// -kind columns so those few columns actually fit a phone screen without a
+// horizontal scroll (their normal desktop widths alone still add up to
 // more than a typical phone viewport).
-var MOBILE_VISIBLE_FIELDS = ["photo_url", "name", "price"];
 var MOBILE_BREAKPOINT_PX = 700;
 var wasMobile = false;
-// Both variants set `hide` explicitly (true AND false) on every column —
-// setGridOption("columnDefs", ...) merges new defs against AG Grid's
-// existing internal column state rather than fully resetting it, so a
-// colDef that never mentions `hide` at all does NOT clear a column that a
-// previous columnDefs swap had hidden; it silently stays hidden.
-var DESKTOP_COLUMN_DEFS = columnDefs.map(function (col) {
-  return Object.assign({}, col, { hide: false });
-});
-var MOBILE_COLUMN_DEFS = columnDefs.map(function (col) {
-  var c = Object.assign({}, col);
-  c.hide = col.field !== "photo_url" && col.field !== "name" && MOBILE_VISIBLE_FIELDS.indexOf(col.field) === -1;
-  if (col.field === "photo_url") { c.width = 56; }
-  else if (col.field === "price") { c.width = 76; }
-  return c;
-});
+var currentMobileFields = [];
+var DESKTOP_COLUMN_DEFS = [];
+var MOBILE_COLUMN_DEFS = [];
+var columnsInitialized = false;
+
+function buildResponsiveColumnDefs(builtColumnDefs, mobileFields) {
+  // Both variants set `hide` explicitly (true AND false) on every column —
+  // setGridOption("columnDefs", ...) merges new defs against AG Grid's
+  // existing internal column state rather than fully resetting it, so a
+  // colDef that never mentions `hide` at all does NOT clear a column that a
+  // previous columnDefs swap had hidden; it silently stays hidden.
+  var desktop = builtColumnDefs.map(function (col) {
+    return Object.assign({}, col, { hide: false });
+  });
+  var mobile = builtColumnDefs.map(function (col) {
+    var c = Object.assign({}, col);
+    c.hide = mobileFields.indexOf(col.field) === -1;
+    if (col._kind === "photo") { c.width = 56; }
+    else if (col._kind === "price") { c.width = 76; }
+    return c;
+  });
+  return { desktop: desktop, mobile: mobile };
+}
 
 // Bumped from v1: an earlier build of the responsive columns feature had a
 // bug where mobile's column-hiding got persisted as if it were a real user
 // preference (see the event.source check in onColumnMoved/onColumnResized
 // below) — a new key means any browser that already saved that bad state
 // starts clean instead of being stuck with columns wrongly hidden on
-// desktop forever.
-var COLUMN_STATE_KEY = "review_table_column_state_v2";
+// desktop forever. Now suffixed per caller (`state_key`, e.g. "products"/
+// "orders") so two different pages sharing this same grid component never
+// read or clobber each other's saved column widths.
+var currentStateKey = "default";
+function columnStateStorageKey() {
+  return "review_table_column_state_v2_" + currentStateKey;
+}
 
 function saveColumnState() {
   try {
-    localStorage.setItem(COLUMN_STATE_KEY, JSON.stringify(gridApi.getColumnState()));
+    localStorage.setItem(columnStateStorageKey(), JSON.stringify(gridApi.getColumnState()));
   } catch (e) { /* localStorage unavailable — persistence just won't work this session */ }
 }
 function restoreColumnState() {
   try {
-    var raw = localStorage.getItem(COLUMN_STATE_KEY);
+    var raw = localStorage.getItem(columnStateStorageKey());
     if (raw) { gridApi.applyColumnState({ state: JSON.parse(raw), applyOrder: true }); }
   } catch (e) { /* ignore malformed/missing saved state */ }
 }
 
 function applyResponsiveColumns() {
-  if (!gridApi) { return; }
+  if (!gridApi || !columnsInitialized) { return; }
   // A width of 0 (or anything implausibly small) means the iframe hasn't
   // actually been laid out by the parent page yet — not a real "mobile"
   // reading. Trusting it caused a bogus lock into mobile mode on desktop
@@ -261,7 +285,7 @@ function scheduleResponsiveColumnsCheck() {
 
 var gridOptions = {
   theme: THEME,
-  columnDefs: columnDefs,
+  columnDefs: [],  // real columns arrive with the first streamlit:render message — see the message handler below
   defaultColDef: defaultColDef,
   rowData: [],
   getRowId: function (params) { return params.data.id; },
@@ -308,16 +332,9 @@ var gridOptions = {
 
 document.addEventListener("DOMContentLoaded", function () {
   gridApi = agGrid.createGrid(document.getElementById("grid"), gridOptions);
-  restoreColumnState();
-  applyResponsiveColumns();
-  // ResizeObserver, not window's own "resize" event: at DOMContentLoaded
-  // time Streamlit hasn't necessarily finished sizing this iframe to match
-  // its final container width yet (it can still be at the browser's
-  // default ~300px), so the single applyResponsiveColumns() call above can
-  // read a stale width and wrongly latch into mobile mode with nothing to
-  // correct it afterward — window "resize" only fires on later changes, not
-  // on that initial layout convergence. ResizeObserver instead re-fires
-  // immediately once the real size is known, and on every change after.
+  // Real columns aren't known yet (they arrive with the first render
+  // message below), so restoreColumnState()/applyResponsiveColumns() are
+  // deferred until then — nothing to restore/apply onto an empty grid.
   if (window.ResizeObserver) {
     new ResizeObserver(scheduleResponsiveColumnsCheck).observe(document.documentElement);
   } else {
@@ -334,6 +351,20 @@ window.addEventListener("message", function (event) {
   var args = data.args || {};
   var rows = args.rows || [];
   if (!gridApi) { return; }
+
+  if (!columnsInitialized) {
+    currentStateKey = args.state_key || "default";
+    currentMobileFields = args.mobile_fields || [];
+    var built = buildColumnDefs(args.column_defs || []);
+    var responsive = buildResponsiveColumnDefs(built, currentMobileFields);
+    DESKTOP_COLUMN_DEFS = responsive.desktop;
+    MOBILE_COLUMN_DEFS = responsive.mobile;
+    gridApi.setGridOption("columnDefs", DESKTOP_COLUMN_DEFS);
+    columnsInitialized = true;
+    restoreColumnState();
+    applyResponsiveColumns();
+  }
+
   gridApi.setGridOption("rowData", rows);
 
   if (lastClearSeq === null) {
@@ -350,7 +381,11 @@ window.addEventListener("message", function (event) {
       var node = gridApi.getRowNode(focusId);
       if (node) {
         gridApi.ensureNodeVisible(node, "middle");
-        gridApi.setFocusedCell(node.rowIndex, "sku");
+        // First non-photo column (a text/numeric field actually worth
+        // focusing) rather than a hardcoded field name — generalizes
+        // the old literal "sku" for callers whose columns don't include one.
+        var focusCol = DESKTOP_COLUMN_DEFS.filter(function (c) { return c._kind !== "photo"; })[0];
+        if (focusCol) { gridApi.setFocusedCell(node.rowIndex, focusCol.field); }
         gridApi.flashCells({ rowNodes: [node] });
       }
     }, 60);

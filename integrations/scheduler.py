@@ -29,6 +29,7 @@ from modules import integration_store, sync_job_store, sync_rules_store
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 30
+ORDER_SYNC_INTERVAL_SECONDS = 300  # 5 minutes — see poll_order_sync_once()
 
 # integration_type -> callable(company_id, integration_type, job_type, payload).
 # Raise on failure (feeds retry/backoff); return normally on success. Empty
@@ -145,6 +146,53 @@ def poll_two_way_sync_once() -> int:
     return processed
 
 
+def poll_order_sync_once() -> int:
+    """Order sync's own due-scan — connector-agnostic (loops every
+    marketplace CatalogEntry, never hardcodes "baselinker") and uses its own
+    orders_last_sync_at cursor, completely independent of last_sync_at
+    (the product/catalog export cursor poll_once()/poll_two_way_sync_once()
+    use) — see modules/integration_store.py's CompanyIntegration docstring.
+    Only BaseLinker's connector overrides fetch_orders() non-trivially
+    today; every other connector's default [] just means this is a no-op
+    for it, same honest-empty convention as fetch_catalog(). Returns how
+    many companies were actually synced this tick."""
+    from modules import order_store, sync_job_store
+    from integrations import manager
+
+    synced = 0
+    now = _now()
+    for entry in manager.CATALOG:
+        if entry.integration_category != integration_store.CATEGORY_MARKETPLACE or not entry.available:
+            continue
+        for record in integration_store.list_connected_companies(entry.integration_type):
+            if now - record.orders_last_sync_at < ORDER_SYNC_INTERVAL_SECONDS:
+                continue
+
+            job = sync_job_store.create_job(
+                record.company_id, entry.integration_type, sync_job_store.JOB_TYPE_ORDER_IMPORT,
+                trigger=sync_job_store.TRIGGER_SCHEDULED, direction="pull",
+            )
+            if job is None:
+                continue  # an order_import job for this company/integration is already in flight
+
+            try:
+                connector = manager.get(record.company_id, entry.integration_type)
+                orders = connector.fetch_orders(since=record.orders_last_sync_at)
+                for order in orders:
+                    searchable_skus = " ".join(i.sku for i in order.items if i.sku)
+                    order_store.upsert_order(order, searchable_skus=searchable_skus)
+            except Exception as e:  # noqa: BLE001 - one company's failure must never kill the scheduler tick
+                sync_job_store.mark_failure(job.id, str(e), job.attempts, job.max_attempts)
+                _log_terminal(job, integration_store.SYNC_STATUS_ERROR, str(e))
+                continue
+
+            sync_job_store.mark_success(job.id)
+            _log_terminal(job, integration_store.SYNC_STATUS_SUCCESS)
+            integration_store.touch_orders_last_sync(record.company_id, entry.integration_type)
+            synced += 1
+    return synced
+
+
 def prune_old_logs_once(days: int = _LOG_RETENTION_DAYS) -> int:
     """Deletes audit_log/sync_logs/integration_sync_log rows older than
     `days`, at most once per _PRUNE_INTERVAL_SECONDS — without this, all
@@ -179,6 +227,7 @@ def run_forever(poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
             poll_once()
             process_due_jobs()
             poll_two_way_sync_once()
+            poll_order_sync_once()
             prune_old_logs_once()
         except Exception:
             logger.exception("Sync scheduler tick failed")

@@ -41,6 +41,7 @@ from modules import (
     manifest_import,
     manifest_store,
     marketplace_store,
+    order_store,
     platform_admin_store,
     pricing,
     product_change_log_store,
@@ -77,6 +78,44 @@ THUMB_MAX_DIM = 96
 # fallback below with a real logo — no code change needed (see
 # _render_integration_logo in the Settings page).
 INTEGRATION_LOGOS_DIR = STATIC_DIR / "integration_logos"
+
+# review_table()'s column config for the Product List page — moved out of
+# modules/review_table_frontend/index.html (was hardcoded JS) so that same
+# grid component can be reused by other pages (e.g. Orders) with their own
+# columns. Order matters: desktop's must-have set (photo, sku, name,
+# quantity, price) comes first, left to right; product_condition/triage/
+# location/baselinker/status/date follow as additional desktop-only
+# columns. _PRODUCT_TABLE_MOBILE_FIELDS hides everything else below the
+# responsive breakpoint, regardless of this order.
+_PRODUCT_TABLE_COLUMNS = [
+    {"field": "photo_url", "headerName": "Photo", "width": 110, "minWidth": 60, "maxWidth": 400, "type": "photo"},
+    {"field": "sku", "headerName": "SKU", "width": 110, "minWidth": 90},
+    {"field": "name", "headerName": "Product Name", "flex": 1, "minWidth": 160},
+    {"field": "brand", "headerName": "Brand", "width": 110, "minWidth": 90},
+    {"field": "quantity", "headerName": "Qty", "width": 90, "minWidth": 70, "type": "numeric"},
+    {"field": "price", "headerName": "Price", "width": 100, "minWidth": 80, "type": "price"},
+    {"field": "product_condition", "headerName": "Product Condition", "width": 130, "minWidth": 100},
+    {"field": "triage", "headerName": "Triage", "width": 140, "minWidth": 110},
+    {"field": "location", "headerName": "Location", "width": 110, "minWidth": 90},
+    {"field": "baselinker", "headerName": "BaseLinker", "width": 120, "minWidth": 100},
+    {"field": "status", "headerName": "Status", "width": 130, "minWidth": 110},
+    {"field": "date", "headerName": "Date", "width": 120, "minWidth": 100},
+]
+_PRODUCT_TABLE_MOBILE_FIELDS = ["photo_url", "name", "price"]
+
+# review_table()'s column config for the Orders page — see modules/models.py's
+# Order dataclass and modules/order_store.py for where these fields come from.
+_ORDER_TABLE_COLUMNS = [
+    {"field": "order_number", "headerName": "Number", "width": 120, "minWidth": 100},
+    {"field": "customer_name", "headerName": "Customer", "flex": 1, "minWidth": 140},
+    {"field": "items_summary", "headerName": "Items", "flex": 1.4, "minWidth": 180},
+    {"field": "price_total", "headerName": "Price", "width": 100, "minWidth": 80, "type": "price"},
+    {"field": "shipping_method", "headerName": "Shipping", "width": 130, "minWidth": 100},
+    {"field": "order_date_label", "headerName": "Date", "width": 120, "minWidth": 100},
+    {"field": "status_label", "headerName": "Status", "width": 130, "minWidth": 110},
+    {"field": "marketplace", "headerName": "Marketplace", "width": 130, "minWidth": 100},
+]
+_ORDER_TABLE_MOBILE_FIELDS = ["order_number", "customer_name", "price_total"]
 
 
 def _ensure_thumbnail(image_path: str) -> Path | None:
@@ -1012,14 +1051,16 @@ st.set_page_config(
     page_icon="📱",
     # Every other page is deliberately narrow/mobile-first (photo capture,
     # single-column forms) — Product List (which now absorbs the old
-    # Inventory, Review & Export, and CSV/Excel Export pages) is the one
-    # desktop-oriented, data-grid-heavy page, so it gets the wide layout.
+    # Inventory, Review & Export, and CSV/Excel Export pages) and Orders
+    # are the desktop-oriented, data-grid-heavy pages, so those two get the
+    # wide layout (Orders' review_table() grid has 8 columns — "centered"'s
+    # ~730px content width clipped the rightmost one out of view).
     # st.session_state already holds last run's
     # sidebar radio value (via its key="page" below) before the radio
     # widget itself re-renders, which is what makes a per-page layout
     # possible at all — set_page_config must be the first Streamlit call,
     # before the radio exists to read from directly.
-    layout="wide" if st.session_state.get("page") == "🗂️ Product List" else "centered",
+    layout="wide" if st.session_state.get("page") in ("🗂️ Product List", "📦 Orders") else "centered",
     initial_sidebar_state="collapsed",
 )
 pwa.inject_pwa_head()
@@ -1202,6 +1243,13 @@ def _init_state():
         "rex_batch_filter": "",
         "rex_exact_search": "",
         "rex_filters_open": False,      # whether the Filter Products panel is expanded
+        # Orders page — same list/detail session-state shape as Review & Export above.
+        "orders_open_id": None,         # order id whose detail view is open, or None for list view
+        "orders_page": 1,               # current page number (1-based) of the paginated list
+        "orders_search": "",
+        "orders_marketplace_filter": "",
+        "orders_status_filter": None,
+        "orders_clear_seq": 0,          # bumped to tell the grid to deselect all (no remount needed)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1318,7 +1366,7 @@ if st.sidebar.button("Log out", use_container_width=True):
     st.rerun()
 st.sidebar.divider()
 
-_nav_pages = ["🆕 New Item", "🗂️ Product List"]
+_nav_pages = ["🆕 New Item", "🗂️ Product List", "📦 Orders"]
 if current_user.role == auth.ROLE_ADMIN:
     _nav_pages.insert(1, "📥 Import Manifest")
     _nav_pages.append("👥 Manage Users")
@@ -1328,6 +1376,18 @@ if current_user.role == auth.ROLE_ADMIN:
 # their own company and still be a platform Super Admin.
 if auth.is_super_admin(current_user.id):
     _nav_pages.append("🏢 Companies")
+
+# Programmatic cross-page navigation (e.g. the Orders page's "click a SKU
+# to open its product card" link) can't just assign st.session_state.page
+# directly — Streamlit raises StreamlitAPIException for writing to a
+# widget-bound key AFTER that widget has already been instantiated once in
+# the current run, which the *next* rerun's radio below always has been by
+# the time a later button handler runs. Setting this indirection flag
+# instead and consuming it here, before the radio widget exists this run,
+# avoids that entirely.
+if st.session_state.get("_pending_nav_page"):
+    st.session_state["page"] = st.session_state.pop("_pending_nav_page")
+
 page = st.sidebar.radio(
     "Navigate",
     _nav_pages,
@@ -3517,6 +3577,9 @@ elif page == "🗂️ Product List":
                 # twice would be harmless (idempotent) but redundant.
                 review_table(
                     rows=table_rows,
+                    columns=_PRODUCT_TABLE_COLUMNS,
+                    mobile_fields=_PRODUCT_TABLE_MOBILE_FIELDS,
+                    state_key="products",
                     focus_id=focus_id,
                     clear_seq=st.session_state.rex_clear_seq,
                     key="rex_table",
@@ -3596,6 +3659,203 @@ elif page == "🗂️ Product List":
                 _render_product_card(p)
 
 # =========================================================== MANAGE USERS =
+# ================================================================ ORDERS ==
+elif page == "📦 Orders":
+    ORDERS_PAGE_SIZE = 50
+
+    st.title("📦 Orders")
+    st.caption(
+        "Orders pulled in from your connected marketplaces — read-only here, "
+        "synced automatically in the background."
+    )
+
+    if st.session_state.orders_open_id is None:
+        # -------------------------------------------------------- LIST VIEW --
+        search_col, marketplace_col, refresh_col = st.columns([2, 1, 1])
+        with search_col:
+            orders_search_in = st.text_input(
+                "Search", value=st.session_state.orders_search,
+                placeholder="Order number, customer name, or SKU",
+                key="orders_search_input", label_visibility="collapsed",
+            )
+        with marketplace_col:
+            orders_marketplace_in = st.text_input(
+                "Marketplace", value=st.session_state.orders_marketplace_filter,
+                placeholder="Marketplace", key="orders_marketplace_input", label_visibility="collapsed",
+            )
+        with refresh_col:
+            if st.button("🔄 Refresh", use_container_width=True):
+                st.rerun()
+
+        if (
+            orders_search_in != st.session_state.orders_search
+            or orders_marketplace_in != st.session_state.orders_marketplace_filter
+        ):
+            st.session_state.orders_search = orders_search_in
+            st.session_state.orders_marketplace_filter = orders_marketplace_in
+            st.session_state.orders_page = 1
+            st.rerun()
+
+        orders_page_rows, orders_total = order_store.list_orders_paginated(
+            st.session_state.company_id,
+            marketplace=st.session_state.orders_marketplace_filter or None,
+            status_id=st.session_state.orders_status_filter,
+            search=st.session_state.orders_search or None,
+            page=st.session_state.orders_page,
+            page_size=ORDERS_PAGE_SIZE,
+        )
+        orders_total_pages = max(1, (orders_total + ORDERS_PAGE_SIZE - 1) // ORDERS_PAGE_SIZE)
+
+        if not orders_page_rows:
+            st.info(
+                "No orders yet. Connect a marketplace integration in Settings -> "
+                "Integrations to start syncing orders here."
+            )
+        else:
+            table_rows = []
+            for o in orders_page_rows:
+                table_rows.append({
+                    "id": o.id,
+                    "order_number": o.order_number or "(none)",
+                    "customer_name": o.customer_name or "—",
+                    "items_summary": o.items_summary or "—",
+                    "price_total": o.price_total or 0,
+                    "shipping_method": o.shipping_method or "—",
+                    "order_date_label": (
+                        time.strftime("%Y-%m-%d", time.localtime(o.order_date)) if o.order_date else "—"
+                    ),
+                    "status_label": o.status_label or "—",
+                    "marketplace": o.marketplace or "—",
+                })
+
+            orders_table_result = review_table(
+                rows=table_rows,
+                columns=_ORDER_TABLE_COLUMNS,
+                mobile_fields=_ORDER_TABLE_MOBILE_FIELDS,
+                state_key="orders",
+                clear_seq=st.session_state.orders_clear_seq,
+                key="orders_table",
+            )
+            if (
+                orders_table_result
+                and orders_table_result.get("open_id")
+                and orders_table_result["open_id"] != st.session_state.orders_open_id
+            ):
+                st.session_state.orders_open_id = orders_table_result["open_id"]
+                st.rerun()
+
+            # Simple previous/next pagination — Orders has no bulk-action
+            # toolbar to anchor Product List's fuller numbered widget against.
+            pg_prev, pg_label, pg_next = st.columns([1, 2, 1])
+            with pg_prev:
+                if st.button("‹ Previous", disabled=st.session_state.orders_page <= 1, use_container_width=True):
+                    st.session_state.orders_page -= 1
+                    st.rerun()
+            with pg_label:
+                st.markdown(
+                    f"<div style='text-align:center;padding-top:6px;'>"
+                    f"Page {st.session_state.orders_page} of {orders_total_pages} — {orders_total} order(s)</div>",
+                    unsafe_allow_html=True,
+                )
+            with pg_next:
+                if st.button(
+                    "Next ›", disabled=st.session_state.orders_page >= orders_total_pages,
+                    use_container_width=True,
+                ):
+                    st.session_state.orders_page += 1
+                    st.rerun()
+
+    else:
+        # ------------------------------------------------------ DETAIL VIEW --
+        order = order_store.get_order(st.session_state.orders_open_id, st.session_state.company_id)
+        if order is None:
+            st.warning("Order not found — it may have been removed.")
+            if st.button("← Back to list"):
+                st.session_state.orders_open_id = None
+                st.rerun()
+        else:
+            if st.button("← Back to list"):
+                st.session_state.orders_open_id = None
+                st.rerun()
+
+            st.subheader(f"Order {order.order_number or order.external_order_id}")
+            _source_caption = " · ".join(x for x in [order.marketplace, order.order_source] if x)
+            if _source_caption:
+                st.caption(_source_caption)
+
+            info_col, ship_col = st.columns(2)
+            with info_col:
+                st.markdown("**Customer**")
+                st.write(order.customer_name or "—")
+                if order.email:
+                    st.write(f"✉️ {order.email}")
+                if order.phone:
+                    st.write(f"📞 {order.phone}")
+                if order.customer_comments:
+                    st.markdown("**Customer comments**")
+                    st.write(order.customer_comments)
+            with ship_col:
+                st.markdown("**Status**")
+                st.write(order.status_label or "—")
+                st.markdown("**Order date**")
+                st.write(
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(order.order_date))
+                    if order.order_date else "—"
+                )
+                st.markdown("**Shipping method**")
+                st.write(order.shipping_method or "—")
+
+            def _render_order_address(addr):
+                lines = [
+                    addr.full_name, addr.company, addr.address,
+                    " ".join(x for x in [addr.postcode, addr.city] if x), addr.state, addr.country,
+                ]
+                rendered = False
+                for line in lines:
+                    if line:
+                        st.write(line)
+                        rendered = True
+                if not rendered:
+                    st.write("—")
+
+            addr_col1, addr_col2 = st.columns(2)
+            with addr_col1:
+                st.markdown("**Delivery address**")
+                _render_order_address(order.delivery_address)
+            with addr_col2:
+                st.markdown("**Invoice address**")
+                _render_order_address(order.invoice_address)
+
+            st.divider()
+            st.markdown("**Items**")
+            if not order.items:
+                st.caption("No item detail available for this order.")
+            for item in order.items:
+                item_cols = st.columns([3, 2, 1, 1, 1])
+                with item_cols[0]:
+                    st.write(item.name or "—")
+                with item_cols[1]:
+                    if item.sku:
+                        linked_product = inventory_store.get_product_by_sku(st.session_state.company_id, item.sku)
+                        if linked_product:
+                            if st.button(item.sku, key=f"order_item_sku_{order.id}_{item.sku}"):
+                                st.session_state["_pending_nav_page"] = "🗂️ Product List"
+                                st.session_state.rex_open_product_id = linked_product.id
+                                st.rerun()
+                        else:
+                            st.write(item.sku)
+                    else:
+                        st.write("—")
+                with item_cols[2]:
+                    st.write(f"{item.quantity}x")
+                with item_cols[3]:
+                    st.write(f"{item.price:.2f} {order.currency}".strip())
+                with item_cols[4]:
+                    st.write(f"{item.price * item.quantity:.2f} {order.currency}".strip())
+
+            st.divider()
+            st.markdown(f"**Total: {order.price_total:.2f} {order.currency}**".strip())
+
 elif page == "👥 Manage Users":
     st.title("👥 Manage Users")
     try:
