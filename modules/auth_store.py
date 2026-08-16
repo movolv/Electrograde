@@ -32,6 +32,7 @@ class User:
     created_at: float = field(default_factory=time.time)
     updated_at: float = 0.0
     last_login_at: float = 0.0  # stamped by auth.verify_login() on success
+    language: str = "en"  # UI language ("en" | "lv") — see modules/i18n.py
 
     def to_dict(self) -> dict:
         return asdict(self)

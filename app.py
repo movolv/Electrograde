@@ -33,6 +33,7 @@ from modules import (
     description_gen,
     export,
     field_mapping_store,
+    i18n,
     identifier_lookup,
     image_pipeline,
     integration_store,
@@ -273,7 +274,7 @@ def _render_import_progress(company_id: str, connector_name: str) -> None:
     if job is None or job.status != catalog_import_job_store.STATUS_RUNNING:
         return
     st.progress(job.imported / job.total if job.total else 0.0)
-    st.caption(f"Importing… {job.imported}/{job.total} done, {job.skipped} skipped, {job.error_count} error(s).")
+    st.caption(T("settings.importing_progress", imported=job.imported, total=job.total, skipped=job.skipped, error_count=job.error_count))
 
 
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
@@ -310,8 +311,7 @@ def _enlarge_camera_preview():
     address bar resizes the plain viewport — `dvh` tracks the actual
     visible area instead of pushing the shutter button off-screen.
     """
-    st.markdown(
-        """
+    _camera_css = """
         <style>
         div[data-testid="stCameraInput"] { position: relative !important; }
         div[data-testid="stCameraInput"] > label { display: none !important; }
@@ -367,7 +367,7 @@ def _enlarge_camera_preview():
             line-height: 0 !important;
         }
         button[data-testid="stCameraInputButton"]::after {
-            content: "Take Photo" !important;
+            content: "__TAKE_PHOTO_LABEL__" !important;
             position: absolute !important;
             top: 50% !important;
             left: 50% !important;
@@ -379,9 +379,9 @@ def _enlarge_camera_preview():
             white-space: nowrap !important;
         }
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        """
+    _camera_css = _camera_css.replace("__TAKE_PHOTO_LABEL__", T("new_item.take_photo_shutter"))
+    st.markdown(_camera_css, unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -503,17 +503,17 @@ def _render_photo_gallery(product):
             try:
                 st.session_state.captured_photos.append(future.result())
             except Exception as e:
-                st.error(f"Photo processing failed: {e}")
+                st.error(T("new_item.photo_processing_failed", error=e))
 
     photos = st.session_state.captured_photos
     pending_count = len(st.session_state.pending_photos)
     if not photos and not pending_count:
         return
 
-    status = f"**{len(photos)} photo(s) captured**"
+    status = T("new_item.photos_captured", count=len(photos))
     if pending_count:
-        status += f" · ⏳ {pending_count} still processing..."
-    st.write(status)
+        status += " · " + T("new_item.still_processing", count=pending_count)
+    st.write(f"**{status}**")
 
     cols = st.columns(4)
     for i, img_bytes in enumerate(photos):
@@ -523,18 +523,14 @@ def _render_photo_gallery(product):
                 # Only the first (main listing) photo — this is the one
                 # shown in search results/thumbnails, so it's the one
                 # worth a clean white e-commerce background.
-                if st.button("🧼 Clean background", key="clean_bg_0", use_container_width=True):
-                    with st.spinner("Enhancing photo — first run downloads the model (~170MB) and may take a minute..."):
+                if st.button(T("new_item.clean_background"), key="clean_bg_0", use_container_width=True):
+                    with st.spinner(T("new_item.enhancing_photo")):
                         try:
                             enhanced, score, report = image_pipeline.process_image(img_bytes)
                         except image_pipeline.LowQualityImageError as e:
-                            st.error(
-                                "Photo didn't pass the quality check: "
-                                + " ".join(e.report.issues)
-                                + " Please retake it (better focus/lighting, or closer up)."
-                            )
+                            st.error(T("new_item.quality_check_failed", issues=" ".join(e.report.issues)))
                         except Exception as e:
-                            st.error(f"Background removal failed: {e}")
+                            st.error(T("new_item.background_removal_failed", error=e))
                         else:
                             st.session_state.captured_photos[0] = enhanced.jpeg_bytes
                             if enhanced.low_resolution:
@@ -543,12 +539,7 @@ def _render_photo_gallery(product):
                                 st.toast(warning, icon="⚠️")
                             st.rerun(scope="fragment")
                 if st.session_state.get("photo0_low_res_warning"):
-                    st.caption(
-                        "⚠️ Source photo resolution was too low to fill the "
-                        "frame without blurring — the product was kept at its "
-                        "native sharpness instead. For a bigger, crisper result, "
-                        "retake this photo closer up and in better focus."
-                    )
+                    st.caption(T("new_item.low_res_warning"))
             if st.button("🗑️", key=f"del_photo_{i}"):
                 if i == 0:
                     st.session_state.photo0_low_res_warning = False
@@ -557,40 +548,39 @@ def _render_photo_gallery(product):
 
     for j in range(pending_count):
         with cols[(len(photos) + j) % 4]:
-            st.info("⏳ Processing...")
+            st.info(T("new_item.processing_ellipsis"))
 
     st.divider()
     if product.sku:
         # Already assigned (manifest import auto-assigns SKU on import) —
         # nothing to enter here, never changed or generated by AI.
-        st.write(f"**SKU:** {product.sku}")
-        st.caption("Assigned automatically from the manifest import.")
+        st.write(f"**{T('common.sku')}:** {product.sku}")
+        st.caption(T("new_item.sku_from_manifest"))
         sku_input = product.sku
         sku_missing = False
     else:
         sku_spacer, sku_col = st.columns([1, 1])
         with sku_col:
             sku_input = st.text_input(
-                "SKU *",
+                T("new_item.sku_required"),
                 value=product.sku,
-                placeholder="Enter SKU before continuing",
-                help="Entered manually — never changed or generated by AI. "
-                "This SKU will be linked to all AI analysis results and the Excel record for this item.",
+                placeholder=T("new_item.sku_placeholder"),
+                help=T("new_item.sku_help"),
             )
             sku_missing = not sku_input.strip()
             if sku_missing:
-                st.warning("⚠️ SKU is required before you can continue to analysis.")
+                st.warning(T("new_item.sku_required_warning"))
 
     if pending_count:
-        st.caption("⏳ Waiting for photo processing to finish before continuing...")
+        st.caption(T("new_item.waiting_for_processing"))
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("⬅ Back", use_container_width=True):
+        if st.button(T("common.back"), use_container_width=True):
             st.session_state.wizard_step = 1
             st.rerun()
     with col3:
-        if st.button("Next ➜", type="primary", use_container_width=True, disabled=not photos or sku_missing or bool(pending_count)):
+        if st.button(T("common.next"), type="primary", use_container_width=True, disabled=not photos or sku_missing or bool(pending_count)):
             product.sku = sku_input.strip()
             st.session_state.wizard_step = 3
             st.rerun()
@@ -926,18 +916,18 @@ def _render_spec_lookup_status(product: Product):
     if stage == "idle":
         return
     if stage == "searching":
-        st.info("🔎 Searching...")
+        st.info(T("new_item.stage_searching"))
     elif stage == "candidate_found":
         p = st.session_state.lookup_preview
         label = " ".join(t for t in [p.brand_guess, p.model_guess] if t) if p else ""
-        st.info(f"Candidate found (unconfirmed): {label}" if label else "Candidate found (unconfirmed)")
+        st.info(T("new_item.candidate_found_with_label", label=label) if label else T("new_item.candidate_found"))
     elif stage in ("verifying", "enriching"):
-        st.info("⏳ Verifying / enriching specifications...")
+        st.info(T("new_item.stage_verifying"))
     elif stage == "done":
         if st.session_state.lookup_enrich_error:
-            st.warning(f"Background enrichment failed: {st.session_state.lookup_enrich_error}")
+            st.warning(T("new_item.enrichment_failed", error=st.session_state.lookup_enrich_error))
         else:
-            st.success("✅ Verified")
+            st.success(T("new_item.verified"))
 
 
 def _style_photo_uploader():
@@ -952,8 +942,7 @@ def _style_photo_uploader():
     pseudo-element draws our own label instead, since the button's text
     isn't a Python-settable parameter on this widget.
     """
-    st.markdown(
-        """
+    _uploader_css = """
         <style>
         div[data-testid="stFileUploaderDropzoneInstructions"] {
             display: none !important;
@@ -1028,15 +1017,22 @@ def _style_photo_uploader():
             text-align: center !important;
         }
         section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
-            content: "📷  Take a Photo or Choose from Library" !important;
+            content: "__TAKE_PHOTO_LABEL__" !important;
         }
         section[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-borderlessIcon"]::after {
-            content: "📷  Take Another Photo" !important;
+            content: "__TAKE_ANOTHER_LABEL__" !important;
         }
         </style>
-        """,
-        unsafe_allow_html=True,
+        """
+    # CSS content: text can't come from an f-string here without escaping
+    # every literal { } in the block above — substituting placeholder
+    # tokens after the fact is simpler and just as safe.
+    _uploader_css = (
+        _uploader_css
+        .replace("__TAKE_PHOTO_LABEL__", T("new_item.take_photo_label"))
+        .replace("__TAKE_ANOTHER_LABEL__", T("new_item.take_another_label"))
     )
+    st.markdown(_uploader_css, unsafe_allow_html=True)
 
 
 def sku_folder_name(sku: str, product_id: str) -> str:
@@ -1063,11 +1059,77 @@ st.set_page_config(
     # widget itself re-renders, which is what makes a per-page layout
     # possible at all — set_page_config must be the first Streamlit call,
     # before the radio exists to read from directly.
-    layout="wide" if st.session_state.get("page") in ("🗂️ Product List", "📦 Orders") else "centered",
+    layout="wide" if st.session_state.get("page") in ("product_list", "orders") else "centered",
     initial_sidebar_state="collapsed",
 )
 pwa.inject_pwa_head()
 ensure_scheduler_running()  # unconditional: starts regardless of which page/user loads first
+
+# ---------------------------------------------------------------- language --
+# Set up before auth resolves (below) so the login/register screen itself
+# is translatable too, not just the app behind it — session-only until a
+# real user is known (see the "_language_explicitly_set" re-adoption logic
+# further down, right after current_user is resolved).
+st.session_state.setdefault("language", i18n.DEFAULT_LANGUAGE)
+
+
+def T(key: str, **kwargs) -> str:
+    """Short call-site wrapper around i18n.t() — see modules/i18n.py's
+    module docstring for the standing rule this exists to make easy to
+    follow: every new UI string in this file goes through T("key"), never
+    a raw literal, with both an "en" and "lv" entry added there."""
+    return i18n.t(key, st.session_state.language, **kwargs)
+
+
+# review_table()'s columns are module-level constants (defined above,
+# before T() exists) so their headerName values stay literal English keys
+# into TRANSLATIONS' "table_col.*" namespace — resolved fresh here on
+# every run, after T() is available, rather than at module-definition time.
+def _translated_columns(cols: list) -> list:
+    return [{**c, "headerName": T(f"table_col.{c['field']}")} for c in cols]
+
+
+# ---- Language selector — fixed top-right, next to Streamlit's own "⋮"
+# menu/Deploy button (rendered by Streamlit's own app shell, not this
+# script's normal layout flow, so a plain st.columns placement can't reach
+# it — CSS position:fixed targeting this selectbox's own st-key-* container
+# is what actually relocates it there; same "target by st-key-<key>" CSS
+# scoping already used elsewhere in this file, e.g. the pagination buttons).
+# Rendered on every page, including the pre-login screen, never per-page.
+st.markdown(
+    """
+    <style>
+    div[class*="st-key-lang_selector"] {
+        position: fixed;
+        top: 0.6rem;
+        right: 4.2rem;
+        z-index: 999999;
+        width: 6.5rem;
+    }
+    div[class*="st-key-lang_selector"] div[data-baseweb="select"] {
+        min-height: 2rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+_lang_options = list(i18n.LANGUAGES.keys())
+_lang_choice = st.selectbox(
+    T("topbar.language_label"),
+    options=_lang_options,
+    format_func=lambda code: i18n.LANGUAGES[code],
+    index=_lang_options.index(st.session_state.language),
+    key="lang_selector",
+    label_visibility="collapsed",
+)
+if _lang_choice != st.session_state.language:
+    st.session_state.language = _lang_choice
+    st.session_state["_language_explicitly_set"] = True
+    _logged_in_user = st.session_state.get("auth_user")
+    if _logged_in_user is not None:
+        _logged_in_user.language = _lang_choice
+        auth_store.update_user(_logged_in_user)
+    st.rerun()
 
 # ------------------------------------------------------------------- auth --
 
@@ -1093,14 +1155,17 @@ def _resolve_current_user():
 def _render_login_form():
     st.title("📱 ElectroGrader")
 
-    mode = st.radio("mode", ["Log in", "Register a new company"], label_visibility="collapsed", horizontal=True)
+    mode = st.radio(
+        "mode", [T("login.mode_login"), T("login.mode_register")],
+        label_visibility="collapsed", horizontal=True,
+    )
 
-    if mode == "Log in":
-        st.subheader("Log in")
+    if mode == T("login.mode_login"):
+        st.subheader(T("login.mode_login"))
         with st.form("login_form"):
-            email_in = st.text_input("Email")
-            password_in = st.text_input("Password", type="password")
-            if st.form_submit_button("Log in", type="primary", use_container_width=True):
+            email_in = st.text_input(T("common.email"))
+            password_in = st.text_input(T("common.password"), type="password")
+            if st.form_submit_button(T("login.mode_login"), type="primary", use_container_width=True):
                 user = auth.verify_login(email_in, password_in)
                 if user is None:
                     # A correct password for a still-PENDING company's account
@@ -1109,9 +1174,9 @@ def _render_login_form():
                     # own pass/fail behavior at all (see
                     # auth.is_pending_company_login()'s docstring).
                     if auth.is_pending_company_login(email_in, password_in):
-                        st.warning("Your company registration is pending approval. You'll be able to log in once it's approved.")
+                        st.warning(T("login.pending_approval"))
                     else:
-                        st.error("Invalid email or password.")
+                        st.error(T("login.invalid_credentials"))
                 else:
                     token = auth.create_session(user.id)
                     auth_cookie.set_session_cookie(token, auth.SESSION_TTL_SECONDS)
@@ -1127,22 +1192,23 @@ def _render_login_form():
         return
 
     # ---- Register a new company ----
-    st.subheader("Register a new company")
-    st.caption("A platform Super Admin reviews and approves new companies before you can log in.")
+    st.subheader(T("login.mode_register"))
+    st.caption(T("login.register_caption"))
     with st.form("company_signup_form"):
-        company_name_in = st.text_input("Company name")
+        company_name_in = st.text_input(T("login.company_name"))
         plan_in = st.selectbox(
-            "Plan", ["Trial", "Standard"],
-            help="No plan-specific limits yet — this just records your choice for later.",
+            T("login.plan"), ["Trial", "Standard"],
+            format_func=lambda p: T(f"login.plan_{p.lower()}"),
+            help=T("login.plan_help"),
         )
-        admin_name_in = st.text_input("Your name")
-        admin_email_in = st.text_input("Your email")
-        admin_password_in = st.text_input("Your password", type="password")
-        if st.form_submit_button("Register", type="primary", use_container_width=True):
+        admin_name_in = st.text_input(T("login.your_name"))
+        admin_email_in = st.text_input(T("login.your_email"))
+        admin_password_in = st.text_input(T("login.your_password"), type="password")
+        if st.form_submit_button(T("login.register_button"), type="primary", use_container_width=True):
             if not company_name_in.strip() or not admin_name_in.strip() or not admin_email_in.strip() or not admin_password_in:
-                st.error("All fields are required.")
+                st.error(T("login.all_fields_required"))
             elif company_store.get_company_by_slug(company_name_in):
-                st.error(f"A company named '{company_name_in.strip()}' already exists. Please choose a different name.")
+                st.error(T("login.company_exists", name=company_name_in.strip()))
             else:
                 try:
                     company = company_store.create_company(
@@ -1153,7 +1219,7 @@ def _render_login_form():
                         password=admin_password_in, role=auth.ROLE_ADMIN,
                     )
                     audit_store.log_audit(company.id, user.id, "COMPANY_SIGNUP", "company", company.id)
-                    st.success("Registration submitted — pending approval. You'll be able to log in once approved.")
+                    st.success(T("login.registration_submitted"))
                 except ValueError as e:
                     st.error(str(e))
 
@@ -1269,6 +1335,14 @@ st.session_state["user_id"] = current_user.id
 st.session_state["role"] = current_user.role
 st.session_state["user_name"] = current_user.name
 
+# Adopts the user's saved language preference the first time we know who
+# they are, UNLESS they already explicitly picked one via the selector
+# this session (pre- or post-login) — a mid-session switch must never be
+# silently stomped back to whatever's saved in the DB.
+if not st.session_state.get("_language_explicitly_set") and current_user.language != st.session_state.language:
+    st.session_state.language = current_user.language
+    st.rerun()
+
 
 def reset_wizard():
     st.session_state.wizard_step = 1
@@ -1319,39 +1393,32 @@ def _render_column_mapping_ui(df: pd.DataFrame, key_prefix: str):
     missing_required = [f for f in manifest_import.REQUIRED_FIELDS if f not in confirmed_map]
     if missing_required:
         missing_labels = [manifest_import.FIELD_LABELS[f] for f in missing_required]
-        st.error(f"Missing required mapping for: {', '.join(missing_labels)}")
+        st.error(T("import_manifest.missing_mapping", labels=', '.join(missing_labels)))
     return confirmed_map, missing_required
 
 
-@st.dialog("Delete manifest batch?")
+@st.dialog(T("import_manifest.delete_batch_title"))
 def _confirm_delete_batch_dialog(batch, linked_products):
     pending_count = sum(1 for p in linked_products if p.status == "draft")
     processed_count = len(linked_products) - pending_count
     st.warning(
-        f"This will permanently delete the manifest batch record for "
-        f"**{batch.filename}** (`{batch.id}`) and its "
-        f"**{pending_count} still-pending (unprocessed) product(s)**.\n\n"
-        + (
-            f"**{processed_count} already-processed product(s) will be kept** "
-            "in your inventory — they'll just lose their manifest reference. "
-            if processed_count
-            else ""
-        )
-        + "\n\nThis cannot be undone."
+        T("import_manifest.delete_batch_warning", filename=batch.filename, batch_id=batch.id, pending=pending_count)
+        + (T("import_manifest.delete_batch_kept_note", processed=processed_count) if processed_count else "")
+        + "\n\n" + T("import_manifest.cannot_be_undone")
     )
-    confirm = st.checkbox("I understand, delete this batch")
+    confirm = st.checkbox(T("import_manifest.confirm_delete_checkbox"))
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Cancel", use_container_width=True):
+        if st.button(T("common.cancel"), use_container_width=True):
             st.rerun()
     with col2:
-        if st.button("🗑️ Delete", type="primary", disabled=not confirm, use_container_width=True):
+        if st.button(T("common.delete"), type="primary", disabled=not confirm, use_container_width=True):
             deleted_count = inventory_store.delete_products_by_manifest(
                 batch.id, company_id=st.session_state.company_id
             )
             manifest_store.delete_batch(batch.id, st.session_state.company_id)
             audit_store.log_audit(st.session_state.company_id, current_user.id, "DELETE_MANIFEST", "manifest_batch", batch.id)
-            st.success(f"Deleted batch and {deleted_count} pending product(s).")
+            st.success(T("import_manifest.deleted_batch_success", count=deleted_count))
             st.rerun()
 
 
@@ -1359,8 +1426,8 @@ def _confirm_delete_batch_dialog(batch, linked_products):
 
 st.sidebar.title("📱 ElectroGrader")
 st.sidebar.caption(f"🏢 {current_company.name if current_company else current_user.company_id}")
-st.sidebar.caption(f"👤 {current_user.name} · {current_user.role}")
-if st.sidebar.button("Log out", use_container_width=True):
+st.sidebar.caption(f"👤 {current_user.name} · {T(f'role.{current_user.role}')}")
+if st.sidebar.button(T("common.log_out"), use_container_width=True):
     auth.invalidate_session(st.session_state.get("auth_token", ""))
     auth_cookie.clear_session_cookie()
     for k in ("auth_user", "auth_token"):
@@ -1369,16 +1436,38 @@ if st.sidebar.button("Log out", use_container_width=True):
     st.rerun()
 st.sidebar.divider()
 
-_nav_pages = ["🆕 New Item", "🗂️ Product List", "📦 Orders"]
+# Stable, language-independent identifiers — never rendered directly, only
+# ever compared against (routing below) or looked up in PAGE_LABEL_KEYS for
+# display. Introduced alongside the language selector: before this, the
+# nav labels themselves (e.g. "🆕 New Item") WERE the routing values, which
+# broke the instant a label's translated text changed with the language.
+PAGE_NEW_ITEM = "new_item"
+PAGE_IMPORT_MANIFEST = "import_manifest"
+PAGE_PRODUCT_LIST = "product_list"
+PAGE_ORDERS = "orders"
+PAGE_MANAGE_USERS = "manage_users"
+PAGE_SETTINGS = "settings"
+PAGE_COMPANIES = "companies"
+PAGE_LABEL_KEYS = {
+    PAGE_NEW_ITEM: "nav.new_item",
+    PAGE_IMPORT_MANIFEST: "nav.import_manifest",
+    PAGE_PRODUCT_LIST: "nav.product_list",
+    PAGE_ORDERS: "nav.orders",
+    PAGE_MANAGE_USERS: "nav.manage_users",
+    PAGE_SETTINGS: "nav.settings",
+    PAGE_COMPANIES: "nav.companies",
+}
+
+_nav_pages = [PAGE_NEW_ITEM, PAGE_PRODUCT_LIST, PAGE_ORDERS]
 if current_user.role == auth.ROLE_ADMIN:
-    _nav_pages.insert(1, "📥 Import Manifest")
-    _nav_pages.append("👥 Manage Users")
-    _nav_pages.append("⚙️ Settings")
+    _nav_pages.insert(1, PAGE_IMPORT_MANIFEST)
+    _nav_pages.append(PAGE_MANAGE_USERS)
+    _nav_pages.append(PAGE_SETTINGS)
 # Platform Super Admin — independent of current_user.role/company (see
 # modules/auth.py's is_super_admin()); a user can be a plain "employee" in
 # their own company and still be a platform Super Admin.
 if auth.is_super_admin(current_user.id):
-    _nav_pages.append("🏢 Companies")
+    _nav_pages.append(PAGE_COMPANIES)
 
 # Programmatic cross-page navigation (e.g. the Orders page's "click a SKU
 # to open its product card" link) can't just assign st.session_state.page
@@ -1392,22 +1481,21 @@ if st.session_state.get("_pending_nav_page"):
     st.session_state["page"] = st.session_state.pop("_pending_nav_page")
 
 page = st.sidebar.radio(
-    "Navigate",
+    T("nav.navigate_label"),
     _nav_pages,
+    format_func=lambda k: T(PAGE_LABEL_KEYS[k]),
     label_visibility="collapsed",
     key="page",
 )
 
 if not _ai_configured():
-    st.sidebar.warning(
-        "ANTHROPIC_API_KEY is not set — spec structuring, vision grading and "
-        "description generation will be unavailable until you add it (see README)."
-    )
+    st.sidebar.warning(T("sidebar.ai_key_missing"))
 
 # =========================================================== NEW ITEM ====
-if page == "🆕 New Item":
-    st.title("🆕 New Item")
-    steps = ["1. Identify", "2. Photos", "3. Specs", "4. Grading", "5. Price & Copy", "6. Save"]
+if page == PAGE_NEW_ITEM:
+    st.title(T("nav.new_item"))
+    steps = [T("new_item.step1"), T("new_item.step2"), T("new_item.step3"),
+             T("new_item.step4"), T("new_item.step5"), T("new_item.step6")]
     st.progress((st.session_state.wizard_step - 1) / (len(steps) - 1), text=steps[st.session_state.wizard_step - 1])
 
     product: Product = st.session_state.product
@@ -1423,24 +1511,21 @@ if page == "🆕 New Item":
 
     # ---- Step 1: Identify — from a manifest draft, or from scratch ----
     if st.session_state.wizard_step == 1:
-        st.subheader("Start this item")
+        st.subheader(T("new_item.start_item"))
         source = st.radio(
-            "How do you want to start?",
-            ["📥 From a pending manifest item", "🆕 From scratch (scan/manual)"],
+            T("new_item.how_to_start"),
+            [T("new_item.from_manifest"), T("new_item.from_scratch")],
             horizontal=False,
         )
 
-        if source.startswith("📥"):
+        if source == T("new_item.from_manifest"):
             drafts = inventory_store.list_products(st.session_state.company_id, status="draft")
             if not drafts:
-                st.info(
-                    "No pending manifest items for this company. Use '📥 Import Manifest' "
-                    "to add some, or start from scratch instead."
-                )
+                st.info(T("new_item.no_pending_manifest_items"))
             else:
                 search_query = st.text_input(
-                    "🔍 Search pending items (SKU, Target #, ASIN, or description)",
-                    placeholder="e.g. 2005, T-9001, B08N5WRWNW, hand blender",
+                    T("new_item.search_pending_items"),
+                    placeholder=T("new_item.search_pending_items_placeholder"),
                 )
                 if search_query.strip():
                     q = search_query.strip().lower()
@@ -1451,10 +1536,10 @@ if page == "🆕 New Item":
                         or q in (d.asin or "").lower()
                         or q in (d.manifest_item_description or "").lower()
                     ]
-                    st.caption(f"{len(drafts)} match(es)")
+                    st.caption(T("new_item.match_count", count=len(drafts)))
 
                 if not drafts:
-                    st.info("No pending items match that search.")
+                    st.info(T("new_item.no_pending_items_match"))
                 else:
                     options = {
                         f"SKU {d.sku or '?'} — {d.manifest_target_no or '(no target #)'} — "
@@ -1462,53 +1547,46 @@ if page == "🆕 New Item":
                         f"{(d.manifest_item_description or '(no description)')[:60]}": d.id
                         for d in drafts
                     }
-                    chosen_label = st.selectbox("Pick a pending manifest item", list(options.keys()))
+                    chosen_label = st.selectbox(T("new_item.pick_pending_item"), list(options.keys()))
                     chosen = inventory_store.get_product(options[chosen_label], st.session_state.company_id)
 
-                    st.write(f"**SKU:** {chosen.sku or '—'}")
-                    st.write(f"**Item description:** {chosen.manifest_item_description}")
+                    st.write(f"**{T('common.sku')}:** {chosen.sku or '—'}")
+                    st.write(f"**{T('new_item.item_description')}:** {chosen.manifest_item_description}")
                     cols = st.columns(2)
                     with cols[0]:
                         st.write(f"**ASIN:** {chosen.asin or '—'}")
-                        st.write(f"**EAN/Barcode:** {chosen.manifest_barcode or '—'}")
+                        st.write(f"**{T('new_item.ean_barcode')}:** {chosen.manifest_barcode or '—'}")
                     with cols[1]:
-                        st.write(f"**Qty:** {chosen.manifest_qty}")
-                        st.write(f"**Weight:** {chosen.manifest_weight_kg} kg")
-                    st.caption(
-                        "Reminder: this manifest data is an unverified claim — later steps "
-                        "will independently check it against the actual photos."
-                    )
+                        st.write(f"**{T('new_item.qty')}:** {chosen.manifest_qty}")
+                        st.write(f"**{T('new_item.weight')}:** {chosen.manifest_weight_kg} kg")
+                    st.caption(T("new_item.manifest_unverified_reminder"))
 
-                    if st.button("Use this item ➜", type="primary", use_container_width=True):
+                    if st.button(T("new_item.use_this_item"), type="primary", use_container_width=True):
                         chosen.status = "in_progress"
                         st.session_state.product = chosen
                         st.session_state.wizard_step = 2
                         st.rerun()
         else:
-            st.caption(
-                "Point the camera at the barcode or model-number sticker. "
-                "On phones, tap the switch-camera icon in the widget to use "
-                "the rear camera if it opens on the front camera."
-            )
+            st.caption(T("new_item.scan_camera_hint"))
             _enlarge_camera_preview()
-            shot = st.camera_input("Scan label", key=f"barcode_cam_{st.session_state.camera_session_id}")
+            shot = st.camera_input(T("new_item.scan_label"), key=f"barcode_cam_{st.session_state.camera_session_id}")
 
             decoded = []
             if shot is not None:
                 decoded = barcode_scanner.decode_barcodes(shot.getvalue())
                 if decoded:
-                    st.success(f"Decoded: {', '.join(decoded)}")
+                    st.success(T("new_item.decoded", codes=', '.join(decoded)))
                 elif not barcode_scanner.zbar_available():
-                    st.info("Barcode auto-decode isn't available on this install (zbar missing) — enter the model number manually below.")
+                    st.info(T("new_item.zbar_missing"))
                 else:
-                    st.info("No barcode detected in frame — try again or enter manually below.")
+                    st.info(T("new_item.no_barcode_detected"))
 
             default_val = decoded[0] if decoded else product.model_number
-            manual = st.text_input("Model number / barcode (edit if needed)", value=default_val)
+            manual = st.text_input(T("new_item.model_number_barcode"), value=default_val)
 
             col1, col2 = st.columns(2)
             with col2:
-                if st.button("Next ➜", type="primary", use_container_width=True, disabled=not manual.strip()):
+                if st.button(T("common.next"), type="primary", use_container_width=True, disabled=not manual.strip()):
                     product.model_number = manual.strip()
                     if decoded:
                         product.scanned_barcode = decoded[0]
@@ -1528,12 +1606,8 @@ if page == "🆕 New Item":
 
     # ---- Step 2: Multi-angle photo capture ----
     elif st.session_state.wizard_step == 2:
-        st.subheader("Capture photos")
-        st.caption(
-            "Take front, back, sides, and close-ups of any scratches/defects. "
-            "If a barcode/label is visible in any photo, it will also be used "
-            "to cross-check against the manifest during grading."
-        )
+        st.subheader(T("new_item.capture_photos"))
+        st.caption(T("new_item.capture_photos_caption"))
 
         # Deliberately st.file_uploader rather than st.camera_input: on a
         # phone this still opens the OS's own camera (tap "Take Photo" in
@@ -1557,7 +1631,7 @@ if page == "🆕 New Item":
         # hashes below dedupe against reprocessing the same files on every
         # rerun instead.
         uploaded = st.file_uploader(
-            "Take a photo or choose from library",
+            T("new_item.take_photo_or_choose"),
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key="photo_uploader",
@@ -1580,8 +1654,8 @@ if page == "🆕 New Item":
 
     # ---- Step 3: Web spec lookup (Fast-First) ----
     elif st.session_state.wizard_step == 3:
-        st.subheader("Specifications & box contents")
-        st.caption("Automated web lookup — review and edit before continuing.")
+        st.subheader(T("new_item.specs_heading"))
+        st.caption(T("new_item.specs_caption"))
 
         # Button only offered when idle/failed for THIS product — while a
         # lookup is in progress (searching/candidate_found/verifying/
@@ -1591,7 +1665,7 @@ if page == "🆕 New Item":
         # (see _render_spec_lookup_status) — allow retrying in that case.
         show_button = st.session_state.spec_result is None and st.session_state.lookup_stage in ("idle", "done")
         if show_button:
-            if st.button("🔎 Fetch specs from the web", type="primary", disabled=not _ai_configured()):
+            if st.button(T("new_item.fetch_specs"), type="primary", disabled=not _ai_configured()):
                 st.session_state.lookup_stage = "searching"
                 st.session_state.lookup_enrich_error = None
                 cached = lookup_cache_store.get_best_match(
@@ -1607,7 +1681,7 @@ if page == "🆕 New Item":
                     st.session_state.spec_result = _spec_result_from_cache(cached)
                     st.session_state.lookup_stage = "done"
                 else:
-                    with st.spinner("Searching..."):
+                    with st.spinner(T("new_item.searching")):
                         fast = _run_fast_layer(product)
                     st.session_state.lookup_preview = fast.preview
                     st.session_state.lookup_stage = "candidate_found" if fast.has_candidate else "verifying"
@@ -1630,7 +1704,7 @@ if page == "🆕 New Item":
                     future = _lookup_executor().submit(_deep_enrich, snapshot, fast.ean_hits, fast.asin_hits)
                     st.session_state.lookup_enrich_jobs.append({"future": future, "snapshot": snapshot})
                 st.rerun()
-            st.caption("Or skip and fill the fields in manually below.")
+            st.caption(T("new_item.skip_manual_caption"))
 
         _render_spec_lookup_status(product)
 
@@ -1643,54 +1717,51 @@ if page == "🆕 New Item":
         spec_val = sr.spec_summary if sr else product.spec_summary
         box_val = "\n".join(sr.box_contents) if sr and sr.box_contents else "\n".join(product.box_contents)
 
-        name_in = st.text_input("Product name", value=name_val)
+        name_in = st.text_input(T("common.product_name"), value=name_val)
         cols = st.columns(2)
         with cols[0]:
-            brand_in = st.text_input("Brand", value=brand_val)
+            brand_in = st.text_input(T("common.brand"), value=brand_val)
         with cols[1]:
-            model_in = st.text_input("Model", value=model_val)
+            model_in = st.text_input(T("common.model"), value=model_val)
         cat_power_cols = st.columns(2)
         with cat_power_cols[0]:
-            category_in = st.text_input("Category", value=category_val or "", placeholder="e.g. Smartphone, Laptop, Headphones")
+            category_in = st.text_input(T("common.category"), value=category_val or "", placeholder=T("new_item.category_placeholder"))
         with cat_power_cols[1]:
-            power_in = st.text_input("Power", value=power_val or "", placeholder="e.g. 1200W")
-        spec_in = st.text_area("Spec summary", value=spec_val, height=100)
-        box_in = st.text_area("Standard box contents (one per line)", value=box_val, height=100)
+            power_in = st.text_input(T("common.power"), value=power_val or "", placeholder="e.g. 1200W")
+        spec_in = st.text_area(T("new_item.spec_summary"), value=spec_val, height=100)
+        box_in = st.text_area(T("new_item.box_contents"), value=box_val, height=100)
 
         st.divider()
-        st.markdown("**EAN / ASIN identification**")
-        st.caption(
-            "Filled automatically (never overwrites an existing value, never invents "
-            "one) as soon as specs are fetched above. Correct manually if needed."
-        )
+        st.markdown(f"**{T('new_item.ean_asin_id')}**")
+        st.caption(T("new_item.ean_asin_caption"))
         id_cols = st.columns(2)
         with id_cols[0]:
-            ean_in = st.text_input("EAN / GTIN", value=product.ean)
-            status_caption = product.ean_status or "Not yet checked"
+            ean_in = st.text_input(T("new_item.ean_gtin"), value=product.ean)
+            status_caption = product.ean_status or T("new_item.not_yet_checked")
             if product.ean_source:
                 status_caption += f" — {product.ean_source}"
             st.caption(status_caption)
         with id_cols[1]:
             asin_in = st.text_input("ASIN", value=product.asin)
-            status_caption = product.asin_status or "Not yet checked"
+            status_caption = product.asin_status or T("new_item.not_yet_checked")
             if product.asin_source:
                 status_caption += f" — {product.asin_source}"
             st.caption(status_caption)
             if product.asin_candidates:
-                st.warning(f"Other possible ASINs found — please verify: {', '.join(product.asin_candidates)}")
+                st.warning(T("new_item.other_asins_found", asins=', '.join(product.asin_candidates)))
 
         if sr and sr.sources:
-            with st.expander("Sources used"):
+            with st.expander(T("new_item.sources_used")):
                 for s in sr.sources:
                     st.write(s)
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("⬅ Back", use_container_width=True):
+            if st.button(T("common.back"), use_container_width=True):
                 st.session_state.wizard_step = 2
                 st.rerun()
         with col3:
-            if st.button("Next ➜", type="primary", use_container_width=True):
+            if st.button(T("common.next"), type="primary", use_container_width=True):
                 product.name = name_in.strip()
                 product.brand = brand_in.strip()
                 product.model = model_in.strip()
@@ -1714,11 +1785,11 @@ if page == "🆕 New Item":
 
     # ---- Step 4: Vision AI grading + manifest-vs-photo verification ----
     elif st.session_state.wizard_step == 4:
-        st.subheader("AI condition grading")
+        st.subheader(T("new_item.ai_grading_heading"))
 
         if st.session_state.grading_result is None:
-            if st.button("🧠 Analyze photos", type="primary", disabled=not _ai_configured()):
-                with st.spinner("Inspecting photos for defects, missing parts, and identity match..."):
+            if st.button(T("new_item.analyze_photos"), type="primary", disabled=not _ai_configured()):
+                with st.spinner(T("new_item.inspecting_photos")):
                     decoded_barcodes = []
                     for img_bytes in st.session_state.captured_photos:
                         decoded_barcodes.extend(barcode_scanner.decode_barcodes(img_bytes))
@@ -1779,50 +1850,51 @@ if page == "🆕 New Item":
                             photo_decoded_barcodes=decoded_barcodes,
                         )
                     except (anthropic.RateLimitError, anthropic.OverloadedError):
-                        st.error("AI service is busy right now. Please wait a moment and try again.")
+                        st.error(T("new_item.ai_busy"))
                     except Exception as e:
-                        st.error(f"Photo analysis failed: {e}")
+                        st.error(T("new_item.photo_analysis_failed", error=e))
                 if st.session_state.grading_result is not None:
                     st.rerun()
-            st.caption("Or skip and assess condition manually below.")
+            st.caption(T("new_item.skip_assess_manually"))
 
         if not product.ean and any(
             j["snapshot"]["product_id"] == product.id and j["snapshot"]["company_id"] == product.company_id
             for j in st.session_state.ean_retry_jobs
         ):
-            st.caption("🔎 Still looking for the EAN in the background — will fill in automatically if found.")
+            st.caption(T("new_item.ean_still_searching"))
 
         gr = st.session_state.grading_result
         condition_options = ["A", "B", "C", "D"]
         default_product_condition = gr.product_condition if gr and gr.product_condition in condition_options else "B"
         product_condition_in = st.selectbox(
-            "Product Condition", condition_options, index=condition_options.index(default_product_condition),
+            T("common.product_condition"), condition_options, index=condition_options.index(default_product_condition),
         )
         st.caption(vision_grading.PRODUCT_CONDITION_SCALE[product_condition_in])
 
         default_confidence = gr.product_condition_confidence if gr else product.product_condition_confidence
         confidence_in = st.slider(
-            "AI confidence (%)",
+            T("new_item.ai_confidence"),
             min_value=0,
             max_value=100,
             value=int(default_confidence),
-            help="AI's confidence in the assigned product condition, based on photo "
-            "quality, clarity of visible defects, certainty about box completeness, "
-            "and how cleanly the item matches the A/B/C/D criteria. Lower photo "
-            "quality or borderline cases should produce a lower number.",
+            help=T("new_item.ai_confidence_help"),
         )
-        st.caption(f"Product Condition: {product_condition_in}  •  AI confidence: {confidence_in}%")
+        st.caption(T("new_item.condition_confidence_caption", condition=product_condition_in, confidence=confidence_in))
 
         new_used_options = ["Used", "New"]
+        new_used_labels = {"Used": T("new_item.used"), "New": T("new_item.new")}
         default_condition = gr.condition_type if gr and gr.condition_type in new_used_options else (
             product.condition_type if product.condition_type in new_used_options else "Used"
         )
-        condition_in = st.selectbox("New / Used", new_used_options, index=new_used_options.index(default_condition))
+        condition_in = st.selectbox(
+            T("new_item.new_or_used"), new_used_options, index=new_used_options.index(default_condition),
+            format_func=lambda v: new_used_labels[v],
+        )
 
         default_color = (gr.color if gr and gr.color else "") or product.color
         color_in = st.text_input(
-            "Color", value=default_color,
-            help="Determined from the photos by AI — correct manually if needed.",
+            T("common.color"), value=default_color,
+            help=T("new_item.color_help"),
         )
 
         if gr and gr.product_condition_reasoning:
@@ -1832,43 +1904,40 @@ if page == "🆕 New Item":
         missing_val = "\n".join(gr.missing_components) if gr else "\n".join(product.missing_components)
         checklist_val = "\n".join(gr.functional_checklist) if gr else "\n".join(product.functional_checklist)
 
-        defects_in = st.text_area("Defects (one per line)", value=defects_val, height=100)
-        missing_in = st.text_area("Missing components (one per line)", value=missing_val, height=70)
-        checklist_in = st.text_area("Functional test checklist (one per line)", value=checklist_val, height=120)
+        defects_in = st.text_area(T("new_item.defects_label"), value=defects_val, height=100)
+        missing_in = st.text_area(T("new_item.missing_components_label"), value=missing_val, height=70)
+        checklist_in = st.text_area(T("new_item.functional_checklist_label"), value=checklist_val, height=120)
 
         st.divider()
-        st.markdown("**Manifest vs. photo verification**")
-        st.caption(
-            "AI never assumes the manifest is correct — this compares what's "
-            "actually visible in the photos (brand, model, product type, any "
-            "visible barcode) against the claimed identity above."
-        )
+        st.markdown(f"**{T('new_item.manifest_vs_photo')}**")
+        st.caption(T("new_item.manifest_vs_photo_caption"))
 
         match_options = ["YES", "NO", "UNKNOWN"]
+        match_labels = {"YES": T("new_item.match_yes"), "NO": T("new_item.match_no"), "UNKNOWN": T("new_item.match_unknown")}
         default_match = gr.product_match if gr and gr.product_match in match_options else (
             product.product_match if product.product_match in match_options else "UNKNOWN"
         )
-        match_in = st.selectbox("Product match", match_options, index=match_options.index(default_match))
+        match_in = st.selectbox(
+            T("new_item.product_match"), match_options, index=match_options.index(default_match),
+            format_func=lambda v: match_labels[v],
+        )
 
         default_match_conf = gr.match_confidence if gr else product.match_confidence
-        match_conf_in = st.slider("Match confidence (%)", min_value=0, max_value=100, value=int(default_match_conf))
+        match_conf_in = st.slider(T("new_item.match_confidence"), min_value=0, max_value=100, value=int(default_match_conf))
 
         match_notes_val = gr.match_notes if gr else product.match_notes
-        match_notes_in = st.text_area("Match notes", value=match_notes_val, height=70)
+        match_notes_in = st.text_area(T("new_item.match_notes"), value=match_notes_val, height=70)
 
         if match_in == "NO" or match_conf_in < MATCH_CONFIDENCE_WARNING_THRESHOLD:
-            st.warning(
-                "⚠️ Possible mismatch between the manifest data and the photographed "
-                "item. Double-check the photos and manifest details before proceeding."
-            )
+            st.warning(T("new_item.mismatch_warning"))
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("⬅ Back", use_container_width=True):
+            if st.button(T("common.back"), use_container_width=True):
                 st.session_state.wizard_step = 3
                 st.rerun()
         with col3:
-            if st.button("Next ➜", type="primary", use_container_width=True):
+            if st.button(T("common.next"), type="primary", use_container_width=True):
                 product.product_condition = product_condition_in
                 product.product_condition_confidence = int(confidence_in)
                 product.product_condition_reasoning = gr.product_condition_reasoning if gr else ""
@@ -1885,14 +1954,14 @@ if page == "🆕 New Item":
 
     # ---- Step 5: Pricing + description generation ----
     elif st.session_state.wizard_step == 5:
-        st.subheader("Price & listing copy")
+        st.subheader(T("new_item.price_listing_copy"))
 
         if product.product_match == "NO" or product.match_confidence < MATCH_CONFIDENCE_WARNING_THRESHOLD:
-            st.warning("⚠️ This item was flagged as a possible manifest/photo mismatch in the previous step.")
+            st.warning(T("new_item.mismatch_warning_short"))
 
         if st.session_state.price_estimate is None:
-            if st.button("💲 Estimate market price"):
-                with st.spinner("Searching for comparable prices..."):
+            if st.button(T("new_item.estimate_price")):
+                with st.spinner(T("new_item.searching_comparable_prices")):
                     st.session_state.price_estimate = pricing.estimate_price(
                         f"{product.brand} {product.model} {product.name}".strip(), product.product_condition
                     )
@@ -1903,18 +1972,18 @@ if page == "🆕 New Item":
             st.caption(pe.reasoning)
         default_price = (pe.suggested_price if pe and pe.suggested_price else product.price) or 0.0
         price_in = st.number_input(
-            "Estimated average selling price ($)",
+            T("new_item.estimated_price"),
             min_value=0.0,
             value=float(default_price),
             step=1.0,
-            help="AI-suggested market price. You can correct it here, or override it again in the final step.",
+            help=T("new_item.estimated_price_help"),
         )
 
         st.divider()
 
         if st.session_state.descriptions is None:
-            if st.button("✍️ Generate English descriptions", type="primary", disabled=not _ai_configured()):
-                with st.spinner("Writing listing copy..."):
+            if st.button(T("new_item.generate_descriptions"), type="primary", disabled=not _ai_configured()):
+                with st.spinner(T("new_item.writing_listing_copy")):
                     try:
                         st.session_state.descriptions = description_gen.generate_descriptions(
                             name=product.name,
@@ -1929,22 +1998,22 @@ if page == "🆕 New Item":
                             missing_components=product.missing_components,
                         )
                     except (anthropic.RateLimitError, anthropic.OverloadedError):
-                        st.error("AI service is busy right now. Please wait a moment and try again.")
+                        st.error(T("new_item.ai_busy"))
                     except Exception as e:
-                        st.error(f"Description generation failed: {e}")
+                        st.error(T("new_item.description_generation_failed", error=e))
                 if st.session_state.descriptions is not None:
                     st.rerun()
-            st.caption("Or write everything manually below.")
+            st.caption(T("new_item.write_manually_caption"))
 
         desc = st.session_state.descriptions
         product_name_val = desc.product_name if desc else product.name
         product_desc_val = desc.product_description if desc else product.product_description
         condition_desc_val = desc.condition_description if desc else product.condition_description
 
-        product_name_in = st.text_input("Product Name (listing title)", value=product_name_val)
-        product_desc_in = st.text_area("Product Description (general overview)", value=product_desc_val, height=150)
+        product_name_in = st.text_input(T("new_item.listing_title"), value=product_name_val)
+        product_desc_in = st.text_area(T("new_item.general_overview"), value=product_desc_val, height=150)
         condition_desc_in = st.text_area(
-            "Additional Description (Condition & Scratches Details)",
+            T("new_item.condition_scratches_details"),
             value=condition_desc_val,
             height=150,
             max_chars=description_gen.MAX_CONDITION_DESCRIPTION_LEN,
@@ -1952,11 +2021,11 @@ if page == "🆕 New Item":
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("⬅ Back", use_container_width=True):
+            if st.button(T("common.back"), use_container_width=True):
                 st.session_state.wizard_step = 4
                 st.rerun()
         with col3:
-            if st.button("Next ➜", type="primary", use_container_width=True):
+            if st.button(T("common.next"), type="primary", use_container_width=True):
                 product.price = float(price_in)
                 product.price_reasoning = pe.reasoning if pe else ""
                 if product_name_in.strip():
@@ -1968,70 +2037,78 @@ if page == "🆕 New Item":
 
     # ---- Step 6: Manual-only details + review + save ----
     elif st.session_state.wizard_step == 6:
-        st.subheader("Manual-only details")
-        st.caption("AI cannot reliably determine these — fill them in by hand.")
+        st.subheader(T("new_item.manual_only_details"))
+        st.caption(T("new_item.manual_only_caption"))
 
-        location_in = st.text_input("Location / shelf position", value=product.location)
+        location_in = st.text_input(T("new_item.location_shelf"), value=product.location)
         test_options = ["Not Tested", "Working", "Not Working"]
+        test_labels = {
+            "Not Tested": T("new_item.test_not_tested"),
+            "Working": T("new_item.test_working"),
+            "Not Working": T("new_item.test_not_working"),
+        }
         default_test = product.functional_test_result if product.functional_test_result in test_options else "Not Tested"
-        test_in = st.selectbox("Functional test result", test_options, index=test_options.index(default_test))
+        test_in = st.selectbox(
+            T("new_item.functional_test_result"), test_options, index=test_options.index(default_test),
+            format_func=lambda v: test_labels[v],
+        )
         quantity_in = st.number_input(
-            "Quantity", min_value=1, value=int(product.quantity or 1), step=1,
-            help="Number of units this listing represents. Defaults to 1.",
+            T("common.quantity"), min_value=1, value=int(product.quantity or 1), step=1,
+            help=T("new_item.quantity_help"),
         )
 
-        st.caption("Box dimensions (for courier/shipping calculations)")
+        st.caption(T("new_item.box_dimensions_caption"))
         dim_cols = st.columns(3)
         with dim_cols[0]:
-            length_in = st.number_input("Box length (cm)", min_value=0.0, value=float(product.box_length_cm), step=0.5)
+            length_in = st.number_input(T("new_item.box_length"), min_value=0.0, value=float(product.box_length_cm), step=0.5)
         with dim_cols[1]:
-            width_in = st.number_input("Box width (cm)", min_value=0.0, value=float(product.box_width_cm), step=0.5)
+            width_in = st.number_input(T("new_item.box_width"), min_value=0.0, value=float(product.box_width_cm), step=0.5)
         with dim_cols[2]:
-            height_in = st.number_input("Box height (cm)", min_value=0.0, value=float(product.box_height_cm), step=0.5)
+            height_in = st.number_input(T("new_item.box_height"), min_value=0.0, value=float(product.box_height_cm), step=0.5)
 
         price_override_in = st.number_input(
-            "Final selling price ($) — correct here if needed",
+            T("new_item.final_price"),
             min_value=0.0,
             value=float(product.price),
             step=1.0,
         )
 
         st.divider()
-        st.subheader("Finalize & save to inventory")
-        st.write(f"**SKU:** {product.sku}")
-        st.caption("SKU was set manually in step 2 and stays fixed — it is never changed or generated by AI.")
+        st.subheader(T("new_item.finalize_save"))
+        st.write(f"**{T('common.sku')}:** {product.sku}")
+        st.caption(T("new_item.sku_fixed_caption"))
 
         if product.product_match == "NO" or product.match_confidence < MATCH_CONFIDENCE_WARNING_THRESHOLD:
             st.warning(
-                f"⚠️ Product match: {product.product_match or 'UNKNOWN'} "
-                f"({product.match_confidence}% confidence). {product.match_notes}"
+                T("new_item.product_match_warning", match=product.product_match or 'UNKNOWN',
+                  confidence=product.match_confidence, notes=product.match_notes)
             )
 
-        st.write("**Summary**")
+        st.write(f"**{T('new_item.summary')}**")
         st.json(
             {
-                "SKU": product.sku,
-                "Name": product.name,
-                "Brand": product.brand,
-                "Model": product.model,
-                "Condition": product.condition_type,
-                "Product Condition": product.product_condition,
-                "AI Confidence %": product.product_condition_confidence,
-                "Product Match": product.product_match,
-                "Match Confidence %": product.match_confidence,
-                "Price": product.price,
-                "Quantity": int(quantity_in),
-                "Photos": len(st.session_state.captured_photos),
+                T("common.sku"): product.sku,
+                T("common.name"): product.name,
+                T("common.brand"): product.brand,
+                T("common.model"): product.model,
+                T("new_item.condition_col"): product.condition_type,
+                T("common.product_condition"): product.product_condition,
+                T("new_item.ai_confidence_col"): product.product_condition_confidence,
+                T("new_item.product_match"): product.product_match,
+                T("new_item.match_confidence_col"): product.match_confidence,
+                T("common.price"): product.price,
+                T("common.quantity"): int(quantity_in),
+                T("new_item.photos_col"): len(st.session_state.captured_photos),
             }
         )
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("⬅ Back", use_container_width=True):
+            if st.button(T("common.back"), use_container_width=True):
                 st.session_state.wizard_step = 5
                 st.rerun()
         with col3:
-            if st.button("✅ Save item", type="primary", use_container_width=True):
+            if st.button(T("new_item.save_item"), type="primary", use_container_width=True):
                 product.location = location_in.strip()
                 product.functional_test_result = test_in
                 product.box_length_cm = float(length_in)
@@ -2054,22 +2131,22 @@ if page == "🆕 New Item":
 
                 inventory_store.save_product(product)
                 audit_store.log_audit(product.company_id, current_user.id, "CREATE_PRODUCT", "product", product.id)
-                st.success(f"Saved '{product.name or product.model_number}' to inventory.")
+                st.success(T("new_item.saved_to_inventory", name=product.name or product.model_number))
                 st.balloons()
                 reset_wizard()
 
     st.divider()
-    if st.button("🔄 Start over / discard this item"):
+    if st.button(T("new_item.start_over")):
         reset_wizard()
         st.rerun()
 
 # ======================================================= IMPORT MANIFEST =
-elif page == "📥 Import Manifest":
-    st.title("📥 Import Manifest")
+elif page == PAGE_IMPORT_MANIFEST:
+    st.title(T("nav.import_manifest"))
     try:
         auth.require_role(current_user, auth.ROLE_ADMIN)
     except PermissionError:
-        st.error("Admins only.")
+        st.error(T("common.admins_only"))
         st.stop()
     st.caption(
         "Upload an Amazon liquidation manifest (.xlsx or .csv). Only these "
@@ -2080,7 +2157,7 @@ elif page == "📥 Import Manifest":
         "not replace the existing manual scan/search flow in '🆕 New Item'."
     )
 
-    uploaded = st.file_uploader("Manifest file", type=["xlsx", "csv"])
+    uploaded = st.file_uploader(T("import_manifest.manifest_file"), type=["xlsx", "csv"])
     if uploaded is not None and st.session_state.manifest_uploaded_name != uploaded.name:
         df = manifest_import.read_table(uploaded.getvalue(), uploaded.name)
         st.session_state.manifest_df = df
@@ -2088,16 +2165,16 @@ elif page == "📥 Import Manifest":
 
     df = st.session_state.manifest_df
     if df is not None:
-        st.write(f"**{len(df)} row(s) found.** Columns in file: {list(df.columns)}")
-        st.markdown("**Confirm column mapping** — auto-detected where possible; adjust any that are wrong.")
+        st.write(f"**{T('import_manifest.rows_found', count=len(df))}** {T('import_manifest.columns_in_file', columns=list(df.columns))}")
+        st.markdown(f"**{T('import_manifest.confirm_mapping')}**")
         confirmed_map, missing_required = _render_column_mapping_ui(df, key_prefix="new")
 
         rows = manifest_import.extract_rows(df, confirmed_map)
-        st.write(f"**Preview ({len(rows)} row(s) with the confirmed mapping):**")
+        st.write(f"**{T('import_manifest.preview_rows', count=len(rows))}**")
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-        if st.button("✅ Import as new manifest batch", type="primary", disabled=bool(missing_required) or not rows):
+        if st.button(T("import_manifest.import_batch_button"), type="primary", disabled=bool(missing_required) or not rows):
             batch = manifest_store.ManifestBatch(
                 company_id=st.session_state.company_id,
                 filename=uploaded.name if uploaded else st.session_state.manifest_uploaded_name,
@@ -2118,14 +2195,14 @@ elif page == "📥 Import Manifest":
 
                 to_check = [d for d in drafts if identifier_lookup.needs_lookup(d)]
                 if to_check and _ai_configured():
-                    progress = st.progress(0.0, text=f"Looking up missing EAN/ASIN for {len(to_check)} item(s)...")
+                    progress = st.progress(0.0, text=T("import_manifest.looking_up_identifiers", count=len(to_check)))
                     for i, d in enumerate(to_check):
                         identifier_lookup.ensure_identifiers(
                             d,
                             product_name=d.manifest_item_description,
                             other_info=d.manifest_subcategory,
                         )
-                        progress.progress((i + 1) / len(to_check), text=f"Checked {i + 1}/{len(to_check)} item(s)...")
+                        progress.progress((i + 1) / len(to_check), text=T("import_manifest.checked_progress", done=i + 1, total=len(to_check)))
                     progress.empty()
 
                 inventory_store.save_products_bulk(drafts)
@@ -2136,30 +2213,27 @@ elif page == "📥 Import Manifest":
                     f"{len(drafts)} item(s), file={batch.filename}",
                 )
 
-                st.success(
-                    f"Created manifest batch **{batch.id}** with {len(drafts)} item(s), "
-                    f"assigned SKU **{skus[0]}** to **{skus[-1]}**."
-                )
-                st.caption("Go to '🆕 New Item' → '📥 From a pending manifest item' to process them one by one.")
+                st.success(T("import_manifest.batch_created", batch_id=batch.id, count=len(drafts), first_sku=skus[0], last_sku=skus[-1]))
+                st.caption(T("import_manifest.process_hint"))
             except Exception as e:
                 batch.status = manifest_store.STATUS_ERROR
                 batch.error_message = str(e)
                 manifest_store.save_batch(batch)
-                st.error(f"Import failed: {e}")
+                st.error(T("import_manifest.import_failed", error=e))
 
             st.session_state.manifest_df = None
             st.session_state.manifest_uploaded_name = None
 
     st.divider()
-    st.subheader("Manifest batches")
+    st.subheader(T("import_manifest.manifest_batches"))
     batches = manifest_store.list_batches(st.session_state.company_id)
     if not batches:
-        st.caption("No manifest batches imported yet for this company.")
+        st.caption(T("import_manifest.no_batches_yet"))
     else:
         status_badges = {
-            manifest_store.STATUS_PROCESSING: "🔄 Processing",
-            manifest_store.STATUS_IMPORTED: "✅ Imported",
-            manifest_store.STATUS_ERROR: "❌ Error",
+            manifest_store.STATUS_PROCESSING: T("import_manifest.status_processing"),
+            manifest_store.STATUS_IMPORTED: T("import_manifest.status_imported"),
+            manifest_store.STATUS_ERROR: T("import_manifest.status_error"),
         }
         for b in batches:
             linked = inventory_store.list_products_by_manifest(b.id, st.session_state.company_id)
@@ -2171,34 +2245,34 @@ elif page == "📥 Import Manifest":
             with st.container(border=True):
                 st.write(f"**{b.filename}**")
                 st.caption(
-                    f"{badge}  •  Uploaded {uploaded_str}  •  {b.row_count} product(s) in file  •  "
-                    f"{len(linked)} linked ({pending} pending, {processed} processed)"
+                    T("import_manifest.batch_summary_line", badge=badge, uploaded=uploaded_str,
+                      row_count=b.row_count, linked=len(linked), pending=pending, processed=processed)
                 )
                 if b.status == manifest_store.STATUS_ERROR and b.error_message:
                     st.error(b.error_message)
 
                 bcol1, bcol2, bcol3 = st.columns(3)
                 with bcol1:
-                    if st.button("👁️ View", key=f"view_{b.id}", use_container_width=True):
+                    if st.button(T("import_manifest.view_button"), key=f"view_{b.id}", use_container_width=True):
                         st.session_state[f"show_view_{b.id}"] = not st.session_state.get(f"show_view_{b.id}", False)
                 with bcol2:
-                    if st.button("🔄 Replace", key=f"replace_{b.id}", use_container_width=True):
+                    if st.button(T("import_manifest.replace_button"), key=f"replace_{b.id}", use_container_width=True):
                         st.session_state[f"show_replace_{b.id}"] = not st.session_state.get(f"show_replace_{b.id}", False)
                 with bcol3:
-                    if st.button("🗑️ Delete", key=f"delete_{b.id}", use_container_width=True):
+                    if st.button(T("common.delete"), key=f"delete_{b.id}", use_container_width=True):
                         _confirm_delete_batch_dialog(b, linked)
 
                 if st.session_state.get(f"show_view_{b.id}"):
-                    st.write("**Column mapping used:**")
+                    st.write(f"**{T('import_manifest.column_mapping_used')}**")
                     st.json(b.column_map)
-                    st.write("**Linked products:**")
+                    st.write(f"**{T('import_manifest.linked_products')}**")
                     if linked:
                         view_df = pd.DataFrame(
                             [
                                 {
-                                    "SKU": p.sku,
-                                    "Status": p.status,
-                                    "Name / Description": p.name or p.manifest_item_description,
+                                    T("common.sku"): p.sku,
+                                    T("common.status"): p.status,
+                                    T("import_manifest.name_description_col"): p.name or p.manifest_item_description,
                                     "ASIN": p.asin,
                                     "EAN": p.manifest_barcode,
                                 }
@@ -2207,30 +2281,25 @@ elif page == "📥 Import Manifest":
                         )
                         st.dataframe(view_df, use_container_width=True)
                     else:
-                        st.caption("No products linked to this batch.")
+                        st.caption(T("import_manifest.no_linked_products"))
 
                 if st.session_state.get(f"show_replace_{b.id}"):
-                    st.write("**Upload a new version of this manifest**")
-                    st.caption(
-                        "Rows matching an existing linked product (by Target #, ASIN, or EAN) "
-                        "are updated in place — SKU, photos, grading, and any other work already "
-                        "done are never touched. Rows that don't match anything become new pending "
-                        "items. No duplicates are created."
-                    )
+                    st.write(f"**{T('import_manifest.upload_new_version')}**")
+                    st.caption(T("import_manifest.replace_caption"))
                     replace_upload = st.file_uploader(
-                        "New manifest file", type=["xlsx", "csv"], key=f"replace_upload_{b.id}"
+                        T("import_manifest.new_manifest_file"), type=["xlsx", "csv"], key=f"replace_upload_{b.id}"
                     )
                     if replace_upload is not None:
                         replace_df = manifest_import.read_table(replace_upload.getvalue(), replace_upload.name)
-                        st.write(f"**{len(replace_df)} row(s) found.**")
+                        st.write(f"**{T('import_manifest.rows_found', count=len(replace_df))}**")
                         r_confirmed_map, r_missing = _render_column_mapping_ui(replace_df, key_prefix=f"replace_{b.id}")
                         r_rows = manifest_import.extract_rows(replace_df, r_confirmed_map)
-                        st.write(f"**Preview ({len(r_rows)} row(s)):**")
+                        st.write(f"**{T('import_manifest.preview_rows', count=len(r_rows))}**")
                         if r_rows:
                             st.dataframe(pd.DataFrame(r_rows), use_container_width=True)
 
                         if st.button(
-                            "✅ Confirm replace", type="primary", key=f"confirm_replace_{b.id}",
+                            T("import_manifest.confirm_replace"), type="primary", key=f"confirm_replace_{b.id}",
                             disabled=bool(r_missing) or not r_rows,
                         ):
                             try:
@@ -2259,20 +2328,17 @@ elif page == "📥 Import Manifest":
                                     f"replace: {len(updated)} updated, {len(new)} new, file={b.filename}",
                                 )
 
-                                st.success(
-                                    f"Replaced: {len(updated)} product(s) updated in place, "
-                                    f"{len(new)} new product(s) added. No duplicates created."
-                                )
+                                st.success(T("import_manifest.replaced_success", updated=len(updated), new=len(new)))
                                 st.session_state[f"show_replace_{b.id}"] = False
                                 st.rerun()
                             except Exception as e:
                                 b.status = manifest_store.STATUS_ERROR
                                 b.error_message = str(e)
                                 manifest_store.save_batch(b)
-                                st.error(f"Replace failed: {e}")
+                                st.error(T("import_manifest.replace_failed", error=e))
 
 # ============================================================ INVENTORY ==
-elif page == "🗂️ Product List":
+elif page == PAGE_PRODUCT_LIST:
     REX_FILTER_DEFAULTS = {
         "rex_search_sku": "", "rex_search_name": "", "rex_search_brand": "",
         "rex_search_model": "", "rex_search_ean": "", "rex_search_asin": "",
@@ -2281,45 +2347,46 @@ elif page == "🗂️ Product List":
         "rex_exact_search": "",
     }
 
-    st.title("🗂️ Product List")
-    st.caption(
-        "Review AI-generated info, manage inventory, and export to "
-        "BaseLinker or download a spreadsheet — all from one list."
-    )
+    st.title(T("nav.product_list"))
+    st.caption(T("product_list.page_caption"))
 
     REVIEW_STATUS_LABELS = {
-        "": "All",
-        "ready": "✅ Ready",
-        "edited": "✏️ Edited",
-        "exported": "📤 Exported",
-        "failed": "❌ Failed",
+        "": T("common.all"),
+        "ready": T("product_list.status_ready"),
+        "edited": T("product_list.status_edited"),
+        "exported": T("product_list.status_exported"),
+        "failed": T("product_list.status_failed"),
     }
     CONDITION_OPTIONS = ["A", "B", "C", "D"]
     TRIAGE_LABELS = {
-        "": "All",
-        "testing_pending": "🔍 Testing pending",
-        "ready_for_sale": "✅ Ready for sale",
-        "needs_repair": "🔧 Needs repair",
-        "for_parts": "♻️ For parts",
-        "written_off": "❌ Written off",
+        "": T("common.all"),
+        "testing_pending": T("product_list.triage_testing_pending"),
+        "ready_for_sale": T("product_list.triage_ready_for_sale"),
+        "needs_repair": T("product_list.triage_needs_repair"),
+        "for_parts": T("product_list.triage_for_parts"),
+        "written_off": T("product_list.triage_written_off"),
     }
     BULK_STATUS_OPTIONS = ["draft", "in_progress", "completed"]
     # Only fields that already exist on Product and make sense to overwrite
     # in bulk (never SKU/barcode/photos/AI-generated/per-product text —
     # those are always product-specific, never mass-edited).
     BULK_EDIT_FIELDS = {
-        "price": "Price",
-        "category": "Category",
-        "brand": "Brand",
-        "product_condition": "Grade / Condition",
-        "quantity": "Quantity",
-        "location": "Warehouse / Shelf",
+        "price": T("common.price"),
+        "category": T("common.category"),
+        "brand": T("common.brand"),
+        "product_condition": T("product_list.grade_condition"),
+        "quantity": T("common.quantity"),
+        "location": T("product_list.warehouse_shelf"),
     }
     PRICE_ACTIONS = {
-        "set": "Set price", "inc_amount": "Increase by €", "dec_amount": "Decrease by €",
-        "inc_pct": "Increase by %", "dec_pct": "Decrease by %",
+        "set": T("product_list.set_price"), "inc_amount": T("product_list.increase_by_eur"),
+        "dec_amount": T("product_list.decrease_by_eur"),
+        "inc_pct": T("product_list.increase_by_pct"), "dec_pct": T("product_list.decrease_by_pct"),
     }
-    QUANTITY_ACTIONS = {"set": "Set quantity", "inc_amount": "Increase by", "dec_amount": "Decrease by"}
+    QUANTITY_ACTIONS = {
+        "set": T("product_list.set_quantity"), "inc_amount": T("product_list.increase_by"),
+        "dec_amount": T("product_list.decrease_by"),
+    }
 
     def _bulk_edit_compute(field: str, action: str, raw_value, current):
         """Pure — no side effects. Returns (new_value, error_or_None). Both
@@ -2329,25 +2396,25 @@ elif page == "🗂️ Product List":
             try:
                 v = float(raw_value)
             except (TypeError, ValueError):
-                return None, "Invalid number"
+                return None, T("product_list.invalid_number")
             new = {
                 "set": v, "inc_amount": current + v, "dec_amount": current - v,
                 "inc_pct": current * (1 + v / 100), "dec_pct": current * (1 - v / 100),
             }[action]
             new = round(new, 2)
-            return (new, None) if new > 0 else (None, "Price must stay above €0")
+            return (new, None) if new > 0 else (None, T("product_list.price_must_be_positive"))
         if field == "quantity":
             try:
                 v = int(raw_value)
             except (TypeError, ValueError):
-                return None, "Invalid number"
+                return None, T("product_list.invalid_number")
             new = {"set": v, "inc_amount": current + v, "dec_amount": current - v}[action]
-            return (new, None) if new >= 1 else (None, "Quantity must stay at least 1")
+            return (new, None) if new >= 1 else (None, T("product_list.quantity_must_be_positive"))
         if field == "product_condition":
             return raw_value, None
         # category / brand / location: free-text "set" only
         v = (raw_value or "").strip()
-        return (v, None) if v else (None, "Value cannot be empty")
+        return (v, None) if v else (None, T("product_list.value_cannot_be_empty"))
     REX_PAGE_SIZE = 50
     # Server-side-paginated query (inventory_store.list_products_paginated) —
     # unlike the old two pages' plain list_products(company_id) + Python
@@ -2355,16 +2422,16 @@ elif page == "🗂️ Product List":
     # has, since at most one page of rows is ever loaded into Python or sent
     # to the browser's grid.
     REX_STATUS_FILTER_OPTIONS = {
-        "completed": "✅ Completed only",
-        "all_except_draft": "All except drafts",
-        "all": "All (incl. drafts)",
+        "completed": T("product_list.filter_completed_only"),
+        "all_except_draft": T("product_list.filter_all_except_drafts"),
+        "all": T("product_list.filter_all_incl_drafts"),
     }
 
     def _review_status_of(p: Product) -> str:
         return p.review_status or "ready"
 
     def _status_badge(p: Product) -> str:
-        return "📥 DRAFT" if p.status == "draft" else REVIEW_STATUS_LABELS[_review_status_of(p)]
+        return T("product_list.draft_badge") if p.status == "draft" else REVIEW_STATUS_LABELS[_review_status_of(p)]
 
     def _rex_reset_page():
         st.session_state.rex_page = 1
@@ -2381,7 +2448,7 @@ elif page == "🗂️ Product List":
                 out.append(prod)
         return out
 
-    @st.dialog("Export selected products")
+    @st.dialog(T("product_list.export_dialog_title"))
     def _confirm_export_dialog(selected_products):
         # Destination is never hardcoded to BaseLinker — any connected
         # marketplace integration is a valid target (IntegrationManager.get
@@ -2393,40 +2460,37 @@ elif page == "🗂️ Product List":
             and i.status == integration_store.STATUS_CONNECTED
         ]
         if not connected:
-            st.warning(
-                "No connected marketplace integrations. Go to Settings → "
-                "Integrations to connect one (e.g. BaseLinker)."
-            )
-            if st.button("Close", use_container_width=True, key="rex_export_none_close"):
+            st.warning(T("product_list.no_connected_marketplaces"))
+            if st.button(T("common.close"), use_container_width=True, key="rex_export_none_close"):
                 st.rerun()
             return
 
         catalog_by_type = {c.integration_type: c for c in CATALOG}
         dest_options = [i.integration_type for i in connected]
         dest = st.selectbox(
-            "Export to", dest_options,
+            T("product_list.export_to"), dest_options,
             format_func=lambda t: catalog_by_type[t].display_name if t in catalog_by_type else t,
             key="rex_export_destination",
         )
         dest_name = catalog_by_type[dest].display_name if dest in catalog_by_type else dest
 
-        st.write(f"Export **{len(selected_products)}** selected product(s) to **{dest_name}**?")
+        st.write(T("product_list.export_confirm_text", count=len(selected_products), dest=dest_name))
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="rex_export_cancel"):
+            if st.button(T("common.cancel"), use_container_width=True, key="rex_export_cancel"):
                 st.rerun()
         with col2:
             confirmed = st.button(
-                "📤 Export", type="primary", use_container_width=True, key="rex_export_confirm"
+                T("product_list.export_button"), type="primary", use_container_width=True, key="rex_export_confirm"
             )
         if confirmed:
             results_box = st.container()
-            progress = st.progress(0.0, text="Starting...")
+            progress = st.progress(0.0, text=T("product_list.starting"))
             ok_count, fail_count = 0, 0
             for i, p in enumerate(selected_products):
                 progress.progress(
                     i / len(selected_products),
-                    text=f"Exporting {p.sku} ({i + 1}/{len(selected_products)})...",
+                    text=T("product_list.exporting_progress", sku=p.sku, done=i + 1, total=len(selected_products)),
                 )
                 try:
                     result = IntegrationManager.get(p.company_id, dest).export_product(p)
@@ -2447,32 +2511,29 @@ elif page == "🗂️ Product List":
                     results_box.error(f"❌ {p.sku}: {result.message}")
                 inventory_store.save_product(p)
                 st.session_state.rex_selected_ids.discard(p.id)
-            progress.progress(1.0, text="Done.")
+            progress.progress(1.0, text=T("product_list.done"))
             integration_store.record_sync(
                 current_user.company_id, dest, "bulk_export_summary",
                 status=integration_store.SYNC_STATUS_SUCCESS if not fail_count else integration_store.SYNC_STATUS_ERROR,
                 error_message=f"{ok_count} successful, {fail_count} failed" if fail_count else "",
             )
-            st.markdown(f"**{ok_count} products exported successfully**")
+            st.markdown(f"**{T('product_list.exported_successfully', count=ok_count)}**")
             if fail_count:
-                st.markdown(f"**{fail_count} product(s) failed**")
-            if st.button("Close", use_container_width=True, key="rex_export_done"):
+                st.markdown(f"**{T('product_list.products_failed', count=fail_count)}**")
+            if st.button(T("common.close"), use_container_width=True, key="rex_export_done"):
                 st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
                 st.rerun()
 
-    @st.dialog("Delete selected products?")
+    @st.dialog(T("product_list.delete_dialog_title"))
     def _confirm_delete_dialog(selected_products):
-        st.warning(
-            f"Permanently delete **{len(selected_products)}** selected product(s)? "
-            "This cannot be undone."
-        )
+        st.warning(T("product_list.delete_confirm_text", count=len(selected_products)))
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="rex_delete_cancel"):
+            if st.button(T("common.cancel"), use_container_width=True, key="rex_delete_cancel"):
                 st.rerun()
         with col2:
             confirmed = st.button(
-                "🗑️ Delete", type="primary", use_container_width=True, key="rex_delete_confirm"
+                T("common.delete"), type="primary", use_container_width=True, key="rex_delete_confirm"
             )
         if confirmed:
             for p in selected_products:
@@ -2480,15 +2541,15 @@ elif page == "🗂️ Product List":
                 audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
                 st.session_state.rex_selected_ids.discard(p.id)
             st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
-            st.success(f"Deleted {len(selected_products)} product(s).")
-            if st.button("Close", use_container_width=True, key="rex_delete_done"):
+            st.success(T("product_list.deleted_success", count=len(selected_products)))
+            if st.button(T("common.close"), use_container_width=True, key="rex_delete_done"):
                 st.rerun()
 
-    @st.dialog("Bulk Edit")
+    @st.dialog(T("product_list.bulk_edit_title"))
     def _confirm_bulk_edit_dialog(selected_products):
-        st.write(f"**Bulk Edit — {len(selected_products)} selected products**")
+        st.write(f"**{T('product_list.bulk_edit_heading', count=len(selected_products))}**")
         field = st.selectbox(
-            "Field to edit", list(BULK_EDIT_FIELDS), format_func=lambda k: BULK_EDIT_FIELDS[k],
+            T("product_list.field_to_edit"), list(BULK_EDIT_FIELDS), format_func=lambda k: BULK_EDIT_FIELDS[k],
             key="rex_bulkedit_field",
         )
 
@@ -2498,27 +2559,27 @@ elif page == "🗂️ Product List":
         if field in ("price", "quantity"):
             actions = PRICE_ACTIONS if field == "price" else QUANTITY_ACTIONS
             action = st.selectbox(
-                "Action", list(actions), format_func=lambda k: actions[k],
+                T("product_list.action_label"), list(actions), format_func=lambda k: actions[k],
                 key=f"rex_bulkedit_action_{field}",
             )
             raw_value = st.number_input(
-                "Value", step=0.5 if field == "price" else 1,
+                T("product_list.value_label"), step=0.5 if field == "price" else 1,
                 key=f"rex_bulkedit_value_{field}",
             )
         elif field == "product_condition":
             action = "set"
-            raw_value = st.selectbox("New Grade", CONDITION_OPTIONS, key=f"rex_bulkedit_value_{field}")
+            raw_value = st.selectbox(T("product_list.new_grade"), CONDITION_OPTIONS, key=f"rex_bulkedit_value_{field}")
         else:  # category / brand / location
             action = "set"
-            raw_value = st.text_input("New value", key=f"rex_bulkedit_value_{field}")
+            raw_value = st.text_input(T("product_list.new_value"), key=f"rex_bulkedit_value_{field}")
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="rex_bulkedit_cancel"):
+            if st.button(T("common.cancel"), use_container_width=True, key="rex_bulkedit_cancel"):
                 st.session_state.rex_bulkedit_preview = None
                 st.rerun()
         with col2:
-            if st.button("Preview Changes", type="primary", use_container_width=True, key="rex_bulkedit_preview_btn"):
+            if st.button(T("product_list.preview_changes"), type="primary", use_container_width=True, key="rex_bulkedit_preview_btn"):
                 rows = []
                 for p in selected_products:
                     current = getattr(p, field)
@@ -2542,25 +2603,25 @@ elif page == "🗂️ Product List":
             st.dataframe(
                 [
                     {
-                        "Product": r["sku"] or r["name"] or r["product_id"],
-                        "Current": r["current"],
-                        "New": r["new_value"] if not r["error"] else f"⚠ {r['error']}",
+                        T("product_list.product_col"): r["sku"] or r["name"] or r["product_id"],
+                        T("product_list.current_col"): r["current"],
+                        T("product_list.new_col"): r["new_value"] if not r["error"] else f"⚠ {r['error']}",
                     }
                     for r in preview["rows"]
                 ],
                 hide_index=True, use_container_width=True,
             )
             if n_errors:
-                st.caption(f"{n_errors} product(s) will be skipped due to the errors shown above.")
+                st.caption(T("product_list.skipped_due_to_errors", count=n_errors))
 
             acol1, acol2 = st.columns(2)
             with acol1:
-                if st.button("Cancel", use_container_width=True, key="rex_bulkedit_preview_cancel"):
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_bulkedit_preview_cancel"):
                     st.session_state.rex_bulkedit_preview = None
                     st.rerun()
             with acol2:
                 apply_clicked = st.button(
-                    "Apply Changes", type="primary", use_container_width=True, key="rex_bulkedit_apply",
+                    T("product_list.apply_changes"), type="primary", use_container_width=True, key="rex_bulkedit_apply",
                 )
             if apply_clicked:
                 by_id = {p.id: p for p in selected_products}
@@ -2583,23 +2644,23 @@ elif page == "🗂️ Product List":
                 st.session_state.rex_bulkedit_preview = None
                 st.session_state.rex_clear_seq += 1
                 if fail_count:
-                    st.success(f"{ok_count} products updated successfully. {fail_count} products could not be updated.")
+                    st.success(T("product_list.bulk_edit_partial_success", ok=ok_count, fail=fail_count))
                 else:
-                    st.success(f"Successfully updated {ok_count} products.")
-                if st.button("Close", use_container_width=True, key="rex_bulkedit_done"):
+                    st.success(T("product_list.bulk_edit_success", count=ok_count))
+                if st.button(T("common.close"), use_container_width=True, key="rex_bulkedit_done"):
                     st.rerun()
 
-    @st.dialog("Change Status")
+    @st.dialog(T("product_list.change_status_title"))
     def _confirm_change_status_dialog(selected_products):
-        st.write(f"Change status for **{len(selected_products)}** selected products")
-        new_status = st.selectbox("New Status", BULK_STATUS_OPTIONS, key="rex_status_value")
+        st.write(T("product_list.change_status_heading", count=len(selected_products)))
+        new_status = st.selectbox(T("product_list.new_status"), BULK_STATUS_OPTIONS, key="rex_status_value")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="rex_status_cancel"):
+            if st.button(T("common.cancel"), use_container_width=True, key="rex_status_cancel"):
                 st.rerun()
         with col2:
             confirmed = st.button(
-                "Apply Status Change", type="primary", use_container_width=True, key="rex_status_confirm"
+                T("product_list.apply_status_change"), type="primary", use_container_width=True, key="rex_status_confirm"
             )
         if confirmed:
             for p in selected_products:
@@ -2609,29 +2670,29 @@ elif page == "🗂️ Product List":
                     p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, f"status -> {new_status}",
                 )
             st.session_state.rex_clear_seq += 1
-            st.success(f"Successfully changed status for {len(selected_products)} products.")
-            if st.button("Close", use_container_width=True, key="rex_status_done"):
+            st.success(T("product_list.status_changed_success", count=len(selected_products)))
+            if st.button(T("common.close"), use_container_width=True, key="rex_status_done"):
                 st.rerun()
 
-    @st.dialog("Photo", width="large")
+    @st.dialog(T("product_list.photo_dialog_title"), width="large")
     def _photo_lightbox_dialog(image_paths, start_index: int):
         idx = st.session_state.get("rex_lightbox_index", start_index)
         idx = max(0, min(idx, len(image_paths) - 1))
         img_path = image_paths[idx]
         if os.path.exists(img_path):
             st.image(img_path, use_container_width=True)
-        st.caption(f"Photo {idx + 1} / {len(image_paths)}")
+        st.caption(T("product_list.photo_counter", current=idx + 1, total=len(image_paths)))
         c1, c2, c3 = st.columns(3)
         with c1:
-            if st.button("◀ Prev photo", disabled=idx <= 0, use_container_width=True, key="rex_lb_prev"):
+            if st.button(T("product_list.prev_photo"), disabled=idx <= 0, use_container_width=True, key="rex_lb_prev"):
                 st.session_state.rex_lightbox_index = idx - 1
                 st.rerun()
         with c2:
-            if st.button("Close", use_container_width=True, key="rex_lb_close"):
+            if st.button(T("common.close"), use_container_width=True, key="rex_lb_close"):
                 st.rerun()
         with c3:
             if st.button(
-                "Next photo ▶", disabled=idx >= len(image_paths) - 1,
+                T("product_list.next_photo"), disabled=idx >= len(image_paths) - 1,
                 use_container_width=True, key="rex_lb_next",
             ):
                 st.session_state.rex_lightbox_index = idx + 1
@@ -2650,8 +2711,8 @@ elif page == "🗂️ Product List":
         that's dropped here since the editable form above already shows
         the same data live."""
         if tier_label:
-            st.caption(f"🎯 Exact {tier_label} match")
-        st.subheader(f"{p.sku} — {p.name or '(no name)'}")
+            st.caption(T("product_list.exact_match", tier=tier_label))
+        st.subheader(f"{p.sku} — {p.name or T('product_list.no_name')}")
         st.caption(_status_badge(p))
         st.divider()
 
@@ -2665,7 +2726,7 @@ elif page == "🗂️ Product List":
         qa1, qa2, qa3 = st.columns([2, 2, 1])
         with qa1:
             new_triage = st.selectbox(
-                "Triage status", options=triage_keys,
+                T("product_list.triage_status"), options=triage_keys,
                 index=triage_keys.index(p.triage_status) if p.triage_status in triage_keys else 0,
                 format_func=lambda k: TRIAGE_LABELS[k],
                 key=f"rex_triage_{p.id}",
@@ -2676,7 +2737,7 @@ elif page == "🗂️ Product List":
                 audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "triage_status")
                 st.rerun()
         with qa2:
-            new_location = st.text_input("Location", value=p.location, key=f"rex_loc_{p.id}")
+            new_location = st.text_input(T("common.location"), value=p.location, key=f"rex_loc_{p.id}")
             if new_location != p.location:
                 p.location = new_location
                 inventory_store.save_product(p)
@@ -2684,7 +2745,7 @@ elif page == "🗂️ Product List":
                 st.rerun()
         with qa3:
             st.write("")
-            if st.button("🗑️ Delete", key=f"rex_delete_{p.id}", use_container_width=True):
+            if st.button(T("common.delete"), key=f"rex_delete_{p.id}", use_container_width=True):
                 inventory_store.delete_product(p.id, p.company_id)
                 audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
                 st.session_state.rex_open_product_id = None
@@ -2696,77 +2757,77 @@ elif page == "🗂️ Product List":
         # Save, not above these fields. Every widget gets an explicit
         # per-product key so Previous/Next don't leave a stale typed
         # value behind when the label text is identical across products.
-        st.markdown("**Product Information**")
-        name_in = st.text_input("Product Name", value=p.name, key=f"rex_name_{p.id}")
+        st.markdown(f"**{T('product_list.product_information')}**")
+        name_in = st.text_input(T("common.product_name"), value=p.name, key=f"rex_name_{p.id}")
         pi1, pi2 = st.columns(2)
         with pi1:
-            brand_in = st.text_input("Brand", value=p.brand, key=f"rex_brand_{p.id}")
+            brand_in = st.text_input(T("common.brand"), value=p.brand, key=f"rex_brand_{p.id}")
             barcode_in = st.text_input(
-                "Barcode", value=p.ean or p.manifest_barcode or p.scanned_barcode,
+                T("common.barcode"), value=p.ean or p.manifest_barcode or p.scanned_barcode,
                 key=f"rex_barcode_{p.id}",
             )
         with pi2:
-            model_in = st.text_input("Model", value=p.model, key=f"rex_model_{p.id}")
-            category_in = st.text_input("Category", value=p.category, key=f"rex_category_{p.id}")
-            power_in = st.text_input("Power", value=p.power, key=f"rex_power_{p.id}")
+            model_in = st.text_input(T("common.model"), value=p.model, key=f"rex_model_{p.id}")
+            category_in = st.text_input(T("common.category"), value=p.category, key=f"rex_category_{p.id}")
+            power_in = st.text_input(T("common.power"), value=p.power, key=f"rex_power_{p.id}")
         product_condition_in = st.selectbox(
-            "Product Condition", CONDITION_OPTIONS,
+            T("common.product_condition"), CONDITION_OPTIONS,
             index=CONDITION_OPTIONS.index(p.product_condition) if p.product_condition in CONDITION_OPTIONS else 1,
             key=f"rex_condition_{p.id}",
         )
 
-        st.markdown("**Pricing**")
+        st.markdown(f"**{T('product_list.pricing')}**")
         pr1, pr2 = st.columns(2)
         with pr1:
             price_in = st.number_input(
-                "Price ($)", min_value=0.0, value=float(p.price), step=1.0, key=f"rex_price_{p.id}",
+                T("product_list.price_eur"), min_value=0.0, value=float(p.price), step=1.0, key=f"rex_price_{p.id}",
             )
         with pr2:
             quantity_in = st.number_input(
-                "Quantity", min_value=1, value=int(p.quantity or 1), step=1, key=f"rex_qty_{p.id}",
+                T("common.quantity"), min_value=1, value=int(p.quantity or 1), step=1, key=f"rex_qty_{p.id}",
             )
 
-        st.markdown("**Product Description**")
+        st.markdown(f"**{T('common.product_description')}**")
         desc_in = st.text_area(
-            "Product Description", value=p.product_description, height=120, key=f"rex_desc_{p.id}",
+            T("common.product_description"), value=p.product_description, height=120, key=f"rex_desc_{p.id}",
         )
 
-        st.markdown("**Additional Description**")
+        st.markdown(f"**{T('product_list.additional_description')}**")
         extra_in = st.text_area(
-            "Additional Description (Condition & Scratches Details)",
+            T("new_item.condition_scratches_details"),
             value=p.condition_description, height=100, key=f"rex_extra_{p.id}",
         )
 
-        st.markdown("**Defects**")
+        st.markdown(f"**{T('product_list.defects')}**")
         defects_in = st.text_area(
-            "Defects (one per line)", value="\n".join(p.defects), height=80, key=f"rex_defects_{p.id}",
+            T("new_item.defects_label"), value="\n".join(p.defects), height=80, key=f"rex_defects_{p.id}",
         )
 
-        st.markdown("**Missing Components**")
+        st.markdown(f"**{T('product_list.missing_components')}**")
         missing_in = st.text_area(
-            "Missing Components (one per line)", value="\n".join(p.missing_components), height=60,
+            T("product_list.missing_components_label"), value="\n".join(p.missing_components), height=60,
             key=f"rex_missing_{p.id}",
         )
 
-        st.markdown("**Box Contents**")
+        st.markdown(f"**{T('product_list.box_contents')}**")
         box_in = st.text_area(
-            "Box Contents (one per line)", value="\n".join(p.box_contents), height=60,
+            T("product_list.box_contents_label"), value="\n".join(p.box_contents), height=60,
             key=f"rex_box_{p.id}",
         )
 
-        st.markdown("**Functional Checklist**")
+        st.markdown(f"**{T('product_list.functional_checklist')}**")
         checklist_in = st.text_area(
-            "Functional Checklist (one per line)", value="\n".join(p.functional_checklist), height=80,
+            T("product_list.functional_checklist_label"), value="\n".join(p.functional_checklist), height=80,
             key=f"rex_checklist_{p.id}",
         )
 
         if p.product_condition_reasoning:
-            st.caption(f"Product Condition reasoning: {p.product_condition_reasoning}")
+            st.caption(T("product_list.condition_reasoning", reasoning=p.product_condition_reasoning))
         if p.price_reasoning:
-            st.caption(f"Price reasoning: {p.price_reasoning}")
+            st.caption(T("product_list.price_reasoning", reasoning=p.price_reasoning))
 
         st.divider()
-        st.markdown(f"**Photos** ({len(p.image_paths)}/{REVIEW_CARD_MAX_PHOTOS})")
+        st.markdown(f"**{T('product_list.photos')}** ({len(p.image_paths)}/{REVIEW_CARD_MAX_PHOTOS})")
         if p.image_paths:
             photo_cols = st.columns(4)
             for i, img_path in enumerate(p.image_paths):
@@ -2788,29 +2849,26 @@ elif page == "🗂️ Product List":
                             )
                         else:
                             st.image(img_path, use_container_width=True)
-                        if st.button("🔍 Enlarge", key=f"rex_enlarge_{p.id}_{i}", use_container_width=True):
+                        if st.button(T("product_list.enlarge"), key=f"rex_enlarge_{p.id}_{i}", use_container_width=True):
                             st.session_state.rex_lightbox_index = i
                             _photo_lightbox_dialog(p.image_paths, i)
         else:
-            st.caption("No photos.")
+            st.caption(T("product_list.no_photos"))
 
         remaining_slots = REVIEW_CARD_MAX_PHOTOS - len(p.image_paths)
         if remaining_slots > 0:
             with st.form(key=f"rex_photo_upload_{p.id}", clear_on_submit=True):
                 new_photo_files = st.file_uploader(
-                    f"➕ Add photos (up to {remaining_slots} more)",
+                    T("product_list.add_photos", remaining=remaining_slots),
                     type=["jpg", "jpeg", "png"], accept_multiple_files=True,
                 )
-                if st.form_submit_button("Add photos"):
+                if st.form_submit_button(T("product_list.add_photos_button")):
                     if not new_photo_files:
-                        st.warning("No photos selected.")
+                        st.warning(T("product_list.no_photos_selected"))
                     else:
                         to_add = new_photo_files[:remaining_slots]
                         if len(new_photo_files) > remaining_slots:
-                            st.warning(
-                                f"Only added {remaining_slots} photo(s) — "
-                                f"{REVIEW_CARD_MAX_PHOTOS} photo maximum reached."
-                            )
+                            st.warning(T("product_list.only_added_photos", remaining=remaining_slots, max=REVIEW_CARD_MAX_PHOTOS))
                         item_dir = UPLOAD_DIR / sku_folder_name(p.sku, p.id)
                         item_dir.mkdir(parents=True, exist_ok=True)
                         existing_nums = [
@@ -2830,13 +2888,13 @@ elif page == "🗂️ Product List":
                             p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
                             f"added {len(to_add)} photo(s)",
                         )
-                        st.success(f"Added {len(to_add)} photo(s).")
+                        st.success(T("product_list.added_photos_success", count=len(to_add)))
                         st.rerun()
         else:
-            st.caption(f"Maximum of {REVIEW_CARD_MAX_PHOTOS} photos reached.")
+            st.caption(T("product_list.max_photos_reached", max=REVIEW_CARD_MAX_PHOTOS))
 
         st.divider()
-        if st.button("💾 Save", type="primary", use_container_width=True, key=f"rex_save_{p.id}"):
+        if st.button(T("product_list.save_button"), type="primary", use_container_width=True, key=f"rex_save_{p.id}"):
             new_defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
             new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
             new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
@@ -2904,32 +2962,32 @@ elif page == "🗂️ Product List":
                 _record_sync_field_changes(p, _sync_field_diffs, current_user.id)
             st.session_state.rex_open_product_id = None
             st.session_state.rex_focus_id = p.id  # scroll/highlight this row back in the list
-            st.success("Saved.")
+            st.success(T("product_list.saved"))
             st.rerun()
 
         # -- Manifest info (from the old Inventory page, unchanged) --
-        with st.expander("📋 Manifest info", expanded=False):
+        with st.expander(T("product_list.manifest_info"), expanded=False):
             if p.manifest_import_id:
-                st.write("**Manifest item description:**", p.manifest_item_description or "—")
+                st.write(f"**{T('product_list.manifest_item_description')}:**", p.manifest_item_description or "—")
                 st.write(
-                    f"**Manifest Target #:** {p.manifest_target_no or '—'}  •  "
-                    f"**Subcategory:** {p.manifest_subcategory or '—'}"
+                    f"**{T('product_list.manifest_target_no')}:** {p.manifest_target_no or '—'}  •  "
+                    f"**{T('product_list.subcategory')}:** {p.manifest_subcategory or '—'}"
                 )
-                st.write(f"**Manifest ASIN:** {p.asin or '—'}  •  **Manifest barcode:** {p.manifest_barcode or '—'}")
-                st.write(f"**Qty:** {p.manifest_qty}  •  **Weight:** {p.manifest_weight_kg} kg")
-                st.caption(f"Batch: {p.manifest_import_id}")
+                st.write(f"**{T('product_list.manifest_asin')}:** {p.asin or '—'}  •  **{T('product_list.manifest_barcode')}:** {p.manifest_barcode or '—'}")
+                st.write(f"**{T('new_item.qty')}:** {p.manifest_qty}  •  **{T('new_item.weight')}:** {p.manifest_weight_kg} kg")
+                st.caption(T("product_list.batch_label", batch_id=p.manifest_import_id))
             else:
-                st.caption("Manually entered — no manifest origin.")
+                st.caption(T("product_list.manually_entered"))
 
         # -- Repair History (from the old Inventory page, unchanged) --
         events = repair_store.list_repair_events(p.id, p.company_id)
         repair_total = repair_store.total_repair_cost(p.id, p.company_id)
-        with st.expander(f"🛠️ Repair History ({len(events)}) — ${repair_total:.2f} total"):
+        with st.expander(T("product_list.repair_history_title", count=len(events), total=f"{repair_total:.2f}")):
             for e in events:
                 rc1, rc2 = st.columns([5, 1])
                 with rc1:
                     when = time.strftime("%Y-%m-%d", time.localtime(e.occurred_at))
-                    st.write(f"**{when}** — {e.description or '(no description)'} — ${e.cost:.2f}"
+                    st.write(f"**{when}** — {e.description or T('product_list.no_description')} — €{e.cost:.2f}"
                              + (f" — {e.technician}" if e.technician else ""))
                 with rc2:
                     if st.button("🗑️", key=f"delrepair_{e.id}"):
@@ -2938,12 +2996,12 @@ elif page == "🗂️ Product List":
             with st.form(key=f"addrepair_{p.id}", clear_on_submit=True):
                 rf1, rf2, rf3 = st.columns([3, 1, 1])
                 with rf1:
-                    r_desc = st.text_input("Description", key=f"rdesc_{p.id}")
+                    r_desc = st.text_input(T("common.description"), key=f"rdesc_{p.id}")
                 with rf2:
-                    r_cost = st.number_input("Cost", min_value=0.0, step=0.5, key=f"rcost_{p.id}")
+                    r_cost = st.number_input(T("product_list.cost"), min_value=0.0, step=0.5, key=f"rcost_{p.id}")
                 with rf3:
-                    r_tech = st.text_input("Technician", key=f"rtech_{p.id}")
-                if st.form_submit_button("➕ Add repair entry"):
+                    r_tech = st.text_input(T("product_list.technician"), key=f"rtech_{p.id}")
+                if st.form_submit_button(T("product_list.add_repair_entry")):
                     if r_desc.strip():
                         repair_store.add_repair_event(
                             repair_store.RepairEvent(
@@ -2953,13 +3011,13 @@ elif page == "🗂️ Product List":
                         )
                         st.rerun()
                     else:
-                        st.warning("Description is required.")
+                        st.warning(T("product_list.description_required"))
 
         # -- Sales & Listings (from the old Inventory page — the
         # read-only Price/Description/Condition re-display that used to
         # sit at the top of this expander is dropped: the editable form
         # above already covers those fields live) --
-        with st.expander("🛒 Sales & Listings", expanded=False):
+        with st.expander(T("product_list.sales_listings"), expanded=False):
             listings = marketplace_store.list_listings(p.id, p.company_id)
             if listings:
                 for listing in listings:
@@ -2969,32 +3027,32 @@ elif page == "🗂️ Product List":
                         + (f" — {listing.url}" if listing.url else "")
                     )
             else:
-                st.caption("Not listed on any marketplace yet.")
+                st.caption(T("product_list.not_listed_yet"))
 
             if IntegrationManager.is_connected(p.company_id, "baselinker"):
                 bl_col1, bl_col2, bl_col3, bl_col4 = st.columns(4)
                 with bl_col1:
-                    if st.button("🔍 Preview export", key=f"preview_{p.id}", use_container_width=True):
+                    if st.button(T("product_list.preview_export"), key=f"preview_{p.id}", use_container_width=True):
                         st.session_state[f"show_export_preview_{p.id}"] = True
                 with bl_col2:
-                    if st.button("📤 Push to BaseLinker", key=f"push_{p.id}", use_container_width=True):
+                    if st.button(T("product_list.push_to_baselinker"), key=f"push_{p.id}", use_container_width=True):
                         result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
                         if result.success:
                             audit_store.log_audit(
                                 p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
                                 f"baselinker_product_id={result.external_id}",
                             )
-                            st.success(f"Pushed — BaseLinker product_id: {result.external_id}")
+                            st.success(T("product_list.pushed_success", external_id=result.external_id))
                             st.rerun()
                         else:
                             st.error(result.message)
                 with bl_col3:
-                    if st.button("🔄 Sync now", key=f"sync_now_{p.id}", use_container_width=True):
+                    if st.button(T("product_list.sync_now"), key=f"sync_now_{p.id}", use_container_width=True):
                         st.session_state[f"sync_now_results_{p.id}"] = sync_service.run_manual_sync(
                             p.company_id, p, "baselinker",
                         )
                 with bl_col4:
-                    if st.button("⬇️ Pull now", key=f"pull_now_{p.id}", use_container_width=True):
+                    if st.button(T("product_list.pull_now"), key=f"pull_now_{p.id}", use_container_width=True):
                         st.session_state[f"pull_now_results_{p.id}"] = sync_engine.pull_product(
                             p.company_id, p, "baselinker",
                         )
@@ -3009,31 +3067,31 @@ elif page == "🗂️ Product List":
                     # goes through sync/engine.py's pull_product() +
                     # Conflict Resolver instead of this generic sync() entry
                     # point. Never fakes a result either way.
-                    with st.expander("🔄 Sync now — result", expanded=True):
+                    with st.expander(T("product_list.sync_now_result"), expanded=True):
                         for rec in st.session_state[f"sync_now_results_{p.id}"]:
                             if rec.sync_status == STATUS_SUCCESS:
-                                st.success(f"{rec.direction.capitalize()}: ✅ success")
+                                st.success(f"{rec.direction.capitalize()}: ✅ {T('product_list.success_word')}")
                             elif rec.sync_status == STATUS_DISABLED:
-                                st.info(f"{rec.direction.capitalize()}: ⏸️ {rec.error_message or 'disabled'}")
+                                st.info(f"{rec.direction.capitalize()}: ⏸️ {rec.error_message or T('product_list.disabled_word')}")
                             else:
                                 st.error(f"{rec.direction.capitalize()}: ❌ {rec.error_message}")
-                        if st.button("Close", key=f"close_sync_now_{p.id}"):
+                        if st.button(T("common.close"), key=f"close_sync_now_{p.id}"):
                             st.session_state[f"sync_now_results_{p.id}"] = None
                             st.rerun()
 
                 if st.session_state.get(f"pull_now_results_{p.id}") is not None:
-                    with st.expander("⬇️ Pull now — result", expanded=True):
+                    with st.expander(T("product_list.pull_now_result"), expanded=True):
                         resolutions = st.session_state[f"pull_now_results_{p.id}"]
                         if not resolutions:
-                            st.caption("Nothing to pull — no BaseLinker listing yet, or BaseLinker returned no data.")
+                            st.caption(T("product_list.nothing_to_pull"))
                         for res in resolutions:
                             if res.resolution_action == "accepted":
-                                st.success(f"{res.field_name}: ✅ accepted — {res.applied_value}")
+                                st.success(T("product_list.field_accepted", field=res.field_name, value=res.applied_value))
                             elif res.resolution_action == "overridden":
-                                st.warning(f"{res.field_name}: ⚠️ conflict, resolved to {res.applied_value}")
+                                st.warning(T("product_list.field_conflict", field=res.field_name, value=res.applied_value))
                             else:
-                                st.info(f"{res.field_name}: ⏸️ pending manual review")
-                        if st.button("Close", key=f"close_pull_now_{p.id}"):
+                                st.info(T("product_list.field_pending_review", field=res.field_name))
+                        if st.button(T("common.close"), key=f"close_pull_now_{p.id}"):
                             st.session_state[f"pull_now_results_{p.id}"] = None
                             st.rerun()
 
@@ -3045,37 +3103,35 @@ elif page == "🗂️ Product List":
                     text_fields = payload.get("text_fields", {})
                     prices = payload.get("prices") or {}
                     stock = payload.get("stock") or {}
-                    with st.expander("🔍 BaseLinker export preview", expanded=True):
-                        st.caption(
-                            "\"(excluded)\" means this field's toggle is off in Synchronization — "
-                            "an empty value shown without that note just means the product itself "
-                            "has nothing there yet."
-                        )
-                        st.write("**Title:**", text_fields["name"] or "— (empty)" if "name" in text_fields else "— (excluded)")
+                    with st.expander(T("product_list.export_preview_title"), expanded=True):
+                        st.caption(T("product_list.export_preview_caption"))
+                        _empty_label = T("product_list.empty_dash")
+                        _excluded_label = T("product_list.excluded_dash")
+                        st.write(f"**{T('product_list.title_label')}:**", text_fields["name"] or _empty_label if "name" in text_fields else _excluded_label)
                         st.write(
-                            "**Description:**",
-                            text_fields["description"] or "— (empty)" if "description" in text_fields else "— (excluded)",
+                            f"**{T('common.description')}:**",
+                            text_fields["description"] or _empty_label if "description" in text_fields else _excluded_label,
                         )
                         st.write(
-                            "**Additional description:**",
-                            text_fields["description_extra1"] if "description_extra1" in text_fields else "— (excluded)",
+                            f"**{T('product_list.additional_description')}:**",
+                            text_fields["description_extra1"] if "description_extra1" in text_fields else _excluded_label,
                         )
-                        st.write("**SKU:**", payload.get("sku", "—"))
-                        st.write("**Barcode:**", payload.get("ean") or "— (excluded)")
-                        st.write("**Category ID:**", payload.get("category_id", "—"))
-                        st.write("**Price:**", next(iter(prices.values()), None) or "— (excluded or no price set)")
-                        st.write("**Quantity:**", next(iter(stock.values()), "— (excluded)"))
-                        st.write("**Images:**", f"{payload.get('_preview_image_count', 0)} included")
-                        if st.button("Close preview", key=f"close_preview_{p.id}"):
+                        st.write(f"**{T('common.sku')}:**", payload.get("sku", "—"))
+                        st.write(f"**{T('common.barcode')}:**", payload.get("ean") or _excluded_label)
+                        st.write(f"**{T('product_list.category_id')}:**", payload.get("category_id", "—"))
+                        st.write(f"**{T('common.price')}:**", next(iter(prices.values()), None) or T("product_list.excluded_or_no_price"))
+                        st.write(f"**{T('common.quantity')}:**", next(iter(stock.values()), _excluded_label))
+                        st.write(f"**{T('product_list.images_label')}:**", T("product_list.images_included", count=payload.get('_preview_image_count', 0)))
+                        if st.button(T("product_list.close_preview"), key=f"close_preview_{p.id}"):
                             st.session_state[f"show_export_preview_{p.id}"] = False
                             st.rerun()
 
         # -- Financials (from the old Inventory page, unchanged) --
-        with st.expander("💰 Financials", expanded=False):
+        with st.expander(T("product_list.financials"), expanded=False):
             fc1, fc2, fc3 = st.columns(3)
             with fc1:
                 new_purchase = st.number_input(
-                    "Purchase price (allocated)", min_value=0.0, step=0.5,
+                    T("product_list.purchase_price_allocated"), min_value=0.0, step=0.5,
                     value=p.purchase_price_allocated, key=f"purchase_{p.id}",
                 )
                 if new_purchase != p.purchase_price_allocated:
@@ -3086,10 +3142,10 @@ elif page == "🗂️ Product List":
                     )
                     st.rerun()
             with fc2:
-                st.metric("Repair cost", f"${repair_total:.2f}")
+                st.metric(T("product_list.repair_cost"), f"€{repair_total:.2f}")
             with fc3:
                 profit = p.price - p.purchase_price_allocated - repair_total
-                st.metric("Profit (selling − purchase − repairs)", f"${profit:.2f}")
+                st.metric(T("product_list.profit_metric"), f"€{profit:.2f}")
 
         st.divider()
 
@@ -3104,7 +3160,7 @@ elif page == "🗂️ Product List":
     # (matching the table) with no CSS needed, and the table is pushed
     # down below it rather than covered, while the trigger stays a small
     # button either way.
-    if st.button("🔍 Filter Products" if not st.session_state.rex_filters_open else "🔍 Filter Products ▲"):
+    if st.button(T("product_list.filter_products") if not st.session_state.rex_filters_open else T("product_list.filter_products_open")):
         st.session_state.rex_filters_open = not st.session_state.rex_filters_open
         st.rerun()
 
@@ -3141,45 +3197,45 @@ elif page == "🗂️ Product List":
     # below for the "Active filters" caption even when the panel is closed,
     # not just while the selectbox itself is on screen.
     batches = manifest_store.list_batches(st.session_state.company_id)
-    batch_options = {"": "All batches"}
+    batch_options = {"": T("product_list.all_batches")}
     batch_options.update({b.id: f"{b.filename} ({b.id})" for b in batches})
 
     if st.session_state.rex_filters_open:
         with st.container(border=True):
-            st.markdown("**Search by field** (all combine together — narrows on every non-empty box)")
+            st.markdown(f"**{T('product_list.search_by_field')}**")
             sf1, sf2, sf3, sf4 = st.columns(4)
             with sf1:
-                _synced_text_input("SKU", "rex_search_sku")
-                _synced_text_input("Location", "rex_search_location")
+                _synced_text_input(T("common.sku"), "rex_search_sku")
+                _synced_text_input(T("common.location"), "rex_search_location")
             with sf2:
-                _synced_text_input("Name", "rex_search_name")
+                _synced_text_input(T("common.name"), "rex_search_name")
                 _synced_text_input("EAN", "rex_search_ean")
             with sf3:
-                _synced_text_input("Brand", "rex_search_brand")
+                _synced_text_input(T("common.brand"), "rex_search_brand")
                 _synced_text_input("ASIN", "rex_search_asin")
             with sf4:
-                _synced_text_input("Model", "rex_search_model")
+                _synced_text_input(T("common.model"), "rex_search_model")
 
-            st.markdown("**More filters**")
+            st.markdown(f"**{T('product_list.more_filters')}**")
             mf1, mf2, mf3, mf4 = st.columns(4)
             with mf1:
                 _synced_selectbox(
-                    "Status", list(REX_STATUS_FILTER_OPTIONS), "rex_status_filter",
+                    T("common.status"), list(REX_STATUS_FILTER_OPTIONS), "rex_status_filter",
                     format_func=lambda k: REX_STATUS_FILTER_OPTIONS[k],
                 )
             with mf2:
                 _synced_selectbox(
-                    "Triage status", [k for k in TRIAGE_LABELS], "rex_triage_filter",
+                    T("product_list.triage_status"), [k for k in TRIAGE_LABELS], "rex_triage_filter",
                     format_func=lambda k: TRIAGE_LABELS[k],
                 )
             with mf3:
                 _synced_selectbox(
-                    "Product Condition", [""] + CONDITION_OPTIONS, "rex_condition_filter",
-                    format_func=lambda k: k or "All",
+                    T("common.product_condition"), [""] + CONDITION_OPTIONS, "rex_condition_filter",
+                    format_func=lambda k: k or T("common.all"),
                 )
             with mf4:
                 _synced_selectbox(
-                    "Manifest batch", list(batch_options), "rex_batch_filter",
+                    T("product_list.manifest_batch"), list(batch_options), "rex_batch_filter",
                     format_func=lambda k: batch_options[k],
                 )
 
@@ -3193,23 +3249,20 @@ elif page == "🗂️ Product List":
             # (usually 0-3), so rendering them directly bypasses
             # pagination entirely — no scale concern.
             _synced_text_input(
-                "🔍 Exact lookup by SKU, EAN, ASIN, Product Name, Brand, or Model",
+                T("product_list.exact_lookup_label"),
                 "rex_exact_search",
                 placeholder="e.g. 2001, 0194252057338, B08ASIN123, iPhone 12, Apple, A2172",
-                help="Searches the WHOLE inventory regardless of the filters above. "
-                "Priority: exact SKU match, then exact EAN, then exact ASIN, then "
-                "model number, then brand/product name. Works for manifest-imported "
-                "and manually-added items alike.",
+                help=T("product_list.exact_lookup_help"),
             )
 
             st.divider()
             fb1, fb2 = st.columns(2)
             with fb1:
-                if st.button("✅ Set filters", type="primary", use_container_width=True, key="rex_set_filters_btn"):
+                if st.button(T("product_list.set_filters"), type="primary", use_container_width=True, key="rex_set_filters_btn"):
                     st.session_state.rex_filters_open = False
                     st.rerun()
             with fb2:
-                if st.button("✖ Clear filters", use_container_width=True, key="rex_clear_filters_btn"):
+                if st.button(T("product_list.clear_filters"), use_container_width=True, key="rex_clear_filters_btn"):
                     # Safe to set these directly: no widget is bound to
                     # these exact keys (widgets use the separate "_w"
                     # keys above), so there's no "already instantiated
@@ -3390,7 +3443,7 @@ elif page == "🗂️ Product List":
             # dialog) forces a fresh, closed popover instead of it staying
             # open behind the dialog that was just triggered.
             with st.popover(
-                "⚙️ Operations", disabled=n_selected == 0, use_container_width=True,
+                T("product_list.operations"), disabled=n_selected == 0, use_container_width=True,
                 key=f"rex_ops_popover_{st.session_state.rex_ops_popover_seq}",
             ):
                 # Flat, borderless look for this list of actions (Export,
@@ -3399,32 +3452,37 @@ elif page == "🗂️ Product List":
                 # highlight. Same technique as the pagination digits
                 # above, targeted by the "rex_op_*" key prefix so it
                 # doesn't affect other buttons (Apply, Clear Selection).
+                # aria-label selector below must match whatever T()
+                # currently renders for the "⚙️ Operations" trigger label
+                # (Streamlit sets aria-label from that same text) — built
+                # with an f-string so it still targets the right popover
+                # in Latvian, not just English.
                 st.markdown(
-                    """
+                    f"""
                     <style>
-                    div[class*="st-key-rex_op_"] button {
+                    div[class*="st-key-rex_op_"] button {{
                         border: none !important;
                         background: transparent !important;
                         box-shadow: none !important;
                         text-align: left !important;
                         justify-content: flex-start !important;
                         padding: 6px 4px !important;
-                    }
+                    }}
                     /* text-align/justify-content on the <button> alone
                     doesn't left-align its label — Streamlit wraps the
                     label in its own centered flex div/p inside the
                     button, which needs the same override or it keeps
                     winning. */
                     div[class*="st-key-rex_op_"] button > div,
-                    div[class*="st-key-rex_op_"] button p {
+                    div[class*="st-key-rex_op_"] button p {{
                         justify-content: flex-start !important;
                         text-align: left !important;
                         width: 100% !important;
-                    }
-                    div[class*="st-key-rex_op_"] button:hover:not(:disabled) {
+                    }}
+                    div[class*="st-key-rex_op_"] button:hover:not(:disabled) {{
                         background: rgba(128, 128, 128, 0.15) !important;
                         border-radius: 6px !important;
-                    }
+                    }}
                     /* The popover PANEL itself (not just the buttons in
                     it) still has Streamlit's default bordered/shadowed
                     box look. It renders through a React portal, so it's
@@ -3433,57 +3491,57 @@ elif page == "🗂️ Product List":
                     same text as the "⚙️ Operations" trigger, so this only
                     ever targets this one popover (not "⬇️ Download" or any
                     other). Result: a plain floating list of words, no box. */
-                    div[data-testid="stPopoverBody"][aria-label="⚙️ Operations"] {
+                    div[data-testid="stPopoverBody"][aria-label="{T('product_list.operations')}"] {{
                         border: none !important;
                         box-shadow: none !important;
                         border-radius: 0 !important;
-                    }
+                    }}
                     /* Uniform gap between every word in the list — the
                     st.divider() lines previously used to separate groups
                     added their own (larger, inconsistent) margin, making
                     some pairs look closer together than others. */
-                    div[class*="st-key-rex_op_"] {
+                    div[class*="st-key-rex_op_"] {{
                         margin: 2px 0 !important;
-                    }
+                    }}
                     </style>
                     """,
                     unsafe_allow_html=True,
                 )
                 can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
-                if st.button("✏️ Bulk Edit", use_container_width=True, key="rex_op_bulk_edit"):
+                if st.button(T("product_list.bulk_edit"), use_container_width=True, key="rex_op_bulk_edit"):
                     st.session_state.rex_bulk_edit_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
-                if st.button("🔄 Change Status", use_container_width=True, key="rex_op_change_status"):
+                if st.button(T("product_list.change_status"), use_container_width=True, key="rex_op_change_status"):
                     st.session_state.rex_status_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
                 if st.button(
-                    "📤 Export", disabled=not can_export, use_container_width=True,
+                    T("product_list.export_button"), disabled=not can_export, use_container_width=True,
                     key="rex_op_export",
                 ):
                     st.session_state.rex_export_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
                 if st.button(
-                    "🗑️ Delete Products", disabled=not can_export, use_container_width=True,
+                    T("product_list.delete_products"), disabled=not can_export, use_container_width=True,
                     key="rex_op_delete",
                 ):
                     st.session_state.rex_delete_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
                 if not can_export:
-                    st.caption("Only Admins and Reviewers can export or delete.")
-                if st.button("✖ Clear Selection", use_container_width=True, key="rex_clear_selection"):
+                    st.caption(T("product_list.admins_reviewers_only"))
+                if st.button(T("product_list.clear_selection"), use_container_width=True, key="rex_clear_selection"):
                     st.session_state.rex_selected_ids = set()
                     st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
                     st.session_state["_rex_skip_table_merge"] = True
                     st.rerun()
         with top3:
-            with st.popover("⬇️ Download", disabled=n_selected == 0, use_container_width=True):
+            with st.popover(T("product_list.download"), disabled=n_selected == 0, use_container_width=True):
                 _dl_products = _get_selected_products() if n_selected else []
                 st.download_button(
-                    "⬇️ Download Excel (.xlsx)",
+                    T("product_list.download_excel"),
                     data=export.to_excel_bytes(_dl_products) if _dl_products else b"",
                     file_name="baselinker_export.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3491,64 +3549,57 @@ elif page == "🗂️ Product List":
                     use_container_width=True,
                 )
                 st.download_button(
-                    "⬇️ Download CSV",
+                    T("product_list.download_csv"),
                     data=export.to_csv_bytes(_dl_products) if _dl_products else b"",
                     file_name="baselinker_export.csv",
                     mime="text/csv",
                     disabled=n_selected == 0,
                     use_container_width=True,
                 )
-                st.caption(
-                    "Note: 'Image Links' currently contains local file "
-                    "paths. Baselinker's importer needs public image "
-                    "URLs — upload the photos to hosting (or "
-                    "Baselinker's own media manager) and substitute the "
-                    "URLs, or attach photos manually per listing after "
-                    "import."
-                )
+                st.caption(T("product_list.image_links_note"))
         with top1:
-            st.caption(f"{total_count} product(s) total — Selected: {n_selected}")
+            st.caption(T("product_list.total_count_selected", total=total_count, selected=n_selected))
 
     _active_filters = []
     if status_filter != "completed":
         _active_filters.append(REX_STATUS_FILTER_OPTIONS[status_filter])
     for _field_label, _field_val in (
-        ("SKU", sku_in), ("Name", name_in), ("Brand", brand_in), ("Model", model_in),
-        ("EAN", ean_in), ("ASIN", asin_in), ("Location", location_in),
+        (T("common.sku"), sku_in), (T("common.name"), name_in), (T("common.brand"), brand_in), (T("common.model"), model_in),
+        ("EAN", ean_in), ("ASIN", asin_in), (T("common.location"), location_in),
     ):
         if _field_val.strip():
             _active_filters.append(f"{_field_label}~“{_field_val.strip()}”")
     if triage_filter:
         _active_filters.append(TRIAGE_LABELS[triage_filter])
     if condition_filter:
-        _active_filters.append(f"condition {condition_filter}")
+        _active_filters.append(T("product_list.condition_filter_label", condition=condition_filter))
     if batch_filter:
         _active_filters.append(batch_options[batch_filter])
     if exact_query.strip():
-        _active_filters.append(f"exact lookup “{exact_query.strip()}”")
-    st.caption("Active: " + " · ".join(_active_filters) if _active_filters else "No filters applied — showing completed products only.")
+        _active_filters.append(T("product_list.exact_lookup_active", query=exact_query.strip()))
+    st.caption(T("product_list.active_filters", filters=" · ".join(_active_filters)) if _active_filters else T("product_list.no_filters_applied"))
 
     if exact_query.strip():
         exact_results = inventory_store.search_products(exact_query.strip(), st.session_state.company_id)
-        st.caption(f"{len(exact_results)} match(es) for '{exact_query.strip()}'")
+        st.caption(T("product_list.match_count", count=len(exact_results), query=exact_query.strip()))
         tier_labels = {
             inventory_store.MATCH_TIER_SKU: "SKU",
             inventory_store.MATCH_TIER_EAN: "EAN",
             inventory_store.MATCH_TIER_ASIN: "ASIN",
-            inventory_store.MATCH_TIER_MODEL: "model",
-            inventory_store.MATCH_TIER_BRAND_NAME: "brand/name",
+            inventory_store.MATCH_TIER_MODEL: T("common.model").lower(),
+            inventory_store.MATCH_TIER_BRAND_NAME: T("product_list.brand_name_tier"),
         }
         for p, tier in exact_results:
             _render_product_card(p, tier_labels.get(tier, ""))
 
     else:
         if total_count == 0:
-            st.info("No products match this filter yet.")
+            st.info(T("product_list.no_products_match_filter"))
 
         elif st.session_state.rex_open_product_id is None:
             # -------------------------------------------------------- LIST VIEW --
             if not products_page:
-                st.info("No products on this page.")
+                st.info(T("product_list.no_products_on_page"))
             else:
                 table_rows = []
                 for p in products_page:
@@ -3589,18 +3640,14 @@ elif page == "🗂️ Product List":
                 # twice would be harmless (idempotent) but redundant.
                 review_table(
                     rows=table_rows,
-                    columns=_PRODUCT_TABLE_COLUMNS,
+                    columns=_translated_columns(_PRODUCT_TABLE_COLUMNS),
                     mobile_fields=_PRODUCT_TABLE_MOBILE_FIELDS,
                     state_key="products",
                     focus_id=focus_id,
                     clear_seq=st.session_state.rex_clear_seq,
                     key="rex_table",
                 )
-                st.caption(
-                    "Column sort in the table above only applies to the "
-                    "current page — use the filters above the list to "
-                    "narrow across the whole inventory."
-                )
+                st.caption(T("product_list.column_sort_note"))
                 _render_numbered_pagination(key_prefix="rex_pg_b")
 
             if st.session_state.rex_export_requested:
@@ -3639,8 +3686,8 @@ elif page == "🗂️ Product List":
             pid = st.session_state.rex_open_product_id
             p = inventory_store.get_product(pid, st.session_state.company_id)
             if p is None:
-                st.warning("Product not found — it may have been deleted.")
-                if st.button("← Back to list"):
+                st.warning(T("product_list.product_not_found"))
+                if st.button(T("common.back_to_list")):
                     st.session_state.rex_open_product_id = None
                     st.rerun()
             else:
@@ -3654,15 +3701,15 @@ elif page == "🗂️ Product List":
 
                 nav1, nav2, nav3, nav4 = st.columns([1.3, 1, 1, 1])
                 with nav1:
-                    if st.button("← Back to list", use_container_width=True):
+                    if st.button(T("common.back_to_list"), use_container_width=True):
                         st.session_state.rex_open_product_id = None
                         st.rerun()
                 with nav2:
-                    if st.button("◀ Previous Product", disabled=cur_idx <= 0, use_container_width=True):
+                    if st.button(T("product_list.previous_product"), disabled=cur_idx <= 0, use_container_width=True):
                         st.session_state.rex_open_product_id = ordered_ids[cur_idx - 1]
                         st.rerun()
                 with nav3:
-                    if st.button("Next Product ▶", disabled=cur_idx >= len(ordered_ids) - 1, use_container_width=True):
+                    if st.button(T("product_list.next_product"), disabled=cur_idx >= len(ordered_ids) - 1, use_container_width=True):
                         st.session_state.rex_open_product_id = ordered_ids[cur_idx + 1]
                         st.rerun()
                 with nav4:
@@ -3672,31 +3719,28 @@ elif page == "🗂️ Product List":
 
 # =========================================================== MANAGE USERS =
 # ================================================================ ORDERS ==
-elif page == "📦 Orders":
+elif page == PAGE_ORDERS:
     ORDERS_PAGE_SIZE = 50
 
-    st.title("📦 Orders")
-    st.caption(
-        "Orders pulled in from your connected marketplaces — read-only here, "
-        "synced automatically in the background."
-    )
+    st.title(T("nav.orders"))
+    st.caption(T("orders.page_caption"))
 
     if st.session_state.orders_open_id is None:
         # -------------------------------------------------------- LIST VIEW --
         search_col, marketplace_col, refresh_col = st.columns([2, 1, 1])
         with search_col:
             orders_search_in = st.text_input(
-                "Search", value=st.session_state.orders_search,
-                placeholder="Order number, customer name, or SKU",
+                T("common.search"), value=st.session_state.orders_search,
+                placeholder=T("orders.search_placeholder"),
                 key="orders_search_input", label_visibility="collapsed",
             )
         with marketplace_col:
             orders_marketplace_in = st.text_input(
-                "Marketplace", value=st.session_state.orders_marketplace_filter,
-                placeholder="Marketplace", key="orders_marketplace_input", label_visibility="collapsed",
+                T("orders.marketplace"), value=st.session_state.orders_marketplace_filter,
+                placeholder=T("orders.marketplace"), key="orders_marketplace_input", label_visibility="collapsed",
             )
         with refresh_col:
-            if st.button("🔄 Refresh", use_container_width=True):
+            if st.button(T("common.refresh"), use_container_width=True):
                 st.rerun()
 
         if (
@@ -3719,16 +3763,13 @@ elif page == "📦 Orders":
         orders_total_pages = max(1, (orders_total + ORDERS_PAGE_SIZE - 1) // ORDERS_PAGE_SIZE)
 
         if not orders_page_rows:
-            st.info(
-                "No orders yet. Connect a marketplace integration in Settings -> "
-                "Integrations to start syncing orders here."
-            )
+            st.info(T("orders.no_orders_yet"))
         else:
             table_rows = []
             for o in orders_page_rows:
                 table_rows.append({
                     "id": o.id,
-                    "order_number": o.order_number or "(none)",
+                    "order_number": o.order_number or T("orders.none_placeholder"),
                     "customer_name": o.customer_name or "—",
                     "items_summary": o.items_summary or "—",
                     "price_total": o.price_total or 0,
@@ -3742,7 +3783,7 @@ elif page == "📦 Orders":
 
             orders_table_result = review_table(
                 rows=table_rows,
-                columns=_ORDER_TABLE_COLUMNS,
+                columns=_translated_columns(_ORDER_TABLE_COLUMNS),
                 mobile_fields=_ORDER_TABLE_MOBILE_FIELDS,
                 state_key="orders",
                 clear_seq=st.session_state.orders_clear_seq,
@@ -3760,18 +3801,18 @@ elif page == "📦 Orders":
             # toolbar to anchor Product List's fuller numbered widget against.
             pg_prev, pg_label, pg_next = st.columns([1, 2, 1])
             with pg_prev:
-                if st.button("‹ Previous", disabled=st.session_state.orders_page <= 1, use_container_width=True):
+                if st.button(T("product_list.prev_simple"), disabled=st.session_state.orders_page <= 1, use_container_width=True):
                     st.session_state.orders_page -= 1
                     st.rerun()
             with pg_label:
                 st.markdown(
                     f"<div style='text-align:center;padding-top:6px;'>"
-                    f"Page {st.session_state.orders_page} of {orders_total_pages} — {orders_total} order(s)</div>",
+                    f"{T('orders.page_of', page=st.session_state.orders_page, total_pages=orders_total_pages, count=orders_total)}</div>",
                     unsafe_allow_html=True,
                 )
             with pg_next:
                 if st.button(
-                    "Next ›", disabled=st.session_state.orders_page >= orders_total_pages,
+                    T("product_list.next_simple"), disabled=st.session_state.orders_page >= orders_total_pages,
                     use_container_width=True,
                 ):
                     st.session_state.orders_page += 1
@@ -3781,40 +3822,40 @@ elif page == "📦 Orders":
         # ------------------------------------------------------ DETAIL VIEW --
         order = order_store.get_order(st.session_state.orders_open_id, st.session_state.company_id)
         if order is None:
-            st.warning("Order not found — it may have been removed.")
-            if st.button("← Back to list"):
+            st.warning(T("orders.order_not_found"))
+            if st.button(T("common.back_to_list")):
                 st.session_state.orders_open_id = None
                 st.rerun()
         else:
-            if st.button("← Back to list"):
+            if st.button(T("common.back_to_list")):
                 st.session_state.orders_open_id = None
                 st.rerun()
 
-            st.subheader(f"Order {order.order_number or order.external_order_id}")
+            st.subheader(T("orders.order_heading", ref=order.order_number or order.external_order_id))
             _source_caption = " · ".join(x for x in [order.marketplace, order.order_source] if x)
             if _source_caption:
                 st.caption(_source_caption)
 
             info_col, ship_col = st.columns(2)
             with info_col:
-                st.markdown("**Customer**")
+                st.markdown(f"**{T('orders.customer')}**")
                 st.write(order.customer_name or "—")
                 if order.email:
                     st.write(f"✉️ {order.email}")
                 if order.phone:
                     st.write(f"📞 {order.phone}")
                 if order.customer_comments:
-                    st.markdown("**Customer comments**")
+                    st.markdown(f"**{T('orders.customer_comments')}**")
                     st.write(order.customer_comments)
             with ship_col:
-                st.markdown("**Status**")
+                st.markdown(f"**{T('common.status')}**")
                 st.write(order.status_label or "—")
-                st.markdown("**Order date**")
+                st.markdown(f"**{T('orders.order_date')}**")
                 st.write(
                     time.strftime("%Y-%m-%d %H:%M", time.localtime(order.order_date))
                     if order.order_date else "—"
                 )
-                st.markdown("**Shipping method**")
+                st.markdown(f"**{T('orders.shipping_method')}**")
                 st.write(order.shipping_method or "—")
 
             def _render_order_address(addr):
@@ -3832,16 +3873,16 @@ elif page == "📦 Orders":
 
             addr_col1, addr_col2 = st.columns(2)
             with addr_col1:
-                st.markdown("**Delivery address**")
+                st.markdown(f"**{T('orders.delivery_address')}**")
                 _render_order_address(order.delivery_address)
             with addr_col2:
-                st.markdown("**Invoice address**")
+                st.markdown(f"**{T('orders.invoice_address')}**")
                 _render_order_address(order.invoice_address)
 
             st.divider()
-            st.markdown("**Items**")
+            st.markdown(f"**{T('orders.items')}**")
             if not order.items:
-                st.caption("No item detail available for this order.")
+                st.caption(T("orders.no_item_detail"))
             for item in order.items:
                 item_cols = st.columns([3, 2, 1, 1, 1])
                 with item_cols[0]:
@@ -3851,7 +3892,7 @@ elif page == "📦 Orders":
                         linked_product = inventory_store.get_product_by_sku(st.session_state.company_id, item.sku)
                         if linked_product:
                             if st.button(item.sku, key=f"order_item_sku_{order.id}_{item.sku}"):
-                                st.session_state["_pending_nav_page"] = "🗂️ Product List"
+                                st.session_state["_pending_nav_page"] = PAGE_PRODUCT_LIST
                                 st.session_state.rex_open_product_id = linked_product.id
                                 st.rerun()
                         else:
@@ -3866,17 +3907,17 @@ elif page == "📦 Orders":
                     st.write(f"{item.price * item.quantity:.2f} {order.currency}".strip())
 
             st.divider()
-            st.markdown(f"**Total: {order.price_total:.2f} {order.currency}**".strip())
+            st.markdown(f"**{T('orders.total', amount=f'{order.price_total:.2f}', currency=order.currency)}**".strip())
 
-elif page == "👥 Manage Users":
-    st.title("👥 Manage Users")
+elif page == PAGE_MANAGE_USERS:
+    st.title(T("nav.manage_users"))
     try:
         auth.require_role(current_user, auth.ROLE_ADMIN)
     except PermissionError:
-        st.error("Admins only.")
+        st.error(T("common.admins_only"))
         st.stop()
 
-    st.caption(f"Users in {current_company.name if current_company else current_user.company_id}")
+    st.caption(T("manage_users.users_in", company=current_company.name if current_company else current_user.company_id))
 
     users = auth_store.list_users_for_company(current_user.company_id)
     for u in users:
@@ -3886,9 +3927,9 @@ elif page == "👥 Manage Users":
         with c2:
             st.write(u.email)
         with c3:
-            st.write(u.role)
+            st.write(T(f"role.{u.role}"))
         with c4:
-            toggle_label = "Deactivate" if u.active else "Activate"
+            toggle_label = T("manage_users.deactivate") if u.active else T("manage_users.activate")
             disabled = u.id == current_user.id  # can't deactivate yourself
             if st.button(toggle_label, key=f"user_toggle_{u.id}", disabled=disabled, use_container_width=True):
                 u.active = not u.active
@@ -3901,38 +3942,41 @@ elif page == "👥 Manage Users":
                     )
                 st.rerun()
         if not u.active:
-            st.caption("Inactive")
+            st.caption(T("manage_users.inactive"))
         st.divider()
 
-    st.subheader("Add a user")
+    st.subheader(T("manage_users.add_user"))
     with st.form("create_user_form", clear_on_submit=True):
-        new_name = st.text_input("Name")
-        new_email = st.text_input("Email")
-        new_password = st.text_input("Password", type="password")
-        new_role = st.selectbox("Role", auth.ALL_ROLES, index=auth.ALL_ROLES.index(auth.ROLE_EMPLOYEE))
-        if st.form_submit_button("➕ Add user", type="primary"):
+        new_name = st.text_input(T("common.name"))
+        new_email = st.text_input(T("common.email"))
+        new_password = st.text_input(T("common.password"), type="password")
+        new_role = st.selectbox(
+            T("common.role"), auth.ALL_ROLES, index=auth.ALL_ROLES.index(auth.ROLE_EMPLOYEE),
+            format_func=lambda r: T(f"role.{r}"),
+        )
+        if st.form_submit_button(T("manage_users.add_user_button"), type="primary"):
             if not new_name.strip() or not new_email.strip() or not new_password:
-                st.warning("Name, email, and password are all required.")
+                st.warning(T("manage_users.all_fields_required"))
             else:
                 try:
                     auth.register_user(
                         company_id=current_user.company_id,
                         name=new_name, email=new_email, password=new_password, role=new_role,
                     )
-                    st.success(f"Added {new_email}.")
+                    st.success(T("manage_users.added_user", email=new_email))
                     st.rerun()
                 except ValueError as e:
                     st.error(str(e))
 
-elif page == "⚙️ Settings":
-    st.title("⚙️ Settings")
+elif page == PAGE_SETTINGS:
+    st.title(T("nav.settings"))
     try:
         auth.require_role(current_user, auth.ROLE_ADMIN)
     except PermissionError:
-        st.error("Admins only.")
+        st.error(T("common.admins_only"))
         st.stop()
 
-    (tab_integrations,) = st.tabs(["🔌 Integrations"])
+    (tab_integrations,) = st.tabs([T("settings.integrations_tab")])
 
     with tab_integrations:
         _company_label = current_company.name if current_company else current_user.company_id
@@ -3957,10 +4001,10 @@ elif page == "⚙️ Settings":
 
         # ---- status/health (derived from existing data, no new DB columns) --
         _HEALTH_STYLES = {
-            "connected": ("Connected", "#16a34a", "🟢"),
-            "attention": ("Needs attention", "#eab308", "🟡"),
-            "failed": ("Connection failed", "#dc2626", "🔴"),
-            "never_synced": ("Never synchronized", "#9ca3af", "⚪"),
+            "connected": (T("settings.health_connected"), "#16a34a", "🟢"),
+            "attention": (T("settings.health_attention"), "#eab308", "🟡"),
+            "failed": (T("settings.health_failed"), "#dc2626", "🔴"),
+            "never_synced": (T("settings.health_never_synced"), "#9ca3af", "⚪"),
         }
 
         def _integration_health(record) -> tuple:
@@ -3975,7 +4019,7 @@ elif page == "⚙️ Settings":
 
         def _integration_account_label(integration_type: str, record) -> str:
             if record and integration_type == "baselinker" and record.settings.get("inventory_id"):
-                return f"Inventory {record.settings['inventory_id']}"
+                return T("settings.inventory_label", inventory_id=record.settings['inventory_id'])
             return ""
 
         # ---- logo: real file if dropped in later, styled wordmark otherwise --
@@ -4013,32 +4057,28 @@ elif page == "⚙️ Settings":
                 unsafe_allow_html=True,
             )
 
-        @st.dialog("Disconnect integration?")
+        @st.dialog(T("settings.disconnect_dialog_title"))
         def _confirm_disconnect_integration_dialog(integration_type: str, display_name: str):
-            st.warning(
-                f"This disconnects **{display_name}** for {_company_label}. Stored "
-                "credentials are deleted (other settings are kept); pushing products "
-                "through it will stop working until reconnected. This cannot be undone."
-            )
-            confirm = st.checkbox("I understand, disconnect", key=f"disconnect_confirm_{integration_type}")
+            st.warning(T("settings.disconnect_warning", name=display_name, company=_company_label))
+            confirm = st.checkbox(T("settings.disconnect_confirm_checkbox"), key=f"disconnect_confirm_{integration_type}")
             dcol1, dcol2 = st.columns(2)
             with dcol1:
-                if st.button("Cancel", use_container_width=True, key=f"disconnect_cancel_{integration_type}"):
+                if st.button(T("common.cancel"), use_container_width=True, key=f"disconnect_cancel_{integration_type}"):
                     st.rerun()
             with dcol2:
                 if st.button(
-                    "🔌 Disconnect", type="primary", disabled=not confirm,
+                    T("settings.disconnect_button"), type="primary", disabled=not confirm,
                     use_container_width=True, key=f"disconnect_go_{integration_type}",
                 ):
                     IntegrationManager.disconnect(current_user.company_id, integration_type, user_id=current_user.id)
-                    st.success(f"{display_name} disconnected.")
+                    st.success(T("settings.disconnected_success", name=display_name))
                     st.rerun()
 
         def _render_integration_activity(integration_type: str) -> None:
             entries = integration_store.list_sync_log(current_user.company_id, integration_type, limit=10)
-            with st.expander("Recent activity"):
+            with st.expander(T("settings.recent_activity")):
                 if not entries:
-                    st.caption("No activity yet.")
+                    st.caption(T("settings.no_activity_yet"))
                 for e in entries:
                     ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.created_at)) if e.created_at else "—"
                     if e.status == integration_store.SYNC_STATUS_SUCCESS:
@@ -4049,7 +4089,7 @@ elif page == "⚙️ Settings":
                         icon = "❌"
                     line = f"{icon} {ts} — {e.action}"
                     if e.product_id:
-                        line += f" (product {e.product_id})"
+                        line += f" ({T('settings.product_word')} {e.product_id})"
                     if e.error_message:
                         line += f": {e.error_message}"
                     st.caption(line)
@@ -4059,11 +4099,11 @@ elif page == "⚙️ Settings":
                 return
             tcol1, tcol2 = st.columns(2)
             with tcol1:
-                if st.button("🔄 Test connection", key=f"test_{entry.integration_type}", use_container_width=True):
+                if st.button(T("settings.test_connection"), key=f"test_{entry.integration_type}", use_container_width=True):
                     result = IntegrationManager.test(current_user.company_id, entry.integration_type)
                     (st.success if result.success else st.error)(result.message)
             with tcol2:
-                if st.button("🔌 Disconnect", key=f"disconnect_open_{entry.integration_type}", use_container_width=True):
+                if st.button(T("settings.disconnect_button"), key=f"disconnect_open_{entry.integration_type}", use_container_width=True):
                     _confirm_disconnect_integration_dialog(entry.integration_type, entry.display_name)
 
         def _render_catalog_import_section(entry) -> None:
@@ -4080,13 +4120,8 @@ elif page == "⚙️ Settings":
             not session_state, so navigating away and back still shows the
             current state correctly."""
             st.divider()
-            st.markdown(f"**📥 Import catalog from {entry.display_name}**")
-            st.caption(
-                f"One-time (but safely re-runnable) import of your existing {entry.display_name} products into "
-                "ElectroGrader, so you don't have to re-enter them by hand. Imported products start as drafts "
-                "and need review (Product Condition/Description) before they're complete. Runs in the background — "
-                "feel free to keep using the app while it imports."
-            )
+            st.markdown(f"**{T('settings.import_catalog_heading', name=entry.display_name)}**")
+            st.caption(T("settings.import_catalog_caption", name=entry.display_name))
 
             job = catalog_import_job_store.get_job(current_user.company_id, entry.integration_type)
             if job is not None and job.status == catalog_import_job_store.STATUS_RUNNING:
@@ -4095,15 +4130,12 @@ elif page == "⚙️ Settings":
 
             if job is not None and job.status in (catalog_import_job_store.STATUS_SUCCESS, catalog_import_job_store.STATUS_FAILED):
                 if job.errors:
-                    st.warning(
-                        f"Last import: {job.imported} imported, {job.skipped} skipped, "
-                        f"{job.error_count} error(s): {'; '.join(job.errors[:5])}"
-                    )
+                    st.warning(T("settings.last_import_errors", imported=job.imported, skipped=job.skipped, error_count=job.error_count, errors='; '.join(job.errors[:5])))
                 else:
-                    st.success(f"Last import: {job.imported} product(s) imported, {job.skipped} skipped (already existed).")
+                    st.success(T("settings.last_import_success", imported=job.imported, skipped=job.skipped))
 
             preview_key = f"catalog_import_preview_{entry.integration_type}"
-            if st.button("🔍 Preview import", key=f"catalog_import_preview_btn_{entry.integration_type}"):
+            if st.button(T("settings.preview_import"), key=f"catalog_import_preview_btn_{entry.integration_type}"):
                 st.session_state[preview_key] = catalog_import.preview_import(
                     current_user.company_id, entry.integration_type,
                 )
@@ -4112,13 +4144,10 @@ elif page == "⚙️ Settings":
             if preview is not None:
                 n_new, n_existing = len(preview["new"]), len(preview["existing"])
                 if n_new == 0 and n_existing == 0:
-                    st.info(
-                        f"Nothing to import — either {entry.display_name} has no products, or this connector "
-                        "doesn't support catalog import yet."
-                    )
+                    st.info(T("settings.nothing_to_import", name=entry.display_name))
                 else:
-                    st.write(f"**{n_new}** new product(s) to import, **{n_existing}** already exist (will be skipped).")
-                    if n_new > 0 and st.button(f"📥 Import {n_new} products", key=f"catalog_import_run_{entry.integration_type}", type="primary"):
+                    st.write(T("settings.import_summary", new=n_new, existing=n_existing))
+                    if n_new > 0 and st.button(T("settings.import_n_products", count=n_new), key=f"catalog_import_run_{entry.integration_type}", type="primary"):
                         catalog_import_job_store.start_job(current_user.company_id, entry.integration_type, n_new)
                         _import_executor().submit(
                             _run_import_job, current_user.company_id, entry.integration_type, current_user.id,
@@ -4130,25 +4159,25 @@ elif page == "⚙️ Settings":
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
             if record and record.last_sync_at:
-                st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
+                st.caption(T("settings.last_sync", ts=time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))))
             settings = record.settings if record else {}
             with st.form(f"integration_form_{entry.integration_type}"):
                 token = st.text_input(
-                    "API token", type="password",
-                    placeholder="Leave blank to keep current" if has_credentials else "",
-                    help="Account & other -> My account -> API in the BaseLinker/Base.com panel.",
+                    T("settings.api_token"), type="password",
+                    placeholder=T("settings.leave_blank_current") if has_credentials else "",
+                    help=T("settings.baselinker_token_help"),
                 )
-                inventory_id = st.text_input("Inventory ID", value=settings.get("inventory_id") or "")
-                category_id = st.text_input("Category ID", value=settings.get("category_id") or "")
-                price_group_id = st.text_input("Price group ID (optional)", value=settings.get("price_group_id") or "")
-                warehouse_id = st.text_input("Warehouse ID (optional)", value=settings.get("warehouse_id") or "")
-                tax_rate = st.text_input("Tax rate % (optional)", value=settings.get("tax_rate") or "23")
-                submitted = st.form_submit_button("💾 Save & test connection", type="primary")
+                inventory_id = st.text_input(T("settings.inventory_id"), value=settings.get("inventory_id") or "")
+                category_id = st.text_input(T("settings.category_id_field"), value=settings.get("category_id") or "")
+                price_group_id = st.text_input(T("settings.price_group_id"), value=settings.get("price_group_id") or "")
+                warehouse_id = st.text_input(T("settings.warehouse_id"), value=settings.get("warehouse_id") or "")
+                tax_rate = st.text_input(T("settings.tax_rate"), value=settings.get("tax_rate") or "23")
+                submitted = st.form_submit_button(T("settings.save_test_connection"), type="primary")
                 if submitted:
                     if not token and not has_credentials:
-                        st.warning("API token is required.")
+                        st.warning(T("settings.api_token_required"))
                     elif not inventory_id.strip() or not category_id.strip():
-                        st.warning("Inventory ID and Category ID are required.")
+                        st.warning(T("settings.inventory_category_required"))
                     else:
                         creds = {"token": token} if token else dict(record.credentials)
                         new_settings = {
@@ -4169,16 +4198,16 @@ elif page == "⚙️ Settings":
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
             if record and record.last_sync_at:
-                st.caption(f"Last sync: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}")
+                st.caption(T("settings.last_sync", ts=time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))))
             with st.form(f"integration_form_{entry.integration_type}"):
                 api_key = st.text_input(
-                    "API key", type="password",
-                    placeholder="Leave blank to keep current" if has_credentials else "",
+                    T("settings.api_key"), type="password",
+                    placeholder=T("settings.leave_blank_current") if has_credentials else "",
                 )
-                submitted = st.form_submit_button("💾 Save & test connection", type="primary")
+                submitted = st.form_submit_button(T("settings.save_test_connection"), type="primary")
                 if submitted:
                     if not api_key and not has_credentials:
-                        st.warning("API key is required.")
+                        st.warning(T("settings.api_key_required"))
                     else:
                         creds = {"api_key": api_key} if api_key else dict(record.credentials)
                         result = IntegrationManager.connect(
@@ -4205,50 +4234,47 @@ elif page == "⚙️ Settings":
         _SYNC_FIELDS_SENT = [(k, v["label"]) for k, v in field_registry.SYNCABLE_FIELDS.items()]
         _SYNC_FIELDS_RECEIVED = [(k, v["label"]) for k, v in field_registry.RECEIVABLE_FIELDS.items()]
         _FREQUENCY_OPTIONS = [
-            (sync_rules_store.FREQUENCY_MANUAL, "Manual"),
-            (sync_rules_store.FREQUENCY_EVERY_15_MIN, "Every 15 minutes"),
-            (sync_rules_store.FREQUENCY_HOURLY, "Hourly"),
-            (sync_rules_store.FREQUENCY_DAILY, "Daily"),
+            (sync_rules_store.FREQUENCY_MANUAL, T("settings.freq_manual")),
+            (sync_rules_store.FREQUENCY_EVERY_15_MIN, T("settings.freq_15min")),
+            (sync_rules_store.FREQUENCY_HOURLY, T("settings.freq_hourly")),
+            (sync_rules_store.FREQUENCY_DAILY, T("settings.freq_daily")),
         ]
         _DIRECTION_OPTIONS = [
-            (sync_rules_store.DIRECTION_PUSH, "ElectroGrader → Platform"),
-            (sync_rules_store.DIRECTION_PULL, "Platform → ElectroGrader"),
-            (sync_rules_store.DIRECTION_TWO_WAY, "Two-way"),
+            (sync_rules_store.DIRECTION_PUSH, T("settings.dir_push")),
+            (sync_rules_store.DIRECTION_PULL, T("settings.dir_pull")),
+            (sync_rules_store.DIRECTION_TWO_WAY, T("settings.dir_two_way")),
         ]
         _CONFLICT_OPTIONS = [
-            (sync_rules_store.CONFLICT_KEEP_LOCAL, "Keep ElectroGrader data"),
-            (sync_rules_store.CONFLICT_KEEP_REMOTE, "Keep external platform data"),
-            (sync_rules_store.CONFLICT_ASK_USER, "Ask me"),
+            (sync_rules_store.CONFLICT_KEEP_LOCAL, T("settings.conflict_keep_local")),
+            (sync_rules_store.CONFLICT_KEEP_REMOTE, T("settings.conflict_keep_remote")),
+            (sync_rules_store.CONFLICT_ASK_USER, T("settings.conflict_ask_me")),
         ]
         # (trigger_event, job_type, checkbox label) — Phase 1's fixed starter
         # set; the underlying storage (SyncRule.automation_triggers) is a
         # JSON list, not fixed columns, so more triggers can be added later
         # without a migration.
         _AUTOMATION_TRIGGER_DEFAULTS = [
-            ("product_completed", sync_job_store.JOB_TYPE_PRODUCT_EXPORT,
-             "When a product is marked completed → export it automatically"),
-            ("product_updated", sync_job_store.JOB_TYPE_PRODUCT_EXPORT,
-             "When a product's price/description/photos/quantity changes → update the listing"),
-            ("stock_changed", sync_job_store.JOB_TYPE_LISTING_END,
-             "When stock reaches zero → end the listing"),
+            ("product_completed", sync_job_store.JOB_TYPE_PRODUCT_EXPORT, T("settings.trigger_product_completed")),
+            ("product_updated", sync_job_store.JOB_TYPE_PRODUCT_EXPORT, T("settings.trigger_product_updated")),
+            ("stock_changed", sync_job_store.JOB_TYPE_LISTING_END, T("settings.trigger_stock_changed")),
         ]
 
         def _render_synchronization_tab(entry, rule: sync_rules_store.SyncRule) -> None:
             implemented = IntegrationManager.get_implemented_sync_fields(entry.integration_type)
-            st.caption("Choose what ElectroGrader sends to / receives from this integration, and how often.")
-            st.markdown("**Data sent from ElectroGrader**")
+            st.caption(T("settings.sync_tab_caption"))
+            st.markdown(f"**{T('settings.data_sent')}**")
             send_cols = st.columns(3)
             new_fields_send = []
             for i, (key, label) in enumerate(_SYNC_FIELDS_SENT):
                 with send_cols[i % 3]:
-                    checkbox_label = label if key in implemented else f"{label} _(not yet applied to export)_"
+                    checkbox_label = label if key in implemented else f"{label} _({T('settings.not_yet_applied')})_"
                     if st.checkbox(
                         checkbox_label, value=key in rule.fields_send,
                         key=f"sync_send_{entry.integration_type}_{key}",
                     ):
                         new_fields_send.append(key)
 
-            st.markdown("**Data received from external platform**")
+            st.markdown(f"**{T('settings.data_received')}**")
             recv_cols = st.columns(3)
             new_fields_receive = []
             for i, (key, label) in enumerate(_SYNC_FIELDS_RECEIVED):
@@ -4259,33 +4285,29 @@ elif page == "⚙️ Settings":
                         new_fields_receive.append(key)
 
             st.divider()
-            st.markdown("**Synchronization rules**")
+            st.markdown(f"**{T('settings.sync_rules_heading')}**")
             freq_keys = [k for k, _ in _FREQUENCY_OPTIONS]
             frequency = st.selectbox(
-                "Frequency", freq_keys,
+                T("settings.frequency"), freq_keys,
                 index=freq_keys.index(rule.frequency) if rule.frequency in freq_keys else 0,
                 format_func=lambda k: dict(_FREQUENCY_OPTIONS)[k], key=f"sync_freq_{entry.integration_type}",
             )
             if frequency != sync_rules_store.FREQUENCY_MANUAL:
-                st.caption(
-                    "⏭️ Phase 1: scheduled runs are queued and logged, but no integration has real "
-                    "automatic sync wired up yet — expect a \"Skipped (not implemented yet)\" entry "
-                    "in Logs each time, until that integration's automation ships."
-                )
+                st.caption(T("settings.phase1_automation_note"))
             dir_keys = [k for k, _ in _DIRECTION_OPTIONS]
             direction = st.selectbox(
-                "Direction", dir_keys,
+                T("settings.direction"), dir_keys,
                 index=dir_keys.index(rule.direction) if rule.direction in dir_keys else 0,
                 format_func=lambda k: dict(_DIRECTION_OPTIONS)[k], key=f"sync_dir_{entry.integration_type}",
             )
             conflict_keys = [k for k, _ in _CONFLICT_OPTIONS]
             conflict_handling = st.selectbox(
-                "Conflict handling", conflict_keys,
+                T("settings.conflict_handling"), conflict_keys,
                 index=conflict_keys.index(rule.conflict_handling) if rule.conflict_handling in conflict_keys else 0,
                 format_func=lambda k: dict(_CONFLICT_OPTIONS)[k], key=f"sync_conflict_{entry.integration_type}",
             )
 
-            if st.button("💾 Save synchronization settings", key=f"sync_save_{entry.integration_type}", type="primary"):
+            if st.button(T("settings.save_sync_settings"), key=f"sync_save_{entry.integration_type}", type="primary"):
                 rule.fields_send = new_fields_send
                 rule.fields_send_configured = True  # a real Save always counts as "configured",
                 # even if the admin deliberately leaves every box unchecked.
@@ -4294,20 +4316,17 @@ elif page == "⚙️ Settings":
                 rule.direction = direction
                 rule.conflict_handling = conflict_handling
                 sync_rules_store.upsert_rule(rule)
-                st.success("Saved.")
+                st.success(T("product_list.saved"))
                 st.rerun()
 
         def _render_field_mapping_tab(entry, mapping: field_mapping_store.FieldMapping) -> None:
             target_fields = IntegrationManager.get_supported_target_fields(entry.integration_type)
             if not target_fields:
-                st.info(f"{entry.display_name} has no mappable fields yet.")
+                st.info(T("settings.no_mappable_fields", name=entry.display_name))
                 return
 
-            st.caption(
-                "Map ElectroGrader data onto this integration's technical fields. "
-                "One active configuration per integration."
-            )
-            search = st.text_input("🔍 Search mapping rules...", key=f"mapping_search_{entry.integration_type}")
+            st.caption(T("settings.field_mapping_caption"))
+            search = st.text_input(T("settings.search_mapping_rules"), key=f"mapping_search_{entry.integration_type}")
             source_field_keys = [k for k, _ in _SYNC_FIELDS_SENT]
 
             df = pd.DataFrame(
@@ -4326,7 +4345,7 @@ elif page == "⚙️ Settings":
             if q:
                 mask = df.apply(lambda row: q in " ".join(str(v) for v in row).lower(), axis=1)
                 st.dataframe(df[mask], use_container_width=True, hide_index=True)
-                st.caption("Clear the search box to edit and save mappings.")
+                st.caption(T("settings.clear_search_to_edit"))
                 return
 
             edited = st.data_editor(
@@ -4337,7 +4356,7 @@ elif page == "⚙️ Settings":
                     "Target field": st.column_config.SelectboxColumn(options=list(target_fields.keys()), required=True),
                 },
             )
-            if st.button("💾 Save field mapping", key=f"mapping_save_{entry.integration_type}", type="primary"):
+            if st.button(T("settings.save_field_mapping"), key=f"mapping_save_{entry.integration_type}", type="primary"):
                 mapping.rules = [
                     field_mapping_store.FieldMappingRule(
                         source_field=row.get("Source field") or "", source_value=row.get("Source value") or "",
@@ -4348,23 +4367,19 @@ elif page == "⚙️ Settings":
                     if row.get("Source field") and row.get("Target field")
                 ]
                 field_mapping_store.upsert_mapping(mapping)
-                st.success("Saved.")
+                st.success(T("product_list.saved"))
                 st.rerun()
 
         def _render_sync_ownership_tab(entry) -> None:
-            st.caption(
-                "Which system is the master source of truth for each field. Read by the real Push/Pull "
-                "sync engine (manual “Sync now”/“Pull now”, and Automatic Sync once enabled "
-                "in the Automation tab) to decide what wins on a conflict."
-            )
+            st.caption(T("settings.ownership_caption"))
             source_options = ["electrograder", entry.integration_type, "manual"]
             source_labels = {
-                "electrograder": "ElectroGrader", entry.integration_type: entry.display_name, "manual": "Manual",
+                "electrograder": "ElectroGrader", entry.integration_type: entry.display_name, "manual": T("settings.manual_word"),
             }
             policy_options = ["electrograder", entry.integration_type, "manual_review"]
             policy_labels = {
                 "electrograder": "ElectroGrader", entry.integration_type: entry.display_name,
-                "manual_review": "Manual review",
+                "manual_review": T("settings.manual_review"),
             }
             config = sync_ownership_store.list_field_config(current_user.company_id, entry.integration_type)
 
@@ -4377,9 +4392,10 @@ elif page == "⚙️ Settings":
                 if log.field_name not in _latest_log_by_field:
                     _latest_log_by_field[log.field_name] = log
 
+            _group_labels = {"Product Content": T("settings.group_product_content"), "Sales Data": T("settings.group_sales_data")}
             new_choices = {}
             for group in ("Product Content", "Sales Data"):
-                st.markdown(f"**{group}**")
+                st.markdown(f"**{_group_labels[group]}**")
                 fields_in_group = [
                     (key, meta) for key, meta in field_registry.SYNC_OWNERSHIP_FIELDS.items() if meta["group"] == group
                 ]
@@ -4408,25 +4424,22 @@ elif page == "⚙️ Settings":
                         )
                     with row_col4:
                         enabled = st.checkbox(
-                            "Enabled", value=current_cfg.sync_enabled,
+                            T("settings.enabled_word"), value=current_cfg.sync_enabled,
                             key=f"ownership_enabled_{entry.integration_type}_{key}",
                         )
                     with row_col5:
                         last_log = _latest_log_by_field.get(key)
                         if last_log is None:
-                            st.caption("Last sync: —")
+                            st.caption(T("settings.last_sync_dash"))
                         else:
                             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_log.created_at))
-                            status_label = "Pending review" if last_log.new_value == "(pending review)" else "Success"
-                            st.caption(f"Last sync: {ts}  \nStatus: {status_label}")
+                            status_label = T("settings.pending_review") if last_log.new_value == "(pending review)" else T("settings.success_word")
+                            st.caption(T("settings.last_sync_status", ts=ts, status=status_label))
                     if sync_ownership_store.is_conflicting_configuration(chosen, chosen_policy):
-                        st.warning(
-                            f"Conflict policy allows {policy_labels[chosen_policy]} changes although this field "
-                            f"is owned by {source_labels[chosen]}."
-                        )
+                        st.warning(T("settings.conflict_policy_warning", policy=policy_labels[chosen_policy], owner=source_labels[chosen]))
                     new_choices[key] = (chosen, chosen_policy, enabled)
 
-            if st.button("💾 Save Sync Ownership", key=f"ownership_save_{entry.integration_type}", type="primary"):
+            if st.button(T("settings.save_sync_ownership"), key=f"ownership_save_{entry.integration_type}", type="primary"):
                 for field_name, (source_system, conflict_policy, sync_enabled) in new_choices.items():
                     sync_ownership_store.upsert_field_config(
                         current_user.company_id, entry.integration_type, field_name, source_system,
@@ -4436,11 +4449,11 @@ elif page == "⚙️ Settings":
                     current_user.company_id, current_user.id, "UPDATE_SYNC_OWNERSHIP",
                     "integration", entry.integration_type,
                 )
-                st.success("Saved.")
+                st.success(T("product_list.saved"))
                 st.rerun()
 
         def _render_automation_tab(entry, rule: sync_rules_store.SyncRule) -> None:
-            st.caption("These event triggers are saved but not executed automatically yet — future work.")
+            st.caption(T("settings.automation_future_work_note"))
             triggers_by_event = {t.get("trigger_event"): t for t in rule.automation_triggers}
             new_triggers = []
             for trigger_event, job_type, label in _AUTOMATION_TRIGGER_DEFAULTS:
@@ -4451,34 +4464,31 @@ elif page == "⚙️ Settings":
                 )
                 new_triggers.append({"trigger_event": trigger_event, "job_type": job_type, "enabled": enabled})
 
-            if st.button("💾 Save automation settings", key=f"automation_save_{entry.integration_type}", type="primary"):
+            if st.button(T("settings.save_automation_settings"), key=f"automation_save_{entry.integration_type}", type="primary"):
                 rule.automation_triggers = new_triggers
                 sync_rules_store.upsert_rule(rule)
-                st.success("Saved.")
+                st.success(T("product_list.saved"))
                 st.rerun()
 
             st.divider()
-            st.markdown("**Automatic Sync (real-time push/pull)**")
-            st.caption(
-                "When enabled, ElectroGrader will automatically push/pull changes to/from "
-                f"{entry.display_name} in the background, on the intervals below."
-            )
+            st.markdown(f"**{T('settings.automatic_sync_heading')}**")
+            st.caption(T("settings.automatic_sync_caption", name=entry.display_name))
             auto_enabled = st.checkbox(
-                "Enable automatic sync", value=rule.auto_sync_enabled,
+                T("settings.enable_automatic_sync"), value=rule.auto_sync_enabled,
                 key=f"auto_sync_enabled_{entry.integration_type}",
             )
             auto_col1, auto_col2 = st.columns(2)
             with auto_col1:
                 push_interval = st.number_input(
-                    "Push interval (seconds)", min_value=10, value=rule.push_interval_seconds or 60,
+                    T("settings.push_interval"), min_value=10, value=rule.push_interval_seconds or 60,
                     key=f"push_interval_{entry.integration_type}",
                 )
             with auto_col2:
                 pull_interval = st.number_input(
-                    "Pull interval (seconds)", min_value=10, value=rule.pull_interval_seconds or 300,
+                    T("settings.pull_interval"), min_value=10, value=rule.pull_interval_seconds or 300,
                     key=f"pull_interval_{entry.integration_type}",
                 )
-            if st.button("💾 Save Automatic Sync settings", key=f"auto_sync_save_{entry.integration_type}"):
+            if st.button(T("settings.save_auto_sync_settings"), key=f"auto_sync_save_{entry.integration_type}"):
                 rule.auto_sync_enabled = auto_enabled
                 rule.push_interval_seconds = int(push_interval)
                 rule.pull_interval_seconds = int(pull_interval)
@@ -4488,15 +4498,15 @@ elif page == "⚙️ Settings":
                     "integration", entry.integration_type,
                     f"auto_sync_enabled={auto_enabled}",
                 )
-                st.success("Saved.")
+                st.success(T("product_list.saved"))
                 st.rerun()
 
         def _render_logs_tab(entry) -> None:
             _render_integration_activity(entry.integration_type)
-            st.markdown("**Scheduled sync jobs**")
+            st.markdown(f"**{T('settings.scheduled_sync_jobs')}**")
             jobs = sync_job_store.list_jobs(current_user.company_id, entry.integration_type, limit=10)
             if not jobs:
-                st.caption("No scheduled jobs yet.")
+                st.caption(T("settings.no_scheduled_jobs"))
             job_icons = {
                 sync_job_store.STATUS_SUCCESS: "✅", sync_job_store.STATUS_ERROR: "❌",
                 sync_job_store.STATUS_SKIPPED: "⏭️", sync_job_store.STATUS_RETRYING: "🔁",
@@ -4507,21 +4517,21 @@ elif page == "⚙️ Settings":
                 icon = job_icons.get(j.status, "•")
                 st.caption(f"{icon} {ts} — {j.job_type} ({j.status}, attempt {j.attempts}/{j.max_attempts})")
 
-            st.markdown("**Field sync history**")
+            st.markdown(f"**{T('settings.field_sync_history')}**")
             logs = sync_log_store.list_logs(current_user.company_id, connector_name=entry.integration_type, limit=10)
             if not logs:
-                st.caption("No field-level sync history yet — populated once real two-way sync detects a change.")
+                st.caption(T("settings.no_field_sync_history"))
             for log in logs:
                 ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(log.created_at)) if log.created_at else "—"
                 st.caption(
                     f"{ts} — {log.field_name}: {log.old_value or '—'} → {log.new_value or '—'} "
-                    f"(from {log.source}, {log.direction})"
+                    f"({T('settings.from_source', source=log.source, direction=log.direction)})"
                 )
 
-            st.markdown("**Pending conflicts**")
+            st.markdown(f"**{T('settings.pending_conflicts')}**")
             pending = [c for c in sync_ownership_store.list_conflicts(current_user.company_id) if not c.resolution]
             if not pending:
-                st.caption("No pending conflicts.")
+                st.caption(T("settings.no_pending_conflicts"))
             for c in pending:
                 ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.timestamp)) if c.timestamp else "—"
                 st.caption(
@@ -4535,22 +4545,34 @@ elif page == "⚙️ Settings":
                 st.markdown(f"**{entry.display_name}**")
                 st.caption(entry.description)
                 if not entry.available:
-                    st.caption("🔒 Coming Soon")
+                    st.caption(T("settings.coming_soon"))
                     return
                 record = integration_store.get_integration(current_user.company_id, entry.integration_type)
                 if record is not None and record.status == integration_store.STATUS_CONNECTED:
-                    st.caption("✅ Connected")
-                btn_label = "Edit" if record is not None else "Connect"
+                    st.caption(T("settings.connected_check"))
+                btn_label = T("settings.edit_word") if record is not None else T("settings.connect_word")
                 if st.button(btn_label, key=f"catalog_btn_{entry.integration_type}", use_container_width=True):
                     st.session_state.settings_open_integration = entry.integration_type
                     st.rerun()
 
-        @st.dialog("Add Integration", width="large")
+        # _UI_GROUPS/entry.ui_group values (Marketplace/Store/Shipping/...)
+        # come from integrations/manager.py's CATALOG data and stay literal
+        # English there — this map translates only the on-screen label,
+        # never the comparison value itself.
+        _UI_GROUP_LABELS = {
+            "All": T("settings.category_all"), "Marketplace": T("settings.category_marketplace"),
+            "Store": T("settings.category_store"), "Shipping": T("settings.category_shipping"),
+            "ERP": "ERP", "Accounting": T("settings.category_accounting"),
+            "Payments": T("settings.category_payments"), "AI": "AI",
+            "Communication": T("settings.category_communication"), "Other": T("settings.category_other"),
+        }
+
+        @st.dialog(T("settings.add_integration_title"), width="large")
         def _add_integration_dialog():
-            search = st.text_input("🔍 Search integrations...", key="add_integration_search")
+            search = st.text_input(T("settings.search_integrations"), key="add_integration_search")
             selected_group = st.pills(
-                "Category", ["All"] + _UI_GROUPS, selection_mode="single",
-                default="All", key="add_integration_group",
+                T("settings.category_label"), ["All"] + _UI_GROUPS, selection_mode="single",
+                default="All", key="add_integration_group", format_func=lambda g: _UI_GROUP_LABELS.get(g, g),
             ) or "All"
 
             q = search.strip().lower()
@@ -4565,12 +4587,12 @@ elif page == "⚙️ Settings":
 
             filtered = [e for e in CATALOG if _matches(e)]
             if not filtered:
-                st.info("No integrations match your search.")
+                st.info(T("settings.no_integrations_match"))
             for group in _UI_GROUPS:
                 group_entries = [e for e in filtered if e.ui_group == group]
                 if not group_entries:
                     continue
-                st.markdown(f"**{group}**")
+                st.markdown(f"**{_UI_GROUP_LABELS.get(group, group)}**")
                 cols = st.columns(4)
                 for i, entry in enumerate(group_entries):
                     with cols[i % 4]:
@@ -4587,7 +4609,7 @@ elif page == "⚙️ Settings":
             # General/Synchronization/Field Mapping/Automation/Logs each have
             # room as real tabs, with space for more (Webhooks/Analytics) later
             # without another navigation rework) --
-            if st.button("← Back to Integrations", key="settings_back"):
+            if st.button(T("settings.back_to_integrations"), key="settings_back"):
                 st.session_state.settings_open_integration = ""
                 st.rerun()
             record = integration_store.get_integration(current_user.company_id, open_entry.integration_type)
@@ -4606,11 +4628,12 @@ elif page == "⚙️ Settings":
                     label, color, dot = _integration_health(record)
                     st.markdown(f"<span style='color:{color};'>{dot} {label}</span>", unsafe_allow_html=True)
                 else:
-                    st.caption("⚪ Not connected yet")
+                    st.caption(T("settings.not_connected_yet"))
             st.divider()
 
             tab_general, tab_sync, tab_mapping, tab_ownership, tab_automation, tab_logs = st.tabs(
-                ["General", "Synchronization", "Field Mapping", "Sync Ownership", "Automation", "Logs"]
+                [T("settings.tab_general"), T("settings.tab_synchronization"), T("settings.tab_field_mapping"),
+                 T("settings.tab_sync_ownership"), T("settings.tab_automation"), T("settings.tab_logs")]
             )
             with tab_general:
                 _INTEGRATION_SETTINGS_RENDERERS[open_entry.integration_type](open_entry, record)
@@ -4632,9 +4655,9 @@ elif page == "⚙️ Settings":
             # ---- A) Dashboard: only connected integrations, as cards --
             head_col1, head_col2 = st.columns([4, 1])
             with head_col1:
-                st.caption(f"Connect marketplaces and external services for {_company_label}.")
+                st.caption(T("settings.connect_marketplaces_caption", company=_company_label))
             with head_col2:
-                if st.button("➕ Add Integration", use_container_width=True, key="open_add_integration"):
+                if st.button(T("settings.add_integration"), use_container_width=True, key="open_add_integration"):
                     _add_integration_dialog()
 
             connected_records = [
@@ -4650,13 +4673,12 @@ elif page == "⚙️ Settings":
                     st.markdown(
                         "<div style='text-align:center; padding:2rem 0;'>"
                         "<div style='font-size:3rem;'>🧩</div>"
-                        "<h3>No integrations connected yet</h3>"
-                        "<p style='color:#6b7280;'>Connect a marketplace or service to start "
-                        "syncing products automatically.</p></div>",
+                        f"<h3>{T('settings.no_integrations_connected')}</h3>"
+                        f"<p style='color:#6b7280;'>{T('settings.no_integrations_connected_caption')}</p></div>",
                         unsafe_allow_html=True,
                     )
                     if st.button(
-                        "➕ Add Integration", use_container_width=True, type="primary", key="empty_add_integration",
+                        T("settings.add_integration"), use_container_width=True, type="primary", key="empty_add_integration",
                     ):
                         _add_integration_dialog()
             else:
@@ -4675,21 +4697,21 @@ elif page == "⚙️ Settings":
                             if account_label:
                                 st.caption(account_label)
                             st.caption(
-                                f"Last synced: {time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))}"
-                                if record.last_sync_at else "Never synchronized"
+                                T("settings.last_synced", ts=time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at)))
+                                if record.last_sync_at else T("settings.health_never_synced")
                             )
-                            if st.button("Edit", key=f"card_edit_{record.integration_type}", use_container_width=True):
+                            if st.button(T("settings.edit_word"), key=f"card_edit_{record.integration_type}", use_container_width=True):
                                 st.session_state.settings_open_integration = record.integration_type
                                 st.rerun()
                             if st.button(
-                                "Disconnect", key=f"card_disconnect_{record.integration_type}",
+                                T("settings.disconnect_word"), key=f"card_disconnect_{record.integration_type}",
                                 use_container_width=True,
                             ):
                                 _confirm_disconnect_integration_dialog(record.integration_type, entry.display_name)
 
 # =========================================================== COMPANIES ===
-elif page == "🏢 Companies":
-    st.title("🏢 Companies")
+elif page == PAGE_COMPANIES:
+    st.title(T("nav.companies"))
     # Guards direct page-state navigation too, not just the nav menu itself
     # (auth.is_super_admin() gates whether "🏢 Companies" even appears in
     # _nav_pages above — this re-checks independently, same defense-in-
@@ -4697,13 +4719,10 @@ elif page == "🏢 Companies":
     try:
         auth.require_super_admin(current_user)
     except PermissionError:
-        st.error("Super Admins only.")
+        st.error(T("companies.super_admins_only"))
         st.stop()
 
-    st.caption(
-        "Company metadata only — this page never shows another company's "
-        "products, inventory, or business data."
-    )
+    st.caption(T("companies.page_caption"))
 
     all_companies = company_store.list_companies()
     pending = [c for c in all_companies if c.status == company_store.STATUS_PENDING]
@@ -4712,26 +4731,26 @@ elif page == "🏢 Companies":
 
     def _company_line(c):
         created = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
-        st.write(f"**{c.name}**  ·  plan: {c.plan}  ·  users: {c.user_limit}  ·  products: {c.product_limit}  ·  created: {created}")
+        st.write(T("companies.company_line", name=c.name, plan=c.plan, users=c.user_limit, products=c.product_limit, created=created))
 
     if pending:
-        st.subheader("🟡 Pending approval")
+        st.subheader(T("companies.pending_approval"))
         for c in pending:
             with st.container(border=True):
                 _company_line(c)
                 admins = [u for u in auth_store.list_users_for_company(c.id) if u.role == auth.ROLE_ADMIN]
-                admin_label = ", ".join(f"{u.name} <{u.email}>" for u in admins) or "(no admin found)"
-                st.caption(f"Admin: {admin_label}")
+                admin_label = ", ".join(f"{u.name} <{u.email}>" for u in admins) or T("companies.no_admin_found")
+                st.caption(T("companies.admin_label", admin=admin_label))
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("✅ Approve", key=f"approve_{c.id}", use_container_width=True):
+                    if st.button(T("companies.approve"), key=f"approve_{c.id}", use_container_width=True):
                         c.status = company_store.STATUS_ACTIVE
                         c.updated_at = time.time()
                         company_store.update_company(c)
                         audit_store.log_audit(c.id, current_user.id, "COMPANY_APPROVED", "company", c.id)
                         st.rerun()
                 with col2:
-                    if st.button("❌ Reject", key=f"reject_{c.id}", use_container_width=True):
+                    if st.button(T("companies.reject"), key=f"reject_{c.id}", use_container_width=True):
                         c.status = company_store.STATUS_SUSPENDED
                         c.updated_at = time.time()
                         company_store.update_company(c)
@@ -4739,26 +4758,26 @@ elif page == "🏢 Companies":
                         st.rerun()
         st.divider()
 
-    st.subheader("🟢 Active companies")
+    st.subheader(T("companies.active_companies"))
     if not active:
-        st.caption("None.")
+        st.caption(T("companies.none"))
     for c in active:
         with st.container(border=True):
             _company_line(c)
-            if st.button("⏸ Suspend", key=f"suspend_{c.id}"):
+            if st.button(T("companies.suspend"), key=f"suspend_{c.id}"):
                 c.status = company_store.STATUS_SUSPENDED
                 c.updated_at = time.time()
                 company_store.update_company(c)
                 audit_store.log_audit(c.id, current_user.id, "COMPANY_DISABLED", "company", c.id)
                 st.rerun()
 
-    st.subheader("🔴 Suspended companies")
+    st.subheader(T("companies.suspended_companies"))
     if not suspended:
-        st.caption("None.")
+        st.caption(T("companies.none"))
     for c in suspended:
         with st.container(border=True):
             _company_line(c)
-            if st.button("▶ Reactivate", key=f"reactivate_{c.id}"):
+            if st.button(T("companies.reactivate"), key=f"reactivate_{c.id}"):
                 c.status = company_store.STATUS_ACTIVE
                 c.updated_at = time.time()
                 company_store.update_company(c)
@@ -4766,15 +4785,15 @@ elif page == "🏢 Companies":
                 st.rerun()
 
     st.divider()
-    st.subheader("Platform Admins")
+    st.subheader(T("companies.platform_admins"))
     platform_admins = platform_admin_store.list_all()
     active_admin_count = platform_admin_store.count_active()
     for pa in platform_admins:
         pa_user = auth_store.get_user_by_id(pa.user_id)
-        label = f"{pa_user.name} <{pa_user.email}>" if pa_user else f"(missing user {pa.user_id})"
+        label = f"{pa_user.name} <{pa_user.email}>" if pa_user else T("companies.missing_user", user_id=pa.user_id)
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.write(f"{label} — {'active' if pa.is_active else 'inactive'}")
+            st.write(f"{label} — {T('companies.active_word') if pa.is_active else T('companies.inactive_word')}")
         with col2:
             if pa.is_active:
                 # Hard-blocked in this UI if it would leave zero active
@@ -4782,7 +4801,7 @@ elif page == "🏢 Companies":
                 # enforced here unconditionally, same as the CLI's
                 # `disable` command (scripts/superadmin_cli.py).
                 disable_blocked = active_admin_count <= 1
-                if st.button("Disable", key=f"disable_admin_{pa.id}", disabled=disable_blocked, use_container_width=True):
+                if st.button(T("companies.disable"), key=f"disable_admin_{pa.id}", disabled=disable_blocked, use_container_width=True):
                     platform_admin_store.set_active(pa.id, False)
                     audit_store.log_audit(
                         pa_user.company_id if pa_user else "unknown", current_user.id,
@@ -4790,9 +4809,9 @@ elif page == "🏢 Companies":
                     )
                     st.rerun()
                 if disable_blocked:
-                    st.caption("Can't disable the only active Super Admin.")
+                    st.caption(T("companies.cant_disable_only_admin"))
             else:
-                if st.button("Enable", key=f"enable_admin_{pa.id}", use_container_width=True):
+                if st.button(T("companies.enable"), key=f"enable_admin_{pa.id}", use_container_width=True):
                     platform_admin_store.set_active(pa.id, True)
                     audit_store.log_audit(
                         pa_user.company_id if pa_user else "unknown", current_user.id,
@@ -4800,28 +4819,28 @@ elif page == "🏢 Companies":
                     )
                     st.rerun()
 
-    st.markdown("**Grant Super Admin**")
-    st.caption("The user must already have a regular account in some company — this never creates a new user.")
+    st.markdown(f"**{T('companies.grant_super_admin')}**")
+    st.caption(T("companies.grant_super_admin_caption"))
     with st.form("grant_super_admin_form", clear_on_submit=True):
-        grant_email = st.text_input("Existing user's email")
-        if st.form_submit_button("Grant Super Admin"):
+        grant_email = st.text_input(T("companies.existing_user_email"))
+        if st.form_submit_button(T("companies.grant_super_admin")):
             matches = auth_store.get_users_by_email(grant_email.strip().lower())
             if not matches:
-                st.error("No existing user found with that email.")
+                st.error(T("companies.no_user_found"))
             else:
                 target_user = matches[0]
                 if len(matches) > 1:
-                    st.warning(f"Multiple accounts share this email across companies — granting to company {target_user.company_id!r}.")
+                    st.warning(T("companies.multiple_accounts_warning", company_id=target_user.company_id))
                 existing = platform_admin_store.get_by_user_id(target_user.id)
                 if existing and existing.is_active:
-                    st.info(f"{target_user.email} is already an active Super Admin.")
+                    st.info(T("companies.already_super_admin", email=target_user.email))
                 elif existing:
                     platform_admin_store.set_active(existing.id, True)
                     audit_store.log_audit(target_user.company_id, current_user.id, "SUPERADMIN_ENABLED", "user", target_user.id)
-                    st.success(f"Reactivated {target_user.email} as a Super Admin.")
+                    st.success(T("companies.reactivated_super_admin", email=target_user.email))
                     st.rerun()
                 else:
                     platform_admin_store.create(target_user.id)
                     audit_store.log_audit(target_user.company_id, current_user.id, "PLATFORM_ROLE_CHANGED", "user", target_user.id, "granted Super Admin")
-                    st.success(f"{target_user.email} is now a Super Admin.")
+                    st.success(T("companies.now_super_admin", email=target_user.email))
                     st.rerun()
