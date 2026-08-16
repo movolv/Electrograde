@@ -269,7 +269,7 @@ class ServiceConnector(IntegrationConnector):
 
     integration_category = "service"
 
-    def translate(self, text: str, target_lang: str, source_lang: Optional[str] = None) -> str:
+    def translate(self, text: str, source_language: str, target_language: str) -> str:
         raise NotImplementedError(f"{self.integration_type} does not support translate()")
 
     def process(self, *args, **kwargs):

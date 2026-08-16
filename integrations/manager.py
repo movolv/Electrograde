@@ -14,6 +14,7 @@ from typing import Optional
 
 from integrations.base import ConnectionTestResult, IntegrationConnector
 from integrations.marketplaces.baselinker.client import BaselinkerConnector
+from integrations.services.ai.client import AiServiceConnector
 from integrations.services.deepl.client import DeepLConnector
 from modules import audit_store, integration_store, sync_rules_store
 
@@ -42,6 +43,7 @@ class CatalogEntry:
 CONNECTORS = {
     "baselinker": BaselinkerConnector,
     "deepl": DeepLConnector,
+    "openai": AiServiceConnector,
 }
 
 CATALOG = [
@@ -81,9 +83,9 @@ CATALOG = [
         keywords=("translate", "language", "ai"),
     ),
     CatalogEntry(
-        "openai", integration_store.CATEGORY_SERVICE, "AI Assistant", False,
+        "openai", integration_store.CATEGORY_SERVICE, "AI Assistant", True,
         ui_group="AI", description="AI-assisted descriptions & automation",
-        keywords=("ai", "assistant", "gpt"),
+        keywords=("ai", "assistant", "gpt", "translate", "translation"),
     ),
     CatalogEntry(
         "dhl", integration_store.CATEGORY_SERVICE, "DHL Shipping", False,

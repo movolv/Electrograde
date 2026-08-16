@@ -117,6 +117,13 @@ class Product:
     baselinker_product_id: str = ""  # set after first successful push; presence means "update" not "create"
     baselinker_synced_at: float = 0.0  # last successful push timestamp
 
+    # -- CONTENT LANGUAGE (see modules/product_translation_store.py) --
+    primary_language: str = "en"  # language name/product_description/condition_description/
+    # defects were originally AI-authored in (whatever description_gen.py produced at
+    # creation time — today always "en", but never assume that elsewhere). Set once,
+    # never changed afterward. The company's default_product_language (display/export
+    # preference) is a completely separate setting — see modules/company_store.py.
+
     def to_dict(self) -> dict:
         return asdict(self)
 

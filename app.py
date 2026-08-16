@@ -46,6 +46,7 @@ from modules import (
     platform_admin_store,
     pricing,
     product_change_log_store,
+    product_translation_store,
     pwa,
     repair_store,
     spec_lookup,
@@ -54,6 +55,7 @@ from modules import (
     sync_ownership_store,
     sync_queue_store,
     sync_rules_store,
+    translation_service,
     vision_grading,
     web_search,
 )
@@ -1279,6 +1281,12 @@ def _init_state():
         "grading_result": None,
         "price_estimate": None,
         "descriptions": None,
+        # {field_key: {"source": str, "language": str, "result": str|list}} —
+        # memoized live-translation cache for the New Item wizard, see
+        # _wizard_translate()/_wizard_translate_list() below. Product-scoped,
+        # reset on reset_wizard() same as spec_result/grading_result/descriptions.
+        "wizard_translations": {},
+        "wizard_translate_hint_shown": False,
         "manifest_df": None,
         "manifest_uploaded_name": None,
         # Review & Export page (merged Review + CSV/Excel Export) — single
@@ -1292,6 +1300,8 @@ def _init_state():
         "rex_delete_requested": False,  # same pattern, opens the bulk-delete confirmation dialog
         "rex_bulk_edit_requested": False,  # same pattern, opens the Bulk Edit dialog
         "rex_status_requested": False,     # same pattern, opens the Change Status dialog
+        "rex_translate_requested": False,  # same pattern, opens the bulk Translate dialog
+        "rex_bulktranslate_preview": None,  # {"languages","provider","force","rows"} from the last Preview click
         "rex_bulkedit_preview": None,      # {"field","action","raw_value","rows"} from the last Preview click
         "rex_ops_popover_seq": 0,          # bumped to force the Operations popover closed when a dialog opens
         "rex_clear_seq": 0,             # bumped to tell the grid to deselect all (no remount needed)
@@ -1365,10 +1375,130 @@ def reset_wizard():
     st.session_state.grading_result = None
     st.session_state.price_estimate = None
     st.session_state.descriptions = None
+    st.session_state.wizard_translations = {}
+    st.session_state.wizard_translate_hint_shown = False
 
 
 def _ai_configured() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def _wizard_translate(field_key: str, source_text: str) -> str:
+    """Live-translates one piece of AI-generated wizard text into
+    `current_company.default_product_language`, memoized per `field_key`
+    so re-rendering the same step on every rerun (every keystroke
+    elsewhere on the page) never re-calls the provider for text that
+    hasn't changed. Returns `source_text` unchanged — no provider call at
+    all — when the company's default is English (the common case) or no
+    translation provider is connected; a one-time hint is shown instead of
+    per-field warnings. Never touches `product.*` or the database — see
+    modules/translation_service.py's translate_text() for the actual
+    provider call, and app.py's Save Item handler (Step 6) for where the
+    accumulated cache finally gets persisted."""
+    if not source_text or not current_company or current_company.default_product_language == "en":
+        return source_text
+    target_language = current_company.default_product_language
+    cached = st.session_state.wizard_translations.get(field_key)
+    if cached and cached["source"] == source_text and cached["language"] == target_language:
+        return cached["result"]
+
+    if not IntegrationManager.is_connected(current_company.id, current_company.translation_provider):
+        if not st.session_state.wizard_translate_hint_shown:
+            st.info(T(
+                "new_item.connect_translation_provider_hint",
+                language=company_store.CONTENT_LANGUAGES.get(target_language, target_language),
+            ))
+            st.session_state.wizard_translate_hint_shown = True
+        return source_text
+
+    try:
+        result = translation_service.translate_text(
+            source_text, "en", target_language, current_company.translation_provider, current_company.id,
+        )
+    except Exception:
+        st.warning(T(
+            "new_item.auto_translate_failed",
+            language=company_store.CONTENT_LANGUAGES.get(target_language, target_language),
+        ))
+        return source_text
+
+    st.session_state.wizard_translations[field_key] = {
+        "source": source_text, "language": target_language, "result": result,
+        "translated_by": current_company.translation_provider,
+    }
+    return result
+
+
+def _wizard_translate_list(field_key: str, source_items: list) -> list:
+    """List counterpart of _wizard_translate() — same memoization, one
+    field_key covers the whole list (compared by value, not per-item)."""
+    if not source_items or not current_company or current_company.default_product_language == "en":
+        return source_items
+    target_language = current_company.default_product_language
+    cached = st.session_state.wizard_translations.get(field_key)
+    if cached and cached["source"] == source_items and cached["language"] == target_language:
+        return cached["result"]
+
+    if not IntegrationManager.is_connected(current_company.id, current_company.translation_provider):
+        if not st.session_state.wizard_translate_hint_shown:
+            st.info(T(
+                "new_item.connect_translation_provider_hint",
+                language=company_store.CONTENT_LANGUAGES.get(target_language, target_language),
+            ))
+            st.session_state.wizard_translate_hint_shown = True
+        return source_items
+
+    try:
+        result = translation_service.translate_list(
+            source_items, "en", target_language, current_company.translation_provider, current_company.id,
+        )
+    except Exception:
+        st.warning(T(
+            "new_item.auto_translate_failed",
+            language=company_store.CONTENT_LANGUAGES.get(target_language, target_language),
+        ))
+        return source_items
+
+    st.session_state.wizard_translations[field_key] = {
+        "source": list(source_items), "language": target_language, "result": result,
+        "translated_by": current_company.translation_provider,
+    }
+    return result
+
+
+def _wizard_commit_text(field_key: str, english_source: str, widget_value: str) -> str:
+    """Called from a wizard step's Next/Save handler instead of assigning
+    `product.<field> = widget_value.strip()` directly. If this field was
+    shown translated (a cache entry exists for the company's current
+    default language), the WIDGET's current text — which the user may
+    have hand-edited — is captured back into the cache (flagged
+    translated_by="manual" if it no longer matches what was auto-
+    translated), and `english_source` (untouched) is what gets returned
+    for `product.<field>` — the primary/English row must never be
+    overwritten with translated text. If this field was never translated
+    (English-default company, or provider unavailable when it was shown),
+    returns `widget_value.strip()` — today's exact behavior."""
+    cached = st.session_state.wizard_translations.get(field_key)
+    if cached and current_company and cached["language"] == current_company.default_product_language:
+        edited = widget_value.strip()
+        if edited != cached["result"]:
+            cached["result"] = edited
+            cached["translated_by"] = "manual"
+        return english_source.strip()
+    return widget_value.strip()
+
+
+def _wizard_commit_list(field_key: str, english_source: list, widget_lines: str) -> list:
+    """List counterpart of _wizard_commit_text() — `widget_lines` is the
+    raw newline-separated textarea content."""
+    cached = st.session_state.wizard_translations.get(field_key)
+    if cached and current_company and cached["language"] == current_company.default_product_language:
+        edited = [l.strip() for l in widget_lines.splitlines() if l.strip()]
+        if edited != cached["result"]:
+            cached["result"] = edited
+            cached["translated_by"] = "manual"
+        return list(english_source)
+    return [l.strip() for l in widget_lines.splitlines() if l.strip()]
 
 
 def _render_column_mapping_ui(df: pd.DataFrame, key_prefix: str):
@@ -1714,8 +1844,10 @@ if page == PAGE_NEW_ITEM:
         model_val = sr.model if sr else product.model
         category_val = sr.category if sr else product.category
         power_val = sr.power if sr else product.power
-        spec_val = sr.spec_summary if sr else product.spec_summary
-        box_val = "\n".join(sr.box_contents) if sr and sr.box_contents else "\n".join(product.box_contents)
+        spec_val_en = sr.spec_summary if sr else product.spec_summary
+        spec_val = _wizard_translate("spec_summary", spec_val_en)
+        box_val_en = sr.box_contents if sr and sr.box_contents else product.box_contents
+        box_val = "\n".join(_wizard_translate_list("box_contents", box_val_en))
 
         name_in = st.text_input(T("common.product_name"), value=name_val)
         cols = st.columns(2)
@@ -1767,8 +1899,8 @@ if page == PAGE_NEW_ITEM:
                 product.model = model_in.strip()
                 product.category = category_in.strip()
                 product.power = power_in.strip()
-                product.spec_summary = spec_in.strip()
-                product.box_contents = [l.strip() for l in box_in.splitlines() if l.strip()]
+                product.spec_summary = _wizard_commit_text("spec_summary", spec_val_en, spec_in)
+                product.box_contents = _wizard_commit_list("box_contents", box_val_en, box_in)
 
                 if ean_in.strip() != product.ean:
                     product.ean = ean_in.strip()
@@ -1891,18 +2023,22 @@ if page == PAGE_NEW_ITEM:
             format_func=lambda v: new_used_labels[v],
         )
 
-        default_color = (gr.color if gr and gr.color else "") or product.color
+        default_color_en = (gr.color if gr and gr.color else "") or product.color
+        default_color = _wizard_translate("color", default_color_en)
         color_in = st.text_input(
             T("common.color"), value=default_color,
             help=T("new_item.color_help"),
         )
 
         if gr and gr.product_condition_reasoning:
-            st.info(gr.product_condition_reasoning)
+            st.info(_wizard_translate("product_condition_reasoning", gr.product_condition_reasoning))
 
-        defects_val = "\n".join(gr.defects) if gr else "\n".join(product.defects)
-        missing_val = "\n".join(gr.missing_components) if gr else "\n".join(product.missing_components)
-        checklist_val = "\n".join(gr.functional_checklist) if gr else "\n".join(product.functional_checklist)
+        defects_val_en = gr.defects if gr else product.defects
+        defects_val = "\n".join(_wizard_translate_list("defects", defects_val_en))
+        missing_val_en = gr.missing_components if gr else product.missing_components
+        missing_val = "\n".join(_wizard_translate_list("missing_components", missing_val_en))
+        checklist_val_en = gr.functional_checklist if gr else product.functional_checklist
+        checklist_val = "\n".join(_wizard_translate_list("functional_checklist", checklist_val_en))
 
         defects_in = st.text_area(T("new_item.defects_label"), value=defects_val, height=100)
         missing_in = st.text_area(T("new_item.missing_components_label"), value=missing_val, height=70)
@@ -1925,7 +2061,8 @@ if page == PAGE_NEW_ITEM:
         default_match_conf = gr.match_confidence if gr else product.match_confidence
         match_conf_in = st.slider(T("new_item.match_confidence"), min_value=0, max_value=100, value=int(default_match_conf))
 
-        match_notes_val = gr.match_notes if gr else product.match_notes
+        match_notes_val_en = gr.match_notes if gr else product.match_notes
+        match_notes_val = _wizard_translate("match_notes", match_notes_val_en)
         match_notes_in = st.text_area(T("new_item.match_notes"), value=match_notes_val, height=70)
 
         if match_in == "NO" or match_conf_in < MATCH_CONFIDENCE_WARNING_THRESHOLD:
@@ -1942,13 +2079,13 @@ if page == PAGE_NEW_ITEM:
                 product.product_condition_confidence = int(confidence_in)
                 product.product_condition_reasoning = gr.product_condition_reasoning if gr else ""
                 product.condition_type = condition_in
-                product.color = color_in.strip()
-                product.defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
-                product.missing_components = [l.strip() for l in missing_in.splitlines() if l.strip()]
-                product.functional_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
+                product.color = _wizard_commit_text("color", default_color_en, color_in)
+                product.defects = _wizard_commit_list("defects", defects_val_en, defects_in)
+                product.missing_components = _wizard_commit_list("missing_components", missing_val_en, missing_in)
+                product.functional_checklist = _wizard_commit_list("functional_checklist", checklist_val_en, checklist_in)
                 product.product_match = match_in
                 product.match_confidence = int(match_conf_in)
-                product.match_notes = match_notes_in.strip()
+                product.match_notes = _wizard_commit_text("match_notes", match_notes_val_en, match_notes_in)
                 st.session_state.wizard_step = 5
                 st.rerun()
 
@@ -2006,9 +2143,12 @@ if page == PAGE_NEW_ITEM:
             st.caption(T("new_item.write_manually_caption"))
 
         desc = st.session_state.descriptions
-        product_name_val = desc.product_name if desc else product.name
-        product_desc_val = desc.product_description if desc else product.product_description
-        condition_desc_val = desc.condition_description if desc else product.condition_description
+        product_name_val_en = desc.product_name if desc else product.name
+        product_name_val = _wizard_translate("name", product_name_val_en)
+        product_desc_val_en = desc.product_description if desc else product.product_description
+        product_desc_val = _wizard_translate("product_description", product_desc_val_en)
+        condition_desc_val_en = desc.condition_description if desc else product.condition_description
+        condition_desc_val = _wizard_translate("condition_description", condition_desc_val_en)
 
         product_name_in = st.text_input(T("new_item.listing_title"), value=product_name_val)
         product_desc_in = st.text_area(T("new_item.general_overview"), value=product_desc_val, height=150)
@@ -2028,10 +2168,15 @@ if page == PAGE_NEW_ITEM:
             if st.button(T("common.next"), type="primary", use_container_width=True):
                 product.price = float(price_in)
                 product.price_reasoning = pe.reasoning if pe else ""
-                if product_name_in.strip():
-                    product.name = product_name_in.strip()
-                product.product_description = product_desc_in.strip()
-                product.condition_description = condition_desc_in.strip()
+                committed_name = _wizard_commit_text("name", product_name_val_en, product_name_in)
+                if committed_name:
+                    product.name = committed_name
+                product.product_description = _wizard_commit_text(
+                    "product_description", product_desc_val_en, product_desc_in,
+                )
+                product.condition_description = _wizard_commit_text(
+                    "condition_description", condition_desc_val_en, condition_desc_in,
+                )
                 st.session_state.wizard_step = 6
                 st.rerun()
 
@@ -2129,7 +2274,47 @@ if page == PAGE_NEW_ITEM:
                     saved_paths.append(str(fp))
                 product.image_paths = saved_paths
 
-                inventory_store.save_product(product)
+                inventory_store.save_product(
+                    product,
+                    translated_by="ai" if st.session_state.descriptions is not None else "manual",
+                )
+
+                # Persist whatever the wizard translated live (§3-5 of the
+                # live-wizard-translation plan) as one additional row for
+                # the company's default language — falls back to the
+                # (untouched) English product.* value for any field the
+                # cache never covered (empty source, provider unavailable
+                # at that step, etc.), so the row is always complete.
+                wt = st.session_state.wizard_translations
+                if wt and current_company and current_company.default_product_language != product.primary_language:
+                    target_lang = current_company.default_product_language
+                    field_map = {"name": "title", "product_description": "description"}
+                    kwargs = {
+                        field_map.get(k, k): v["result"]
+                        for k, v in wt.items() if v.get("language") == target_lang
+                    }
+                    any_manual = any(
+                        v.get("translated_by") == "manual"
+                        for v in wt.values() if v.get("language") == target_lang
+                    )
+                    product_translation_store.upsert_translation(product_translation_store.ProductTranslation(
+                        product_id=product.id, company_id=product.company_id, language=target_lang,
+                        title=kwargs.get("title", product.name),
+                        description=kwargs.get("description", product.product_description),
+                        condition_description=kwargs.get("condition_description", product.condition_description),
+                        defects=kwargs.get("defects", product.defects),
+                        box_contents=kwargs.get("box_contents", product.box_contents),
+                        missing_components=kwargs.get("missing_components", product.missing_components),
+                        spec_summary=kwargs.get("spec_summary", product.spec_summary),
+                        functional_checklist=kwargs.get("functional_checklist", product.functional_checklist),
+                        product_condition_reasoning=kwargs.get(
+                            "product_condition_reasoning", product.product_condition_reasoning,
+                        ),
+                        match_notes=kwargs.get("match_notes", product.match_notes),
+                        color=kwargs.get("color", product.color),
+                        translated_by="manual" if any_manual else current_company.translation_provider,
+                    ))
+
                 audit_store.log_audit(product.company_id, current_user.id, "CREATE_PRODUCT", "product", product.id)
                 st.success(T("new_item.saved_to_inventory", name=product.name or product.model_number))
                 st.balloons()
@@ -2650,6 +2835,126 @@ elif page == PAGE_PRODUCT_LIST:
                 if st.button(T("common.close"), use_container_width=True, key="rex_bulkedit_done"):
                     st.rerun()
 
+    _BULK_TRANSLATE_MAX_PRODUCTS = 300  # v1 runs synchronously in one request; see
+    # integrations/scheduler.py / sync_queue_store.py for the background-job
+    # pattern this should move to once real usage shows this cap is too low.
+
+    def _bulk_translate_classify(product, language: str, force: bool) -> str:
+        """create | update | skip_manual | skip_primary — computed from
+        existing DB state only, no provider call, so Preview never spends
+        API credits (mirrors _confirm_bulk_edit_dialog's preview/apply
+        split above)."""
+        if language == product.primary_language:
+            return "skip_primary"
+        existing = product_translation_store.get_translation(product.id, language)
+        if existing is None:
+            return "create"
+        if existing.translated_by == "manual" and not force:
+            return "skip_manual"
+        return "update"
+
+    @st.dialog(T("product_list.bulk_translate_title"))
+    def _confirm_bulk_translate_dialog(selected_products):
+        st.write(f"**{T('product_list.bulk_translate_heading', count=len(selected_products))}**")
+        if len(selected_products) > _BULK_TRANSLATE_MAX_PRODUCTS:
+            st.warning(T("product_list.bulk_translate_too_many", max=_BULK_TRANSLATE_MAX_PRODUCTS))
+            return
+
+        target_langs = st.multiselect(
+            T("product_list.translate_target_languages"),
+            options=list(company_store.CONTENT_LANGUAGES.keys()),
+            format_func=lambda code: company_store.CONTENT_LANGUAGES[code],
+            key="rex_bulktranslate_langs",
+        )
+        provider = st.radio(
+            T("settings.translation_provider"), options=["deepl", "openai"],
+            format_func=lambda p: {"deepl": "DeepL", "openai": "OpenAI"}[p],
+            index=["deepl", "openai"].index(current_company.translation_provider)
+            if current_company and current_company.translation_provider in ("deepl", "openai") else 0,
+            key="rex_bulktranslate_provider", horizontal=True,
+        )
+        force = st.checkbox(T("product_list.retranslate_force"), key="rex_bulktranslate_force")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(T("common.cancel"), use_container_width=True, key="rex_bulktranslate_cancel"):
+                st.session_state.rex_bulktranslate_preview = None
+                st.rerun()
+        with col2:
+            if st.button(
+                T("product_list.preview_changes"), type="primary", use_container_width=True,
+                key="rex_bulktranslate_preview_btn",
+            ):
+                rows = []
+                for p in selected_products:
+                    for lang in target_langs:
+                        rows.append({
+                            "product_id": p.id, "sku": p.sku, "name": p.name,
+                            "language": lang, "action": _bulk_translate_classify(p, lang, force),
+                        })
+                st.session_state.rex_bulktranslate_preview = {
+                    "languages": target_langs, "provider": provider, "force": force, "rows": rows,
+                }
+                st.rerun()
+
+        preview = st.session_state.get("rex_bulktranslate_preview")
+        if preview and preview["languages"] == target_langs and preview["provider"] == provider and preview["force"] == force:
+            counts = {"create": 0, "update": 0, "skip_manual": 0, "skip_primary": 0}
+            for r in preview["rows"]:
+                counts[r["action"]] += 1
+            st.caption(T(
+                "product_list.bulk_translate_preview_summary",
+                create=counts["create"], update=counts["update"], skip=counts["skip_manual"],
+            ))
+            actionable = [r for r in preview["rows"] if r["action"] in ("create", "update")]
+            if not actionable:
+                st.info(T("product_list.bulk_translate_nothing_to_do"))
+            else:
+                st.dataframe(
+                    [
+                        {
+                            T("product_list.product_col"): r["sku"] or r["name"] or r["product_id"],
+                            T("product_list.content_language"): company_store.CONTENT_LANGUAGES.get(r["language"], r["language"]),
+                            T("product_list.action_label"): r["action"],
+                        }
+                        for r in preview["rows"]
+                    ],
+                    hide_index=True, use_container_width=True,
+                )
+
+                acol1, acol2 = st.columns(2)
+                with acol1:
+                    if st.button(T("common.cancel"), use_container_width=True, key="rex_bulktranslate_preview_cancel"):
+                        st.session_state.rex_bulktranslate_preview = None
+                        st.rerun()
+                with acol2:
+                    apply_clicked = st.button(
+                        T("product_list.apply_changes"), type="primary", use_container_width=True,
+                        key="rex_bulktranslate_apply",
+                    )
+                if apply_clicked:
+                    by_id = {p.id: p for p in selected_products}
+                    progress = st.progress(0.0)
+                    ok_count, fail_count = 0, 0
+                    for i, r in enumerate(actionable):
+                        p = by_id[r["product_id"]]
+                        try:
+                            translation_service.translate_product(
+                                p, target_language=r["language"], provider_type=provider,
+                                company_id=p.company_id, translated_by=provider, force=force,
+                            )
+                            ok_count += 1
+                        except Exception:
+                            fail_count += 1
+                        progress.progress((i + 1) / len(actionable))
+                    st.session_state.rex_bulktranslate_preview = None
+                    if fail_count:
+                        st.success(T("product_list.bulk_translate_partial_success", ok=ok_count, fail=fail_count))
+                    else:
+                        st.success(T("product_list.bulk_translate_success", count=ok_count))
+                    if st.button(T("common.close"), use_container_width=True, key="rex_bulktranslate_done"):
+                        st.rerun()
+
     @st.dialog(T("product_list.change_status_title"))
     def _confirm_change_status_dialog(selected_products):
         st.write(T("product_list.change_status_heading", count=len(selected_products)))
@@ -2697,6 +3002,66 @@ elif page == PAGE_PRODUCT_LIST:
             ):
                 st.session_state.rex_lightbox_index = idx + 1
                 st.rerun()
+
+    @st.dialog(T("product_list.translate_dialog_title"))
+    def _confirm_translate_dialog(product):
+        st.write(T("product_list.translate_heading", name=product.name or product.sku))
+        _existing_langs = {t.language for t in product_translation_store.list_translations(product.id)}
+        _lang_choices = [
+            code for code in company_store.CONTENT_LANGUAGES if code != product.primary_language
+        ]
+        target_langs = st.multiselect(
+            T("product_list.translate_target_languages"),
+            options=_lang_choices,
+            format_func=lambda code: (
+                f"{company_store.CONTENT_LANGUAGES[code]}"
+                + (f" ({T('product_list.retranslate_suffix')})" if code in _existing_langs else "")
+            ),
+            key="rex_translate_langs",
+        )
+        provider = st.radio(
+            T("settings.translation_provider"), options=["deepl", "openai"],
+            format_func=lambda p: {"deepl": "DeepL", "openai": "OpenAI"}[p],
+            index=["deepl", "openai"].index(current_company.translation_provider)
+            if current_company and current_company.translation_provider in ("deepl", "openai") else 0,
+            key="rex_translate_provider", horizontal=True,
+        )
+        force = st.checkbox(T("product_list.retranslate_force"), key="rex_translate_force")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(T("common.cancel"), use_container_width=True, key="rex_translate_cancel"):
+                st.rerun()
+        with col2:
+            confirmed = st.button(
+                T("product_list.translate_action"), type="primary", use_container_width=True, key="rex_translate_confirm",
+            )
+        if confirmed:
+            if not target_langs:
+                st.warning(T("product_list.translate_select_language"))
+            elif not IntegrationManager.is_connected(product.company_id, provider):
+                st.warning(T("product_list.translate_provider_not_connected"))
+            else:
+                created, skipped = 0, 0
+                for lang in target_langs:
+                    try:
+                        result = translation_service.translate_product(
+                            product, target_language=lang, provider_type=provider,
+                            company_id=product.company_id, translated_by=provider, force=force,
+                        )
+                    except Exception as e:
+                        st.error(T("product_list.translate_failed", language=company_store.CONTENT_LANGUAGES[lang], error=e))
+                        continue
+                    if result is None:
+                        skipped += 1
+                    else:
+                        created += 1
+                if created:
+                    st.success(T("product_list.translate_success", count=created))
+                if skipped:
+                    st.caption(T("product_list.translate_skipped_manual", count=skipped))
+                if created:
+                    st.rerun()
 
     def _render_product_card(p: Product, tier_label: str = ""):
         """The single detail view for a product — used both when a row is
@@ -2758,7 +3123,7 @@ elif page == PAGE_PRODUCT_LIST:
         # per-product key so Previous/Next don't leave a stale typed
         # value behind when the label text is identical across products.
         st.markdown(f"**{T('product_list.product_information')}**")
-        name_in = st.text_input(T("common.product_name"), value=p.name, key=f"rex_name_{p.id}")
+        st.caption(T("product_list.name_moved_caption"))
         pi1, pi2 = st.columns(2)
         with pi1:
             brand_in = st.text_input(T("common.brand"), value=p.brand, key=f"rex_brand_{p.id}")
@@ -2787,42 +3152,100 @@ elif page == PAGE_PRODUCT_LIST:
                 T("common.quantity"), min_value=1, value=int(p.quantity or 1), step=1, key=f"rex_qty_{p.id}",
             )
 
+        # -- Content language: name/product_description/condition_description/
+        # defects are the only fields that live per-language (see
+        # modules/product_translation_store.py) — everything else on this
+        # card (brand/model/price/quantity/etc.) is language-neutral and
+        # always saves straight to the product regardless of which tab is
+        # selected here.
+        _translations_by_lang = {t.language: t for t in product_translation_store.list_translations(p.id)}
+        _lang_tabs = [p.primary_language] + [l for l in _translations_by_lang if l != p.primary_language]
+        _lang_state_key = f"rex_content_lang_{p.id}"
+        _default_lang = (
+            current_company.default_product_language
+            if current_company and current_company.default_product_language in _lang_tabs
+            else p.primary_language
+        )
+        if st.session_state.get(_lang_state_key) not in _lang_tabs:
+            st.session_state[_lang_state_key] = _default_lang
+
+        lang_col, translate_col = st.columns([4, 1])
+        with lang_col:
+            selected_lang = st.radio(
+                T("product_list.content_language"), options=_lang_tabs,
+                format_func=lambda code: company_store.CONTENT_LANGUAGES.get(code, code.upper()),
+                key=_lang_state_key, horizontal=True,
+            )
+        with translate_col:
+            st.write("")
+            if st.button(T("product_list.translate_action"), key=f"rex_translate_btn_{p.id}", use_container_width=True):
+                _confirm_translate_dialog(p)
+
+        is_primary_tab = selected_lang == p.primary_language
+        if is_primary_tab:
+            name_val, desc_val, extra_val = p.name, p.product_description, p.condition_description
+            defects_val_list = p.defects
+            box_val_list = p.box_contents
+            missing_val_list = p.missing_components
+            checklist_val_list = p.functional_checklist
+            reasoning_val = p.product_condition_reasoning
+            match_notes_val = p.match_notes
+        else:
+            _t = _translations_by_lang.get(selected_lang)
+            name_val = _t.title if _t else ""
+            desc_val = _t.description if _t else ""
+            extra_val = _t.condition_description if _t else ""
+            defects_val_list = _t.defects if _t else []
+            box_val_list = _t.box_contents if _t else []
+            missing_val_list = _t.missing_components if _t else []
+            checklist_val_list = _t.functional_checklist if _t else []
+            reasoning_val = _t.product_condition_reasoning if _t else ""
+            match_notes_val = _t.match_notes if _t else ""
+            if _t is not None and _t.translated_by == "manual":
+                st.caption(T("product_list.manually_edited_translation"))
+
+        name_in = st.text_input(
+            T("common.product_name"), value=name_val, key=f"rex_name_{p.id}_{selected_lang}",
+        )
         st.markdown(f"**{T('common.product_description')}**")
         desc_in = st.text_area(
-            T("common.product_description"), value=p.product_description, height=120, key=f"rex_desc_{p.id}",
+            T("common.product_description"), value=desc_val, height=120, key=f"rex_desc_{p.id}_{selected_lang}",
         )
 
         st.markdown(f"**{T('product_list.additional_description')}**")
         extra_in = st.text_area(
             T("new_item.condition_scratches_details"),
-            value=p.condition_description, height=100, key=f"rex_extra_{p.id}",
+            value=extra_val, height=100, key=f"rex_extra_{p.id}_{selected_lang}",
         )
 
         st.markdown(f"**{T('product_list.defects')}**")
         defects_in = st.text_area(
-            T("new_item.defects_label"), value="\n".join(p.defects), height=80, key=f"rex_defects_{p.id}",
+            T("new_item.defects_label"), value="\n".join(defects_val_list), height=80,
+            key=f"rex_defects_{p.id}_{selected_lang}",
         )
 
         st.markdown(f"**{T('product_list.missing_components')}**")
         missing_in = st.text_area(
-            T("product_list.missing_components_label"), value="\n".join(p.missing_components), height=60,
-            key=f"rex_missing_{p.id}",
+            T("product_list.missing_components_label"), value="\n".join(missing_val_list), height=60,
+            key=f"rex_missing_{p.id}_{selected_lang}",
         )
 
         st.markdown(f"**{T('product_list.box_contents')}**")
         box_in = st.text_area(
-            T("product_list.box_contents_label"), value="\n".join(p.box_contents), height=60,
-            key=f"rex_box_{p.id}",
+            T("product_list.box_contents_label"), value="\n".join(box_val_list), height=60,
+            key=f"rex_box_{p.id}_{selected_lang}",
         )
 
         st.markdown(f"**{T('product_list.functional_checklist')}**")
         checklist_in = st.text_area(
-            T("product_list.functional_checklist_label"), value="\n".join(p.functional_checklist), height=80,
-            key=f"rex_checklist_{p.id}",
+            T("product_list.functional_checklist_label"), value="\n".join(checklist_val_list), height=80,
+            key=f"rex_checklist_{p.id}_{selected_lang}",
         )
 
-        if p.product_condition_reasoning:
-            st.caption(T("product_list.condition_reasoning", reasoning=p.product_condition_reasoning))
+        if reasoning_val:
+            st.caption(T("product_list.condition_reasoning", reasoning=reasoning_val))
+        if match_notes_val:
+            st.caption(T("new_item.match_notes") + f": {match_notes_val}")
         if p.price_reasoning:
             st.caption(T("product_list.price_reasoning", reasoning=p.price_reasoning))
 
@@ -2900,9 +3323,25 @@ elif page == PAGE_PRODUCT_LIST:
             new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
             new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
 
+            # name/desc/extra/defects/missing/box are compared against
+            # name_val/desc_val/extra_val/defects_val_list/missing_val_list/
+            # box_val_list (this tab's ORIGINAL values, whichever language
+            # that is) — never against p.name/p.product_description/etc.
+            # directly, which would spuriously read as "changed" whenever a
+            # non-primary-language tab is open (its text never equals the
+            # English p.* values).
             current_barcode = p.ean or p.manifest_barcode or p.scanned_barcode
+            language_content_changed = (
+                name_in.strip() != name_val
+                or desc_in.strip() != desc_val
+                or extra_in.strip() != extra_val
+                or new_defects != defects_val_list
+                or new_missing != missing_val_list
+                or new_box != box_val_list
+                or new_checklist != checklist_val_list
+            )
             changed = (
-                name_in.strip() != p.name
+                language_content_changed
                 or brand_in.strip() != p.brand
                 or model_in.strip() != p.model
                 or category_in.strip() != p.category
@@ -2910,20 +3349,17 @@ elif page == PAGE_PRODUCT_LIST:
                 or product_condition_in != p.product_condition
                 or float(price_in) != float(p.price)
                 or int(quantity_in) != p.quantity
-                or desc_in.strip() != p.product_description
-                or extra_in.strip() != p.condition_description
-                or new_defects != p.defects
-                or new_missing != p.missing_components
-                or new_box != p.box_contents
-                or new_checklist != p.functional_checklist
             )
 
             # Snapshot pre-change values for the fields the real
             # two-way sync change-detector cares about (SYNC_OWNERSHIP_FIELDS'
             # keys) — captured before reassignment below so the event
             # layer can log/enqueue an accurate old -> new diff per field.
+            # name/product_description only reflect a real diff when the
+            # PRIMARY-language tab is the one being saved — the sync-ownership
+            # feature syncs primary/English content, never a translation.
             _sync_field_diffs = {
-                "name": (p.name, name_in.strip()),
+                "name": (p.name, name_in.strip() if is_primary_tab else p.name),
                 "brand": (p.brand, brand_in.strip()),
                 "model": (p.model, model_in.strip()),
                 "category": (p.category, category_in.strip()),
@@ -2932,10 +3368,9 @@ elif page == PAGE_PRODUCT_LIST:
                 "product_condition": (p.product_condition, product_condition_in),
                 "price": (p.price, float(price_in)),
                 "quantity": (p.quantity, int(quantity_in)),
-                "product_description": (p.product_description, desc_in.strip()),
+                "product_description": (p.product_description, desc_in.strip() if is_primary_tab else p.product_description),
             }
 
-            p.name = name_in.strip()
             p.brand = brand_in.strip()
             p.model = model_in.strip()
             p.category = category_in.strip()
@@ -2947,16 +3382,37 @@ elif page == PAGE_PRODUCT_LIST:
             p.product_condition = product_condition_in
             p.price = float(price_in)
             p.quantity = int(quantity_in)
-            p.product_description = desc_in.strip()
-            p.condition_description = extra_in.strip()
-            p.defects = new_defects
-            p.missing_components = new_missing
-            p.box_contents = new_box
-            p.functional_checklist = new_checklist
             if changed:
                 p.review_status = "edited"
 
-            inventory_store.save_product(p)
+            if is_primary_tab:
+                p.name = name_in.strip()
+                p.product_description = desc_in.strip()
+                p.condition_description = extra_in.strip()
+                p.defects = new_defects
+                p.missing_components = new_missing
+                p.box_contents = new_box
+                p.functional_checklist = new_checklist
+                inventory_store.save_product(p)  # upserts the primary-language row too
+            else:
+                inventory_store.save_product(p)  # brand/price/etc. above; primary-language row re-saved unchanged
+                if language_content_changed:
+                    # spec_summary/product_condition_reasoning/match_notes aren't
+                    # edited via any widget on this card — carried through
+                    # unchanged from the existing row so this upsert (a full
+                    # column replace) never silently wipes them.
+                    _existing_t = _translations_by_lang.get(selected_lang)
+                    product_translation_store.upsert_translation(product_translation_store.ProductTranslation(
+                        product_id=p.id, company_id=p.company_id, language=selected_lang,
+                        title=name_in.strip(), description=desc_in.strip(),
+                        condition_description=extra_in.strip(), defects=new_defects,
+                        box_contents=new_box, missing_components=new_missing,
+                        functional_checklist=new_checklist,
+                        spec_summary=_existing_t.spec_summary if _existing_t else "",
+                        product_condition_reasoning=_existing_t.product_condition_reasoning if _existing_t else "",
+                        match_notes=_existing_t.match_notes if _existing_t else "",
+                        translated_by="manual",
+                    ))
             if changed:
                 audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id)
                 _record_sync_field_changes(p, _sync_field_diffs, current_user.id)
@@ -3516,6 +3972,11 @@ elif page == PAGE_PRODUCT_LIST:
                     st.session_state.rex_status_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
+                if st.button(T("product_list.translate_action"), use_container_width=True, key="rex_op_translate"):
+                    st.session_state.rex_translate_requested = True
+                    st.session_state.rex_bulktranslate_preview = None  # start each open clean
+                    st.session_state.rex_ops_popover_seq += 1
+                    st.rerun()
                 if st.button(
                     T("product_list.export_button"), disabled=not can_export, use_container_width=True,
                     key="rex_op_export",
@@ -3674,6 +4135,12 @@ elif page == PAGE_PRODUCT_LIST:
                 selected_products = _get_selected_products()
                 if selected_products:
                     _confirm_change_status_dialog(selected_products)
+
+            if st.session_state.rex_translate_requested:
+                st.session_state.rex_translate_requested = False
+                selected_products = _get_selected_products()
+                if selected_products:
+                    _confirm_bulk_translate_dialog(selected_products)
 
         else:
             # -------------------------------------------------------- CARD VIEW --
@@ -3976,7 +4443,9 @@ elif page == PAGE_SETTINGS:
         st.error(T("common.admins_only"))
         st.stop()
 
-    (tab_integrations,) = st.tabs([T("settings.integrations_tab")])
+    tab_integrations, tab_translation = st.tabs(
+        [T("settings.integrations_tab"), T("settings.translation_tab")]
+    )
 
     with tab_integrations:
         _company_label = current_company.name if current_company else current_user.company_id
@@ -4172,6 +4641,18 @@ elif page == PAGE_SETTINGS:
                 price_group_id = st.text_input(T("settings.price_group_id"), value=settings.get("price_group_id") or "")
                 warehouse_id = st.text_input(T("settings.warehouse_id"), value=settings.get("warehouse_id") or "")
                 tax_rate = st.text_input(T("settings.tax_rate"), value=settings.get("tax_rate") or "23")
+                _export_lang_options = [""] + list(company_store.CONTENT_LANGUAGES.keys())
+                _current_export_lang = settings.get("export_language") or ""
+                export_language = st.selectbox(
+                    T("settings.export_language"),
+                    options=_export_lang_options,
+                    format_func=lambda code: (
+                        T("settings.export_language_use_default") if code == ""
+                        else company_store.CONTENT_LANGUAGES[code]
+                    ),
+                    index=_export_lang_options.index(_current_export_lang) if _current_export_lang in _export_lang_options else 0,
+                    help=T("settings.export_language_help"),
+                )
                 submitted = st.form_submit_button(T("settings.save_test_connection"), type="primary")
                 if submitted:
                     if not token and not has_credentials:
@@ -4186,6 +4667,7 @@ elif page == PAGE_SETTINGS:
                             "price_group_id": price_group_id.strip(),
                             "warehouse_id": warehouse_id.strip(),
                             "tax_rate": tax_rate.strip() or "23",
+                            "export_language": export_language,
                         }
                         result = IntegrationManager.connect(
                             current_user.company_id, entry.integration_type, creds, new_settings,
@@ -4217,9 +4699,33 @@ elif page == PAGE_SETTINGS:
                         (st.success if result.success else st.error)(result.message)
                         st.rerun()
 
+        def _render_openai_settings(entry, record) -> None:
+            connected = record is not None and record.status == integration_store.STATUS_CONNECTED
+            has_credentials = record is not None and bool(record.credentials)
+            if record and record.last_sync_at:
+                st.caption(T("settings.last_sync", ts=time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))))
+            with st.form(f"integration_form_{entry.integration_type}"):
+                api_key = st.text_input(
+                    T("settings.api_key"), type="password",
+                    placeholder=T("settings.leave_blank_current") if has_credentials else "",
+                )
+                submitted = st.form_submit_button(T("settings.save_test_connection"), type="primary")
+                if submitted:
+                    if not api_key and not has_credentials:
+                        st.warning(T("settings.api_key_required"))
+                    else:
+                        creds = {"api_key": api_key} if api_key else dict(record.credentials)
+                        result = IntegrationManager.connect(
+                            current_user.company_id, entry.integration_type, creds, {},
+                            user_id=current_user.id,
+                        )
+                        (st.success if result.success else st.error)(result.message)
+                        st.rerun()
+
         _INTEGRATION_SETTINGS_RENDERERS = {
             "baselinker": _render_baselinker_settings,
             "deepl": _render_deepl_settings,
+            "openai": _render_openai_settings,
         }
 
         _UI_GROUPS = ["Marketplace", "Store", "Shipping", "ERP", "Accounting", "Payments", "AI", "Communication", "Other"]
@@ -4708,6 +5214,46 @@ elif page == PAGE_SETTINGS:
                                 use_container_width=True,
                             ):
                                 _confirm_disconnect_integration_dialog(record.integration_type, entry.display_name)
+
+    with tab_translation:
+        st.caption(T("settings.translation_tab_caption"))
+
+        _lang_options = list(company_store.CONTENT_LANGUAGES.keys())
+        _provider_options = ["deepl", "openai"]
+        _provider_labels = {"deepl": "DeepL", "openai": "OpenAI"}
+
+        with st.form("company_translation_settings_form"):
+            new_default_lang = st.selectbox(
+                T("settings.default_product_language"),
+                options=_lang_options,
+                format_func=lambda code: company_store.CONTENT_LANGUAGES[code],
+                index=_lang_options.index(current_company.default_product_language)
+                if current_company and current_company.default_product_language in _lang_options else 0,
+                help=T("settings.default_product_language_help"),
+            )
+            new_provider = st.selectbox(
+                T("settings.translation_provider"),
+                options=_provider_options,
+                format_func=lambda p: _provider_labels[p],
+                index=_provider_options.index(current_company.translation_provider)
+                if current_company and current_company.translation_provider in _provider_options else 0,
+            )
+            submitted = st.form_submit_button(T("common.save"), type="primary")
+            if submitted and current_company:
+                current_company.default_product_language = new_default_lang
+                current_company.translation_provider = new_provider
+                company_store.update_company(current_company)
+                st.success(T("settings.translation_settings_saved"))
+                st.rerun()
+
+        if current_company and current_company.default_product_language != "en":
+            if not IntegrationManager.is_connected(current_company.id, current_company.translation_provider):
+                st.warning(T(
+                    "settings.translation_provider_not_connected",
+                    provider=_provider_labels.get(current_company.translation_provider, current_company.translation_provider),
+                ))
+            else:
+                st.caption(T("settings.translation_provider_connected"))
 
 # =========================================================== COMPANIES ===
 elif page == PAGE_COMPANIES:

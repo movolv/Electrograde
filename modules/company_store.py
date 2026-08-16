@@ -27,6 +27,14 @@ STATUS_PENDING = "pending"  # awaiting Super Admin approval — see modules/auth
                              # any non-ACTIVE status, so a PENDING company is
                              # blocked from login with zero changes to either.
 
+# Curated set offered in Settings -> Translation's "Default product
+# language" dropdown — deliberately small to start, easy to extend later
+# since actual translation is generic via any modules/translation_service.py
+# provider (DeepL/OpenAI). "en" has no translation cost (it's whatever
+# description_gen.py already generates); "de"/"lv" require a connected
+# provider (see Company.translation_provider below).
+CONTENT_LANGUAGES = {"en": "English", "de": "German", "lv": "Latviešu"}
+
 DEFAULT_COMPANY_ID = "default"  # matches the SQLite column default already
                                  # on every pre-existing products/manifest_
                                  # batches row, so migrating existing data
@@ -50,6 +58,18 @@ class Company:
     product_limit: int = 500
     created_at: float = field(default_factory=time.time)
     updated_at: float = 0.0
+
+    # -- CONTENT TRANSLATION (see modules/translation_service.py) --
+    default_product_language: str = "en"  # which product_translations language the
+    # product card shows/generates into by default, and the fallback export
+    # language for any marketplace integration that doesn't set its own
+    # override (CompanyIntegration.settings["export_language"]). NOT the
+    # same as a product's primary_language (modules/models.py) — that's the
+    # language content was originally AI-authored in and never changes;
+    # this is a display/translation-target preference that can change
+    # anytime without touching existing products.
+    translation_provider: str = "deepl"  # "deepl" | "openai" — which connected
+    # service modules/translation_service.py uses by default.
 
     def to_dict(self) -> dict:
         return asdict(self)

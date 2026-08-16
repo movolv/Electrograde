@@ -14,8 +14,6 @@ never has to know or select this.
 
 Expected shape: credentials = {"api_key": "..."}
 """
-from typing import Optional
-
 import requests
 
 from integrations.base import ConnectionTestResult, ServiceConnector
@@ -54,13 +52,13 @@ class DeepLConnector(ServiceConnector):
         limit = usage.get("character_limit", "?")
         return ConnectionTestResult(True, f"Connected — {used}/{limit} characters used this period.")
 
-    def translate(self, text: str, target_lang: str, source_lang: Optional[str] = None) -> str:
+    def translate(self, text: str, source_language: str, target_language: str) -> str:
         api_key = self.credentials.get("api_key", "")
         if not api_key:
             raise RuntimeError("DeepL API key is not configured.")
-        payload = {"text": [text], "target_lang": target_lang.upper()}
-        if source_lang:
-            payload["source_lang"] = source_lang.upper()
+        payload = {"text": [text], "target_lang": target_language.upper()}
+        if source_language:
+            payload["source_lang"] = source_language.upper()
         resp = requests.post(f"{_api_base(api_key)}/v2/translate", headers=self._headers(), json=payload, timeout=20)
         resp.raise_for_status()
         translations = resp.json().get("translations", [])

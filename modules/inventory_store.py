@@ -16,7 +16,7 @@ every row — see search_products().
 import json
 from typing import List, Optional, Tuple
 
-from modules import db
+from modules import db, product_translation_store
 from modules.models import Product
 
 # Search result tiers, in priority order (see search_products()).
@@ -152,10 +152,68 @@ def _search_columns(p: Product) -> tuple:
     )
 
 
-def save_product(product: Product) -> None:
+def _hydrate_primary_language_bulk(products: List[Product]) -> List[Product]:
+    """The single join point between `products` and `product_translations`:
+    overwrites each Product's name/product_description/condition_description/
+    defects/box_contents/missing_components with its `primary_language`
+    translation row (the actual source of truth for that content — see
+    modules/product_translation_store.py). One bulk query regardless of how
+    many products are passed in, so listing a whole company's inventory
+    never does a per-row lookup. A product with no translation row yet
+    (created before this feature, and not yet migrated) is left with
+    whatever the JSON blob already had, so nothing regresses for
+    unmigrated data."""
+    if not products:
+        return products
+    by_product = product_translation_store.list_translations_for_products([p.id for p in products])
+    for p in products:
+        t = by_product.get(p.id, {}).get(p.primary_language)
+        if t is not None:
+            p.name = t.title
+            p.product_description = t.description
+            p.condition_description = t.condition_description
+            p.defects = t.defects
+            p.box_contents = t.box_contents
+            p.missing_components = t.missing_components
+    return products
+
+
+def _hydrate_primary_language(product: Optional[Product]) -> Optional[Product]:
+    if product is None:
+        return None
+    return _hydrate_primary_language_bulk([product])[0]
+
+
+_LANGUAGE_CONTENT_KEYS = (
+    "name", "product_description", "condition_description", "defects", "box_contents", "missing_components",
+)
+
+
+def _persist_dict(product: Product) -> dict:
+    """`products.data` stays language-neutral — name/product_description/
+    condition_description/defects live only in `product_translations`
+    (see save_product()/_hydrate_primary_language_bulk() above), so they're
+    dropped here rather than persisted twice with two different sources of
+    truth."""
+    d = product.to_dict()
+    for key in _LANGUAGE_CONTENT_KEYS:
+        d.pop(key, None)
+    return d
+
+
+def save_product(product: Product, translated_by: str = "manual") -> None:
     """Saves to PostgreSQL — the single source of truth. No Excel mirror to
     keep in sync anymore; export a spreadsheet on demand instead (see
-    modules/export.py) if one is needed."""
+    modules/export.py) if one is needed.
+
+    `name`/`product_description`/`condition_description`/`defects` are
+    persisted into `product_translations` (language=`product.primary_language`),
+    not treated as authoritative in the `products` row itself — see
+    modules/product_translation_store.py. `translated_by` records who/what
+    produced this content; callers doing the very first AI generation pass
+    an explicit `"ai"`, everything else (product-card edits, bulk edit,
+    manifest import) defaults to `"manual"`.
+    """
     assert product.company_id, "Product.company_id must be set before saving — never save an orphaned record."
     conn = _connect()
     with conn:
@@ -172,9 +230,19 @@ def save_product(product: Product) -> None:
                    triage_status = EXCLUDED.triage_status, product_condition = EXCLUDED.product_condition,
                    location = EXCLUDED.location, status = EXCLUDED.status, data = EXCLUDED.data""",
             (product.id, product.company_id, product.created_at, *_search_columns(product),
-             json.dumps(product.to_dict())),
+             json.dumps(_persist_dict(product))),
         )
     conn.close()
+    product_translation_store.upsert_translation(product_translation_store.ProductTranslation(
+        product_id=product.id, company_id=product.company_id, language=product.primary_language,
+        title=product.name, description=product.product_description,
+        condition_description=product.condition_description, defects=product.defects,
+        box_contents=product.box_contents, missing_components=product.missing_components,
+        spec_summary=product.spec_summary, functional_checklist=product.functional_checklist,
+        product_condition_reasoning=product.product_condition_reasoning, match_notes=product.match_notes,
+        color=product.color,
+        translated_by=translated_by,
+    ))
 
 
 def save_products_bulk(products: List[Product]) -> None:
@@ -197,11 +265,24 @@ def save_products_bulk(products: List[Product]) -> None:
                    triage_status = EXCLUDED.triage_status, product_condition = EXCLUDED.product_condition,
                    location = EXCLUDED.location, status = EXCLUDED.status, data = EXCLUDED.data""",
             [
-                (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(p.to_dict()))
+                (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(_persist_dict(p)))
                 for p in products
             ],
         )
     conn.close()
+    product_translation_store.upsert_translations_bulk([
+        product_translation_store.ProductTranslation(
+            product_id=p.id, company_id=p.company_id, language=p.primary_language,
+            title=p.name, description=p.product_description,
+            condition_description=p.condition_description, defects=p.defects,
+            box_contents=p.box_contents, missing_components=p.missing_components,
+            spec_summary=p.spec_summary, functional_checklist=p.functional_checklist,
+            product_condition_reasoning=p.product_condition_reasoning, match_notes=p.match_notes,
+            color=p.color,
+            translated_by="manual",
+        )
+        for p in products
+    ])
 
 
 def delete_product(product_id: str, company_id: str) -> None:
@@ -209,6 +290,7 @@ def delete_product(product_id: str, company_id: str) -> None:
     with conn:
         conn.execute("DELETE FROM products WHERE id = ? AND company_id = ?", (product_id, company_id))
     conn.close()
+    product_translation_store.delete_translations_for_product(product_id)
 
 
 def list_products_by_manifest(manifest_import_id: str, company_id: str) -> List[Product]:
@@ -220,7 +302,7 @@ def list_products_by_manifest(manifest_import_id: str, company_id: str) -> List[
         (manifest_import_id, company_id),
     ).fetchall()
     conn.close()
-    return [Product.from_dict(json.loads(r[0])) for r in rows]
+    return _hydrate_primary_language_bulk([Product.from_dict(json.loads(r[0])) for r in rows])
 
 
 def delete_products_by_manifest(
@@ -246,6 +328,8 @@ def delete_products_by_manifest(
             "DELETE FROM products WHERE id = ?", [(p.id,) for p in to_delete]
         )
     conn.close()
+    for p in to_delete:
+        product_translation_store.delete_translations_for_product(p.id)
     return len(to_delete)
 
 
@@ -262,7 +346,7 @@ def list_products(company_id: str, status: Optional[str] = None) -> List[Product
             (company_id,),
         ).fetchall()
     conn.close()
-    return [Product.from_dict(json.loads(r[0])) for r in rows]
+    return _hydrate_primary_language_bulk([Product.from_dict(json.loads(r[0])) for r in rows])
 
 
 def list_skus(company_id: str) -> set:
@@ -282,7 +366,7 @@ def get_product(product_id: str, company_id: str) -> Optional[Product]:
     conn.close()
     if not row:
         return None
-    return Product.from_dict(json.loads(row[0]))
+    return _hydrate_primary_language(Product.from_dict(json.loads(row[0])))
 
 
 def get_product_by_sku(company_id: str, sku: str) -> Optional[Product]:
@@ -298,7 +382,7 @@ def get_product_by_sku(company_id: str, sku: str) -> Optional[Product]:
     conn.close()
     if not row:
         return None
-    return Product.from_dict(json.loads(row[0]))
+    return _hydrate_primary_language(Product.from_dict(json.loads(row[0])))
 
 
 def search_products(query: str, company_id: str) -> List[Tuple[Product, str]]:
@@ -352,6 +436,7 @@ def search_products(query: str, company_id: str) -> List[Tuple[Product, str]]:
     )
 
     conn.close()
+    _hydrate_primary_language_bulk([p for p, _tier in results])
     return results
 
 
@@ -450,7 +535,7 @@ def list_products_paginated(
     ).fetchall()
     conn.close()
 
-    products = [Product.from_dict(json.loads(r[0])) for r in rows]
+    products = _hydrate_primary_language_bulk([Product.from_dict(json.loads(r[0])) for r in rows])
     return products, total
 
 

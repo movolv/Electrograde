@@ -253,6 +253,16 @@ TRANSLATIONS: dict = {
     "new_item.writing_listing_copy": {"en": "Writing listing copy...", "lv": "Raksta sludinājuma tekstu..."},
     "new_item.description_generation_failed": {"en": "Description generation failed: {error}", "lv": "Apraksta ģenerēšana neizdevās: {error}"},
     "new_item.write_manually_caption": {"en": "Or write everything manually below.", "lv": "Vai raksti visu manuāli zemāk."},
+    "new_item.auto_translate_failed": {
+        "en": "Could not auto-translate into {language} — the English version was saved. "
+              "You can retry from the product's Translate action.",
+        "lv": "Neizdevās automātiski iztulkot uz {language} — saglabāta angļu valodas versija. "
+              "Var mēģināt vēlreiz, izmantojot produkta tulkošanas darbību.",
+    },
+    "new_item.connect_translation_provider_hint": {
+        "en": "{language} translation requires a connected translation provider. Go to Settings → Translation.",
+        "lv": "{language} tulkošanai nepieciešams pievienots tulkošanas pakalpojums. Dodies uz Iestatījumi → Tulkošana.",
+    },
     "new_item.listing_title": {"en": "Product Name (listing title)", "lv": "Produkta nosaukums (sludinājuma virsraksts)"},
     "new_item.general_overview": {"en": "Product Description (general overview)", "lv": "Produkta apraksts (vispārējs pārskats)"},
     "new_item.condition_scratches_details": {"en": "Additional Description (Condition & Scratches Details)", "lv": "Papildu apraksts (stāvoklis un skrāpējumu detaļas)"},
@@ -493,6 +503,55 @@ TRANSLATIONS: dict = {
     "product_list.no_name": {"en": "(no name)", "lv": "(bez nosaukuma)"},
     "product_list.triage_status": {"en": "Triage status", "lv": "Šķirošanas statuss"},
     "product_list.product_information": {"en": "Product Information", "lv": "Produkta informācija"},
+    "product_list.name_moved_caption": {
+        "en": "Product name moved below, next to the content-language selector.",
+        "lv": "Produkta nosaukums pārvietots zemāk, blakus valodas izvēlei.",
+    },
+    "product_list.content_language": {"en": "Content language", "lv": "Satura valoda"},
+    "product_list.translate_action": {"en": "🌐 Translate", "lv": "🌐 Tulkot"},
+    "product_list.manually_edited_translation": {
+        "en": "This translation was manually edited — re-translating won't overwrite it unless forced.",
+        "lv": "Šis tulkojums ir manuāli rediģēts — atkārtota tulkošana to nepārrakstīs, ja vien nav piespiedu režīms.",
+    },
+    "product_list.translate_dialog_title": {"en": "Translate product", "lv": "Tulkot produktu"},
+    "product_list.translate_heading": {"en": "Translate **{name}**", "lv": "Tulkot **{name}**"},
+    "product_list.translate_target_languages": {"en": "Target language(s)", "lv": "Mērķa valoda(-as)"},
+    "product_list.retranslate_suffix": {"en": "already translated", "lv": "jau iztulkots"},
+    "product_list.retranslate_force": {
+        "en": "Re-translate existing translations (including manually-edited ones)",
+        "lv": "Tulkot atkārtoti esošos tulkojumus (arī manuāli rediģētos)",
+    },
+    "product_list.translate_select_language": {"en": "Select at least one target language.", "lv": "Izvēlies vismaz vienu mērķa valodu."},
+    "product_list.translate_provider_not_connected": {
+        "en": "Connect this translation provider in Settings → Translation first.",
+        "lv": "Vispirms pievieno šo tulkošanas pakalpojumu sadaļā Iestatījumi → Tulkošana.",
+    },
+    "product_list.translate_failed": {"en": "Translation to {language} failed: {error}", "lv": "Tulkošana uz {language} neizdevās: {error}"},
+    "product_list.translate_success": {"en": "Translated {count} language(s).", "lv": "Iztulkots {count} valoda(-s)."},
+    "product_list.bulk_translate_title": {"en": "Translate products", "lv": "Tulkot produktus"},
+    "product_list.bulk_translate_heading": {"en": "Translate {count} product(s)", "lv": "Tulkot {count} produktu(-us)"},
+    "product_list.bulk_translate_too_many": {
+        "en": "Select at most {max} products for bulk translate at once.",
+        "lv": "Izvēlies ne vairāk kā {max} produktus vienlaicīgai tulkošanai.",
+    },
+    "product_list.bulk_translate_preview_summary": {
+        "en": "{create} to create, {update} to update, {skip} skipped (manually edited).",
+        "lv": "{create} jāizveido, {update} jāatjaunina, {skip} izlaisti (manuāli rediģēti).",
+    },
+    "product_list.bulk_translate_nothing_to_do": {
+        "en": "Nothing to translate — every selected product/language pair is either the primary "
+              "language or already manually translated.",
+        "lv": "Nav ko tulkot — katrs izvēlētais produkta/valodas pāris ir vai nu oriģinālvaloda, "
+              "vai jau manuāli iztulkots.",
+    },
+    "product_list.bulk_translate_success": {"en": "Translated {count} row(s).", "lv": "Iztulkots(-as) {count} rinda(-s)."},
+    "product_list.bulk_translate_partial_success": {
+        "en": "Translated {ok} row(s); {fail} failed.", "lv": "Iztulkots(-as) {ok} rinda(-s); {fail} neizdevās.",
+    },
+    "product_list.translate_skipped_manual": {
+        "en": "{count} translation(s) skipped — already manually edited.",
+        "lv": "{count} tulkojums(-i) izlaisti — jau manuāli rediģēti.",
+    },
     "product_list.pricing": {"en": "Pricing", "lv": "Cenu noteikšana"},
     "product_list.price_eur": {"en": "Price (€)", "lv": "Cena (€)"},
     "product_list.additional_description": {"en": "Additional Description", "lv": "Papildu apraksts"},
@@ -698,6 +757,31 @@ TRANSLATIONS: dict = {
 
     # ---- Settings / Integrations ----
     "settings.integrations_tab": {"en": "🔌 Integrations", "lv": "🔌 Integrācijas"},
+    "settings.translation_tab": {"en": "🌐 Translation", "lv": "🌐 Tulkošana"},
+    "settings.translation_tab_caption": {
+        "en": "Controls which language new products are shown/translated into by default, "
+              "and which service performs the translation. Marketplace exports can override "
+              "this per integration — see that integration's settings.",
+        "lv": "Nosaka, kādā valodā jauni produkti pēc noklusējuma tiek rādīti/tulkoti, un kurš "
+              "pakalpojums veic tulkošanu. Katrai tirdzniecības vietas integrācijai to var "
+              "pārrakstīt atsevišķi — skatiet attiecīgās integrācijas iestatījumus.",
+    },
+    "settings.default_product_language": {"en": "Default product language", "lv": "Noklusējuma produktu valoda"},
+    "settings.default_product_language_help": {
+        "en": "New products are auto-translated into this language right after AI generation.",
+        "lv": "Jauni produkti tiek automātiski iztulkoti šajā valodā uzreiz pēc AI ģenerēšanas.",
+    },
+    "settings.translation_provider": {"en": "Translation provider", "lv": "Tulkošanas pakalpojums"},
+    "settings.translation_settings_saved": {"en": "Translation settings saved.", "lv": "Tulkošanas iestatījumi saglabāti."},
+    "settings.translation_provider_not_connected": {
+        "en": "{provider} is not connected yet — new products will stay in their original "
+              "language until you connect it below.",
+        "lv": "{provider} vēl nav pievienots — jauni produkti paliks oriģinālvalodā, kamēr "
+              "to nepievienosiet zemāk.",
+    },
+    "settings.translation_provider_connected": {
+        "en": "Translation provider connected.", "lv": "Tulkošanas pakalpojums pievienots.",
+    },
     "settings.health_connected": {"en": "Connected", "lv": "Savienots"},
     "settings.health_attention": {"en": "Needs attention", "lv": "Nepieciešama uzmanība"},
     "settings.health_failed": {"en": "Connection failed", "lv": "Savienojums neizdevās"},
@@ -755,6 +839,14 @@ TRANSLATIONS: dict = {
     "settings.price_group_id": {"en": "Price group ID (optional)", "lv": "Cenu grupas ID (nav obligāts)"},
     "settings.warehouse_id": {"en": "Warehouse ID (optional)", "lv": "Noliktavas ID (nav obligāts)"},
     "settings.tax_rate": {"en": "Tax rate % (optional)", "lv": "Nodokļa likme % (nav obligāts)"},
+    "settings.export_language": {"en": "Export language", "lv": "Eksporta valoda"},
+    "settings.export_language_use_default": {"en": "Use company default", "lv": "Izmantot uzņēmuma noklusējumu"},
+    "settings.export_language_help": {
+        "en": "Overrides the company's default product language for this integration only "
+              "— leave as \"Use company default\" unless this channel needs a different language.",
+        "lv": "Pārraksta uzņēmuma noklusējuma produktu valodu tikai šai integrācijai — atstāj "
+              "\"Izmantot uzņēmuma noklusējumu\", ja vien šim kanālam nav nepieciešama cita valoda.",
+    },
     "settings.save_test_connection": {"en": "💾 Save & test connection", "lv": "💾 Saglabāt un pārbaudīt savienojumu"},
     "settings.api_token_required": {"en": "API token is required.", "lv": "API atslēga ir obligāta."},
     "settings.inventory_category_required": {"en": "Inventory ID and Category ID are required.", "lv": "Inventāra ID un kategorijas ID ir obligāti."},

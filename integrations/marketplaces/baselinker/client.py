@@ -27,7 +27,7 @@ import requests
 
 from integrations.base import ConnectionTestResult, ConnectorActionResult, ImportedProductData, MarketplaceConnector
 from integrations.marketplaces.baselinker import import_products, mapper, order_mapper, sync
-from modules import sync_rules_store
+from modules import company_store, product_translation_store, sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
 _MIN_CALL_INTERVAL = 60.0 / 90  # stay safely under the 100 req/min limit
@@ -187,11 +187,17 @@ class BaselinkerConnector(MarketplaceConnector):
         instead."""
         config = self._config()
         fields_send = self._resolve_fields_send()
+        ec = self._resolve_export_content(product)
         payload = mapper.build_payload(
             product, config, existing_listing_id=None, fields_send=fields_send, include_images=False,
+            title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
+            language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
+            primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
+                color=ec["color"],
         )
         wants_images = fields_send is None or "image_paths" in fields_send
         payload["_preview_image_count"] = len(product.image_paths) if wants_images and product.image_paths else 0
+        payload["_language_fallback_warning"] = ec["warning"]
         return payload
 
     def _config(self) -> dict:
@@ -203,6 +209,77 @@ class BaselinkerConnector(MarketplaceConnector):
             "price_group_id": settings.get("price_group_id") or None,
             "warehouse_id": settings.get("warehouse_id") or None,
             "tax_rate": float(settings.get("tax_rate") or 23),
+        }
+
+    def _resolve_export_content(self, product) -> dict:
+        """Resolves which language to export in — this integration's own
+        `export_language` setting if set, else the company's
+        `default_product_language` — and fetches that
+        modules/product_translation_store row. Falls back to the product's
+        primary_language (with a warning) if no translation exists yet for
+        the requested language, rather than ever silently mislabeling
+        English text as another language.
+
+        Also fetches the product's primary-language content whenever it
+        differs from the resolved export language — BaseLinker requires a
+        name under its own account default catalog language regardless of
+        what else is sent (see mapper.build_payload()'s `primary_language`
+        params), and primary_language is the one language guaranteed to
+        exist for every product.
+
+        This is the ONLY place in the BaseLinker connector that decides a
+        language or reads a translation — mapper.build_payload() just
+        places the strings it's given; it never calls a translation
+        provider or resolves a language itself.
+        """
+        export_language = self.settings.get("export_language") or ""
+        if not export_language:
+            company = company_store.get_company(self.company_id)
+            export_language = company.default_product_language if company else product.primary_language
+
+        translation = product_translation_store.get_translation(product.id, export_language)
+        warning = None
+        if translation is None and export_language != product.primary_language:
+            warning = (
+                f"No {export_language!r} translation exists for this product yet — "
+                f"exported in {product.primary_language!r} instead. "
+                f"Use the product's Translate action to add one."
+            )
+            export_language = product.primary_language
+            translation = product_translation_store.get_translation(product.id, export_language)
+
+        if translation is None:
+            # No translation row at all (shouldn't happen post-migration) —
+            # fall back to whatever is directly on the Product rather than
+            # exporting nothing.
+            title, description, condition_description = product.name, product.product_description, product.condition_description
+            color = product.color
+        else:
+            title, description, condition_description = translation.title, translation.description, translation.condition_description
+            # color is a deliberate exception to "parameter values are never
+            # translated" (confirmed with the user) — falls back to the
+            # untranslated product.color if this translation predates the
+            # color field being added, rather than exporting a blank color.
+            color = translation.color or product.color
+
+        primary_language, primary_title, primary_description, primary_condition_description = "", "", "", ""
+        if export_language != product.primary_language:
+            primary = product_translation_store.get_translation(product.id, product.primary_language)
+            primary_language = product.primary_language
+            if primary is not None:
+                primary_title, primary_description, primary_condition_description = (
+                    primary.title, primary.description, primary.condition_description
+                )
+            else:
+                primary_title, primary_description, primary_condition_description = (
+                    product.name, product.product_description, product.condition_description
+                )
+
+        return {
+            "title": title, "description": description, "condition_description": condition_description,
+            "language": export_language, "warning": warning, "color": color,
+            "primary_language": primary_language, "primary_title": primary_title,
+            "primary_description": primary_description, "primary_condition_description": primary_condition_description,
         }
 
     def connect(self) -> ConnectionTestResult:
@@ -261,9 +338,14 @@ class BaselinkerConnector(MarketplaceConnector):
         if found_id:
             return self.update_product(product, found_id)
 
+        ec = self._resolve_export_content(product)
         try:
             payload = mapper.build_payload(
                 product, config, existing_listing_id=None, fields_send=self._resolve_fields_send(),
+                title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
+                language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
+                primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
+                color=ec["color"],
             )
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
@@ -271,14 +353,20 @@ class BaselinkerConnector(MarketplaceConnector):
 
         return ConnectorActionResult(
             success=True, external_id=str(data.get("product_id", "")),
-            message="Created.", data={"warnings": data.get("warnings", {}) or {}},
+            message="Created." + (f" Warning: {ec['warning']}" if ec["warning"] else ""),
+            data={"warnings": data.get("warnings", {}) or {}},
         )
 
     def update_product(self, product, external_id: str) -> ConnectorActionResult:
         config = self._config()
+        ec = self._resolve_export_content(product)
         try:
             payload = mapper.build_payload(
                 product, config, existing_listing_id=external_id, fields_send=self._resolve_fields_send(),
+                title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
+                language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
+                primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
+                color=ec["color"],
             )
             if "text_fields" in payload:
                 payload["text_fields"] = self._merge_text_fields(external_id, payload["text_fields"], config)
@@ -288,7 +376,8 @@ class BaselinkerConnector(MarketplaceConnector):
 
         return ConnectorActionResult(
             success=True, external_id=str(data.get("product_id", external_id)),
-            message="Updated.", data={"warnings": data.get("warnings", {}) or {}},
+            message="Updated." + (f" Warning: {ec['warning']}" if ec["warning"] else ""),
+            data={"warnings": data.get("warnings", {}) or {}},
         )
 
     def _merge_text_fields(self, external_id: str, new_fields: dict, config: dict) -> dict:
