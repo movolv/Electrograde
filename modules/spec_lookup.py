@@ -24,6 +24,7 @@ class SpecResult:
     brand: str = ""
     model: str = ""
     category: str = ""
+    power: str = ""  # e.g. "1200W" — empty if not found/not applicable
     spec_summary: str = ""
     box_contents: List[str] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
@@ -132,6 +133,8 @@ def lookup(
         "Respond with STRICT JSON only, no markdown fences, matching this "
         "schema exactly:\n"
         '{"product_name": str, "brand": str, "model": str, "category": str, '
+        '"power": str (e.g. "1200W" — the product\'s rated power/wattage, '
+        'empty string if not found or not applicable to this product type), '
         '"spec_summary": str (2-4 sentences, plain English, key specs only), '
         '"box_contents": [str, ...] (standard included accessories/components)}\n'
         "If information is not present in the text, use your best general "
@@ -155,6 +158,7 @@ def lookup(
         product_name=data.get("product_name", ""),
         brand=data.get("brand", ""),
         model=data.get("model", ""),
+        power=data.get("power", ""),
         category=data.get("category", ""),
         spec_summary=data.get("spec_summary", ""),
         box_contents=list(data.get("box_contents", []) or []),

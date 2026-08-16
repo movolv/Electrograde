@@ -37,6 +37,7 @@ class LookupCacheEntry:
     model: str = ""
     product_name: str = ""
     category: str = ""
+    power: str = ""
     spec_summary: str = ""
     box_contents: List[str] = field(default_factory=list)
     ean_confidence: str = ""
@@ -79,6 +80,7 @@ def _connect():
             model TEXT,
             product_name TEXT,
             category TEXT,
+            power TEXT,
             spec_summary TEXT,
             box_contents TEXT,
             ean_confidence TEXT,
@@ -89,6 +91,9 @@ def _connect():
         )
         """
     )
+    # Migrate older DBs (this table predates the `power` field).
+    if "power" not in db.table_columns(conn, "lookup_cache"):
+        conn.execute("ALTER TABLE lookup_cache ADD COLUMN power TEXT")
     conn.commit()
     return conn
 
@@ -104,7 +109,7 @@ def get_best_match(ean: str = "", asin: str = "", brand: str = "", model: str = 
     for key in keys:
         row = conn.execute(
             "SELECT cache_key, ean, asin, brand, model, product_name, category, "
-            "spec_summary, box_contents, ean_confidence, asin_confidence, sources, "
+            "power, spec_summary, box_contents, ean_confidence, asin_confidence, sources, "
             "created_at, updated_at FROM lookup_cache WHERE cache_key = ?",
             (key,),
         ).fetchone()
@@ -116,11 +121,11 @@ def get_best_match(ean: str = "", asin: str = "", brand: str = "", model: str = 
     return LookupCacheEntry(
         cache_key=row[0], ean=row[1] or "", asin=row[2] or "", brand=row[3] or "",
         model=row[4] or "", product_name=row[5] or "", category=row[6] or "",
-        spec_summary=row[7] or "",
-        box_contents=json.loads(row[8]) if row[8] else [],
-        ean_confidence=row[9] or "", asin_confidence=row[10] or "",
-        sources=json.loads(row[11]) if row[11] else [],
-        created_at=row[12] or 0.0, updated_at=row[13] or 0.0,
+        power=row[7] or "", spec_summary=row[8] or "",
+        box_contents=json.loads(row[9]) if row[9] else [],
+        ean_confidence=row[10] or "", asin_confidence=row[11] or "",
+        sources=json.loads(row[12]) if row[12] else [],
+        created_at=row[13] or 0.0, updated_at=row[14] or 0.0,
     )
 
 
@@ -144,21 +149,22 @@ def upsert(entry: LookupCacheEntry) -> None:
         for key in keys:
             conn.execute(
                 """INSERT INTO lookup_cache
-                   (cache_key, ean, asin, brand, model, product_name, category,
+                   (cache_key, ean, asin, brand, model, product_name, category, power,
                     spec_summary, box_contents, ean_confidence, asin_confidence,
                     sources, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (cache_key) DO UPDATE SET
                        ean = EXCLUDED.ean, asin = EXCLUDED.asin, brand = EXCLUDED.brand,
                        model = EXCLUDED.model, product_name = EXCLUDED.product_name,
-                       category = EXCLUDED.category, spec_summary = EXCLUDED.spec_summary,
+                       category = EXCLUDED.category, power = EXCLUDED.power,
+                       spec_summary = EXCLUDED.spec_summary,
                        box_contents = EXCLUDED.box_contents,
                        ean_confidence = EXCLUDED.ean_confidence,
                        asin_confidence = EXCLUDED.asin_confidence,
                        sources = EXCLUDED.sources, updated_at = EXCLUDED.updated_at""",
                 (
                     key, entry.ean, entry.asin, entry.brand, entry.model,
-                    entry.product_name, entry.category, entry.spec_summary,
+                    entry.product_name, entry.category, entry.power, entry.spec_summary,
                     json.dumps(entry.box_contents), entry.ean_confidence,
                     entry.asin_confidence, json.dumps(entry.sources),
                     entry.created_at or now, now,

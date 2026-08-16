@@ -151,19 +151,22 @@ class BaselinkerConnector(MarketplaceConnector):
     # Fields whose Synchronization-tab checkbox actually gates something in
     # mapper.build_payload() today. "sku" is deliberately absent — it's
     # always sent regardless of toggle state (see mapper.py), so its
-    # checkbox wouldn't do anything; "brand"/"model"/"category"/
-    # "product_condition"/"defects" have no payload destination yet
-    # (category stays the single global category_id setting;
-    # product_condition/defects mapping-application is future work) — see
+    # checkbox wouldn't do anything. "brand"/"model"/"product_condition"/
+    # "color"/"power" land in text_fields["features|en"] (BaseLinker's
+    # "Information -> Parameters" section); "category"/"defects" still have
+    # no payload destination (category stays the single global category_id
+    # setting; defects mapping-application is future work) — see
     # integrations/field_registry.py for the full field list these are a
     # subset of.
     IMPLEMENTED_SYNC_FIELDS = {
         "name", "product_description", "condition_description",
         "image_paths", "price", "quantity", "barcode",
+        "brand", "model", "product_condition", "color", "power",
     }
     DEFAULT_SYNC_FIELDS = [
         "name", "product_description", "condition_description",
         "image_paths", "price", "quantity", "sku", "barcode",
+        "brand", "model", "product_condition", "color", "power",
     ]
 
     def _resolve_fields_send(self) -> Optional[Set[str]]:
@@ -277,6 +280,8 @@ class BaselinkerConnector(MarketplaceConnector):
             payload = mapper.build_payload(
                 product, config, existing_listing_id=external_id, fields_send=self._resolve_fields_send(),
             )
+            if "text_fields" in payload:
+                payload["text_fields"] = self._merge_text_fields(external_id, payload["text_fields"], config)
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, external_id=external_id, message=str(e))
@@ -285,6 +290,27 @@ class BaselinkerConnector(MarketplaceConnector):
             success=True, external_id=str(data.get("product_id", external_id)),
             message="Updated.", data={"warnings": data.get("warnings", {}) or {}},
         )
+
+    def _merge_text_fields(self, external_id: str, new_fields: dict, config: dict) -> dict:
+        """BaseLinker's addInventoryProduct REPLACES text_fields wholesale on
+        write, it does not merge — confirmed by this repo's own one-off fix
+        scripts (scripts/prune_baselinker_lv_parameters.py etc.), which all
+        fetch-full/patch-one-key/send-full-back for exactly this reason.
+        `new_fields` here only ever contains the handful of keys
+        ElectroGrader itself controls (name/description/description_extra1/
+        features|en — see mapper.build_payload()), so a shallow overlay onto
+        the product's CURRENT live text_fields can never touch name|lv,
+        features|pl, description|es, etc. — every other language/key an
+        earlier system (or a human, directly in BaseLinker) set stays
+        exactly as it was. On any fetch failure, falls back to sending
+        new_fields as-is (today's pre-merge behavior) rather than blocking
+        the whole update."""
+        try:
+            existing = get_product_data([external_id], config)
+            current = (existing.get(str(external_id)) or {}).get("text_fields") or {}
+        except (BaseLinkerAPIError, requests.RequestException):
+            return new_fields
+        return {**current, **new_fields}
 
     def delete_product(self, external_id: str) -> ConnectorActionResult:
         config = self._config()

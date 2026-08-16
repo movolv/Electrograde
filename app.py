@@ -691,6 +691,7 @@ def _cache_entry_from(snapshot: dict, sr: "spec_lookup.SpecResult", ident: "iden
         model=sr.model or snapshot["model"],
         product_name=sr.product_name or snapshot["product_name"],
         category=sr.category or snapshot["category"],
+        power=sr.power,
         spec_summary=sr.spec_summary,
         box_contents=sr.box_contents,
         ean_confidence="high" if ident.ean else "",
@@ -702,7 +703,7 @@ def _cache_entry_from(snapshot: dict, sr: "spec_lookup.SpecResult", ident: "iden
 def _spec_result_from_cache(cached: lookup_cache_store.LookupCacheEntry) -> "spec_lookup.SpecResult":
     return spec_lookup.SpecResult(
         product_name=cached.product_name, brand=cached.brand, model=cached.model,
-        category=cached.category, spec_summary=cached.spec_summary,
+        category=cached.category, power=cached.power, spec_summary=cached.spec_summary,
         box_contents=cached.box_contents, sources=["cache"],
     )
 
@@ -797,6 +798,8 @@ def _resolve_lookup_enrichment():
                 target.model = sr.model
             if not target.category:
                 target.category = sr.category
+            if not target.power:
+                target.power = sr.power
             if not target.spec_summary:
                 target.spec_summary = sr.spec_summary
             if not target.box_contents:
@@ -1636,6 +1639,7 @@ if page == "🆕 New Item":
         brand_val = sr.brand if sr else product.brand
         model_val = sr.model if sr else product.model
         category_val = sr.category if sr else product.category
+        power_val = sr.power if sr else product.power
         spec_val = sr.spec_summary if sr else product.spec_summary
         box_val = "\n".join(sr.box_contents) if sr and sr.box_contents else "\n".join(product.box_contents)
 
@@ -1645,7 +1649,11 @@ if page == "🆕 New Item":
             brand_in = st.text_input("Brand", value=brand_val)
         with cols[1]:
             model_in = st.text_input("Model", value=model_val)
-        category_in = st.text_input("Category", value=category_val or "", placeholder="e.g. Smartphone, Laptop, Headphones")
+        cat_power_cols = st.columns(2)
+        with cat_power_cols[0]:
+            category_in = st.text_input("Category", value=category_val or "", placeholder="e.g. Smartphone, Laptop, Headphones")
+        with cat_power_cols[1]:
+            power_in = st.text_input("Power", value=power_val or "", placeholder="e.g. 1200W")
         spec_in = st.text_area("Spec summary", value=spec_val, height=100)
         box_in = st.text_area("Standard box contents (one per line)", value=box_val, height=100)
 
@@ -1687,6 +1695,7 @@ if page == "🆕 New Item":
                 product.brand = brand_in.strip()
                 product.model = model_in.strip()
                 product.category = category_in.strip()
+                product.power = power_in.strip()
                 product.spec_summary = spec_in.strip()
                 product.box_contents = [l.strip() for l in box_in.splitlines() if l.strip()]
 
@@ -2699,6 +2708,7 @@ elif page == "🗂️ Product List":
         with pi2:
             model_in = st.text_input("Model", value=p.model, key=f"rex_model_{p.id}")
             category_in = st.text_input("Category", value=p.category, key=f"rex_category_{p.id}")
+            power_in = st.text_input("Power", value=p.power, key=f"rex_power_{p.id}")
         product_condition_in = st.selectbox(
             "Product Condition", CONDITION_OPTIONS,
             index=CONDITION_OPTIONS.index(p.product_condition) if p.product_condition in CONDITION_OPTIONS else 1,
@@ -2859,6 +2869,7 @@ elif page == "🗂️ Product List":
                 "brand": (p.brand, brand_in.strip()),
                 "model": (p.model, model_in.strip()),
                 "category": (p.category, category_in.strip()),
+                "power": (p.power, power_in.strip()),
                 "barcode": (current_barcode, barcode_in.strip()),
                 "product_condition": (p.product_condition, product_condition_in),
                 "price": (p.price, float(price_in)),
@@ -2870,6 +2881,7 @@ elif page == "🗂️ Product List":
             p.brand = brand_in.strip()
             p.model = model_in.strip()
             p.category = category_in.strip()
+            p.power = power_in.strip()
             if barcode_in.strip() != current_barcode:
                 p.ean = barcode_in.strip()
                 p.ean_source = "manual"

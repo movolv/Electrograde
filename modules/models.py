@@ -65,6 +65,7 @@ class Product:
     model: str = ""
     name: str = ""
     category: str = ""
+    power: str = ""  # e.g. "1200W" — product's power/wattage rating
     condition_type: str = ""  # "New" | "Used"
     color: str = ""  # e.g. "Black" — determined from photos by vision_grading.grade_item()
     product_condition: str = ""  # "A" | "B" | "C" | "D" — quality grade (distinct from condition_type above)

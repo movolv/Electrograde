@@ -11,6 +11,17 @@ from PIL import Image
 
 MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024  # BaseLinker's documented cap
 
+# Every text_fields key this module writes (name/description/
+# description_extra1/features) is suffixed with this language — deliberately
+# NEVER the bare/unsuffixed key, which BaseLinker resolves to the
+# inventory's own "default catalog language" (this account's is German —
+# confirmed via getInventories — so a bare "name"/"description" silently
+# landed under the German tab regardless of what language the text actually
+# was, while features already used the explicit "|en" suffix; that
+# inconsistency is exactly what this constant fixes). Single change point if
+# a future company needs a different content language.
+CONTENT_LANGUAGE = "en"
+
 
 def encode_image(path: str, max_base64_bytes: int = MAX_IMAGE_BASE64_BYTES) -> str:
     """Reads an image file and returns BaseLinker's expected inline-image
@@ -48,8 +59,10 @@ def build_payload(
     here. `sku` is deliberately never gated — it's a structural product
     identifier (used for BaseLinker's own SKU-fallback matching and our
     de-dup logic), not optional content, so it's always sent regardless of
-    `fields_send`. Fields with no destination in this payload at all yet
-    (brand/model/category/product_condition/defects) have nothing to gate — see
+    `fields_send`. brand/model/product_condition/color/power all land in
+    `text_fields["features|en"]` (BaseLinker's "Information -> Parameters"
+    section) — see the `features` dict built below. category/defects still
+    have no destination here — nothing to gate for those yet, see
     BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS.
     """
     def _wanted(field_key: str) -> bool:
@@ -64,18 +77,45 @@ def build_payload(
 
     text_fields = {}
     if _wanted("name"):
-        text_fields["name"] = product.name or product.model_number or product.sku
+        text_fields[f"name|{CONTENT_LANGUAGE}"] = product.name or product.model_number or product.sku
     if _wanted("product_description"):
-        text_fields["description"] = product.product_description or ""
+        text_fields[f"description|{CONTENT_LANGUAGE}"] = product.product_description or ""
     if _wanted("condition_description") and product.condition_description:
-        text_fields["description_extra1"] = f"Condition & Scratches Details: {product.condition_description}"
-    if text_fields:
-        payload["text_fields"] = text_fields
+        text_fields[f"description_extra1|{CONTENT_LANGUAGE}"] = (
+            f"Condition & Scratches Details: {product.condition_description}"
+        )
 
     if existing_listing_id:
         payload["product_id"] = int(existing_listing_id)
 
     ean = product.ean or product.manifest_barcode or product.scanned_barcode
+
+    # BaseLinker's "Information -> Parameters" section, same CONTENT_LANGUAGE
+    # as name/description above. ElectroGrader is the source of truth for
+    # these six (see integrations/field_registry.py's SYNC_OWNERSHIP_FIELDS),
+    # so the whole dict is rebuilt fresh every call rather than patched —
+    # BaselinkerConnector.update_product()'s _merge_text_fields() is what
+    # keeps this from clobbering the product's OTHER language keys
+    # (features|lv, name|fr, etc.) that live outside ElectroGrader's control.
+    features = {}
+    if _wanted("brand") and product.brand:
+        features["Brand"] = product.brand
+    if _wanted("model") and product.model:
+        features["Model"] = product.model
+    if _wanted("product_condition") and product.product_condition:
+        features["Condition"] = product.product_condition
+    if _wanted("color") and product.color:
+        features["Color"] = product.color
+    if _wanted("power") and product.power:
+        features["Power"] = product.power
+    if _wanted("barcode") and ean:
+        features["EAN"] = ean
+    if features:
+        text_fields[f"features|{CONTENT_LANGUAGE}"] = features
+
+    if text_fields:
+        payload["text_fields"] = text_fields
+
     if _wanted("barcode") and ean:
         payload["ean"] = ean
 
