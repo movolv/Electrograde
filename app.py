@@ -236,12 +236,7 @@ def _save_imported_photo(product, image_url: str) -> None:
         return
     item_dir = UPLOAD_DIR / sku_folder_name(product.sku, product.id)
     item_dir.mkdir(parents=True, exist_ok=True)
-    existing_nums = [
-        int(m.group(1)) for f in item_dir.glob("photo_*.jpg")
-        if (m := re.match(r"photo_(\d+)\.jpg$", f.name))
-    ]
-    next_num = (max(existing_nums) + 1) if existing_nums else 1
-    fp = item_dir / f"photo_{next_num}.jpg"
+    fp = item_dir / seo_photo_filename(product, _next_photo_index(item_dir))
     fp.write_bytes(norm)
     product.image_paths = product.image_paths + [str(fp)]
     inventory_store.save_product(product)
@@ -280,6 +275,7 @@ def _render_import_progress(company_id: str, connector_name: str) -> None:
 
 
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
+_SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 # Below this, a manifest-vs-photo match is flagged to the user as suspect.
 MATCH_CONFIDENCE_WARNING_THRESHOLD = 60
@@ -1045,6 +1041,49 @@ def sku_folder_name(sku: str, product_id: str) -> str:
     """
     safe = _UNSAFE_FOLDER_CHARS.sub("-", sku.strip()).strip("-.")
     return safe or product_id
+
+
+def _slugify(text: str) -> str:
+    """Lowercase, hyphen-separated, letters/digits only — any run of
+    spaces/punctuation/other characters collapses to a single hyphen, and
+    leading/trailing hyphens are stripped. Used for SEO-friendly image
+    filenames (seo_photo_filename() below), not the SKU folder name above
+    (which keeps case and more punctuation)."""
+    return _SLUG_NON_ALNUM.sub("-", (text or "").strip().lower()).strip("-")
+
+
+def seo_photo_filename(product: Product, index: int) -> str:
+    """brand-model-N.jpg — falls back to model-N / brand-N / sku-N if
+    brand and/or model aren't known. Every real call site (Save Item,
+    catalog import, the product card's Add Photos) only ever writes a
+    photo to disk once brand/model/SKU are already set (Save Item is the
+    end of the wizard, after the identification steps; the other two act
+    on an already-created product) — so this only actually falls back to
+    the sku-N form in the rare case a product genuinely has no brand or
+    model. Generated once, at write time, and never changed afterward
+    even if brand/model are edited later — a filename is a point-in-time
+    identity snapshot, not a live view; see the three write sites in this
+    file (search `seo_photo_filename(`) for where it's called."""
+    brand_slug = _slugify(product.brand)
+    model_slug = _slugify(product.model)
+    if brand_slug and model_slug:
+        base = f"{brand_slug}-{model_slug}"
+    elif model_slug:
+        base = model_slug
+    elif brand_slug:
+        base = brand_slug
+    else:
+        base = _slugify(product.sku) or product.id
+    return f"{base}-{index}.jpg"
+
+
+def _next_photo_index(item_dir: Path) -> int:
+    """Existing photo count + 1. Every file in a product's photo folder is
+    one of its own photos (sku_folder_name() gives each product its own
+    dedicated folder), so counting files is enough — no need to parse
+    numbers back out of filenames the way the old `photo_N.jpg` scheme
+    required."""
+    return len(list(item_dir.glob("*.jpg"))) + 1
 
 
 st.set_page_config(
@@ -2268,8 +2307,8 @@ if page == PAGE_NEW_ITEM:
                 item_dir = UPLOAD_DIR / sku_folder_name(product.sku, product.id)
                 item_dir.mkdir(parents=True, exist_ok=True)
                 saved_paths = []
-                for i, img_bytes in enumerate(st.session_state.captured_photos):
-                    fp = item_dir / f"photo_{i+1}.jpg"
+                for i, img_bytes in enumerate(st.session_state.captured_photos, start=1):
+                    fp = item_dir / seo_photo_filename(product, i)
                     fp.write_bytes(img_bytes)
                     saved_paths.append(str(fp))
                 product.image_paths = saved_paths
@@ -3294,15 +3333,11 @@ elif page == PAGE_PRODUCT_LIST:
                             st.warning(T("product_list.only_added_photos", remaining=remaining_slots, max=REVIEW_CARD_MAX_PHOTOS))
                         item_dir = UPLOAD_DIR / sku_folder_name(p.sku, p.id)
                         item_dir.mkdir(parents=True, exist_ok=True)
-                        existing_nums = [
-                            int(m.group(1)) for f in item_dir.glob("photo_*.jpg")
-                            if (m := re.match(r"photo_(\d+)\.jpg$", f.name))
-                        ]
-                        next_num = (max(existing_nums) + 1) if existing_nums else 1
+                        next_index = _next_photo_index(item_dir)
                         added_paths = []
                         for j, uf in enumerate(to_add):
                             norm = _normalize_captured_photo(uf.read())
-                            fp = item_dir / f"photo_{next_num + j}.jpg"
+                            fp = item_dir / seo_photo_filename(p, next_index + j)
                             fp.write_bytes(norm)
                             added_paths.append(str(fp))
                         p.image_paths = p.image_paths + added_paths
