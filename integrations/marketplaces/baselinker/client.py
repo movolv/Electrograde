@@ -137,6 +137,49 @@ def get_order_statuses(config: dict) -> dict:
     return {s["id"]: (s.get("name_for_customer") or s.get("name", "")) for s in (data.get("statuses") or [])}
 
 
+# ---- Settings-page lookups ---------------------------------------------
+# Used only by app.py's Settings -> Integrations BaseLinker form to let a
+# company pick inventory/category/price-group/warehouse by name instead of
+# typing a raw BaseLinker-internal ID — see PHASE plan "token -> fetch ->
+# pick". Every function here takes a raw token directly (not a `config`
+# dict) since these all run BEFORE inventory_id/category_id are known —
+# that's the whole point. Errors (bad token, network) propagate as
+# BaseLinkerAPIError/requests.RequestException; the Settings page catches
+# and displays them rather than these functions swallowing anything.
+
+def list_inventories(token: str) -> list:
+    """Real getInventories call. Each returned dict also carries
+    `price_groups`/`warehouses` (lists of IDs valid for that inventory) so
+    the Settings page can locally filter list_price_groups()/
+    list_warehouses()'s global results down to what's relevant, without a
+    second round-trip per inventory."""
+    data = _call("getInventories", {}, token)
+    return data.get("inventories", []) or []
+
+
+def list_price_groups(token: str) -> list:
+    """Real getInventoryPriceGroups call — global (not inventory-scoped);
+    the Settings page filters by the chosen inventory's own price_groups
+    list from list_inventories() above."""
+    data = _call("getInventoryPriceGroups", {}, token)
+    return data.get("price_groups", []) or []
+
+
+def list_warehouses(token: str) -> list:
+    """Real getInventoryWarehouses call — global (not inventory-scoped);
+    filtered the same way as list_price_groups() above."""
+    data = _call("getInventoryWarehouses", {}, token)
+    return data.get("warehouses", []) or []
+
+
+def list_categories(token: str, inventory_id: int) -> list:
+    """Real getInventoryCategories call, scoped to one inventory. Each
+    category carries `parent_id` (0 = root) so the Settings page can render
+    a breadcrumb-style hierarchy instead of a flat, ambiguous ID list."""
+    data = _call("getInventoryCategories", {"inventory_id": int(inventory_id)}, token)
+    return data.get("categories", []) or []
+
+
 class BaselinkerConnector(MarketplaceConnector):
     integration_type = "baselinker"
 

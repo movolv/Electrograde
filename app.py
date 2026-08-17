@@ -62,6 +62,7 @@ from modules import (
 from integrations import field_registry, scheduler as sync_scheduler
 from integrations.base import ConnectorActionResult
 from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
+from integrations.marketplaces.baselinker import client as baselinker_client
 from sync import catalog_import, change_detector, engine as sync_engine, service as sync_service
 from sync.status import STATUS_DISABLED, STATUS_SUCCESS
 from modules.models import Product
@@ -4748,21 +4749,184 @@ elif page == PAGE_SETTINGS:
                         st.rerun()
 
         def _render_baselinker_settings(entry, record) -> None:
+            """Token -> fetch -> pick flow: BaseLinker's inventory/category/
+            price-group/warehouse are all internal numeric IDs a company has
+            no way to know by heart, so instead of typing them we fetch the
+            real, named lists from BaseLinker itself (client.list_inventories/
+            list_categories/list_price_groups/list_warehouses) once a token is
+            available, and let the user pick from dropdowns. Everything that
+            gets SAVED is identical in shape to before (numeric IDs as
+            strings in `settings`) — only how the user fills the form changes.
+
+            Streamlit forms can't reveal new widgets before submit, so steps
+            1-2 below are plain widgets outside any st.form (same
+            button-then-cache-in-session_state pattern as
+            _render_catalog_import_section()'s Preview Import above); only
+            the final, submit-only step 3 is a real st.form."""
             connected = record is not None and record.status == integration_store.STATUS_CONNECTED
             has_credentials = record is not None and bool(record.credentials)
             if record and record.last_sync_at:
                 st.caption(T("settings.last_sync", ts=time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))))
             settings = record.settings if record else {}
+
+            options_key = f"bl_options_{current_user.company_id}"
+            categories_key = f"bl_categories_{current_user.company_id}"
+            auto_fetch_key = f"bl_auto_fetched_{current_user.company_id}"
+
+            def _do_fetch(tok: str) -> None:
+                try:
+                    inventories = baselinker_client.list_inventories(tok)
+                    price_groups = baselinker_client.list_price_groups(tok)
+                    warehouses = baselinker_client.list_warehouses(tok)
+                except (baselinker_client.BaseLinkerAPIError, requests.RequestException) as e:
+                    st.session_state[options_key] = None
+                    st.error(T("settings.fetch_options_failed", error=str(e)))
+                    return
+                st.session_state[options_key] = {
+                    "token": tok, "inventories": inventories,
+                    "price_groups": price_groups, "warehouses": warehouses,
+                }
+                st.session_state[categories_key] = None
+
+            # ---- Step 1: token + fetch ----
+            token = st.text_input(
+                T("settings.api_token"), type="password",
+                placeholder=T("settings.leave_blank_current") if has_credentials else "",
+                help=T("settings.baselinker_token_help"),
+                key=f"bl_token_input_{entry.integration_type}",
+            )
+            st.caption(T("settings.fetch_options_help"))
+
+            # Auto-fetch once on first open of an already-connected integration,
+            # using the stored token, so the page opens pre-populated instead of
+            # forcing a click every time.
+            if has_credentials and not st.session_state.get(auto_fetch_key) and options_key not in st.session_state:
+                st.session_state[auto_fetch_key] = True
+                _do_fetch(record.credentials.get("token", ""))
+
+            fetch_label = T("settings.refetch_options") if options_key in st.session_state else T("settings.fetch_options")
+            if st.button(fetch_label, key=f"bl_fetch_btn_{entry.integration_type}"):
+                use_token = token or (record.credentials.get("token", "") if has_credentials else "")
+                if not use_token:
+                    st.warning(T("settings.api_token_required"))
+                else:
+                    with st.spinner(T("settings.fetching_options")):
+                        _do_fetch(use_token)
+                    st.rerun()
+
+            options = st.session_state.get(options_key)
+            if not options:
+                return
+
+            # ---- Step 2: pick inventory, load its categories ----
+            inventories = options["inventories"]
+            inv_ids = [str(inv.get("inventory_id")) for inv in inventories]
+            _current_inv = settings.get("inventory_id") or ""
+            inv_index = inv_ids.index(_current_inv) if _current_inv in inv_ids else 0
+            inv_index = st.selectbox(
+                T("settings.select_inventory"),
+                options=range(len(inventories)),
+                index=inv_index if inventories else 0,
+                format_func=lambda i: inventories[i].get("name", inventories[i].get("inventory_id")),
+                key=f"bl_inventory_select_{entry.integration_type}",
+            ) if inventories else None
+
+            if inv_index is None:
+                return
+            selected_inventory = inventories[inv_index]
+            selected_inventory_id = selected_inventory.get("inventory_id")
+
+            cached_categories = st.session_state.get(categories_key)
+            if not cached_categories or cached_categories.get("inventory_id") != selected_inventory_id:
+                if st.button(T("settings.load_categories"), key=f"bl_load_categories_btn_{entry.integration_type}"):
+                    try:
+                        cats = baselinker_client.list_categories(options["token"], selected_inventory_id)
+                    except (baselinker_client.BaseLinkerAPIError, requests.RequestException) as e:
+                        st.error(T("settings.fetch_options_failed", error=str(e)))
+                        return
+                    st.session_state[categories_key] = {"inventory_id": selected_inventory_id, "categories": cats}
+                    st.rerun()
+                st.info(T("settings.load_categories_first"))
+                return
+
+            categories = cached_categories["categories"]
+            by_id = {c["category_id"]: c for c in categories}
+
+            def _category_label(cat: dict) -> str:
+                chain = [cat["name"]]
+                parent_id = cat.get("parent_id") or 0
+                seen = {cat["category_id"]}
+                while parent_id and parent_id in by_id and parent_id not in seen:
+                    parent = by_id[parent_id]
+                    chain.append(parent["name"])
+                    seen.add(parent_id)
+                    parent_id = parent.get("parent_id") or 0
+                return " > ".join(reversed(chain))
+
+            # Price groups / warehouses valid for the selected inventory only
+            # (list_inventories() already tells us which IDs apply) — global
+            # lists filtered locally, no extra API call needed.
+            #
+            # Warehouse IDs are inconsistent across BaseLinker's own API: the
+            # inventory's own `warehouses` array (getInventories) lists them
+            # as composite "{warehouse_type}_{warehouse_id}" strings (e.g.
+            # "bl_125017"), but getInventoryWarehouses returns the bare
+            # numeric `warehouse_id` plus a separate `warehouse_type` field.
+            # `settings["warehouse_id"]`, mapper.py's stock payload, and
+            # BaseLinker's addInventoryProduct all use the composite form, so
+            # that's the id we build/store/compare here too — never the bare
+            # numeric warehouse_id alone (confirmed against this account's
+            # real, working stored value).
+            for _w in options["warehouses"]:
+                _w["_composite_id"] = f"{_w.get('warehouse_type', 'bl')}_{_w.get('warehouse_id')}"
+
+            _inv_price_group_ids = set(selected_inventory.get("price_groups") or [])
+            _inv_warehouse_ids = set(selected_inventory.get("warehouses") or [])
+            available_price_groups = [pg for pg in options["price_groups"] if pg.get("price_group_id") in _inv_price_group_ids] or options["price_groups"]
+            available_warehouses = [w for w in options["warehouses"] if w["_composite_id"] in _inv_warehouse_ids] or options["warehouses"]
+
+            # ---- Step 3: final selections + submit (no more API calls needed) ----
             with st.form(f"integration_form_{entry.integration_type}"):
-                token = st.text_input(
-                    T("settings.api_token"), type="password",
-                    placeholder=T("settings.leave_blank_current") if has_credentials else "",
-                    help=T("settings.baselinker_token_help"),
+                st.caption(f"{T('settings.select_inventory')}: **{selected_inventory.get('name')}**")
+
+                # BaseLinker IDs are ints for genuine records but can be
+                # synthetic strings for category/price-group/warehouse rows
+                # auto-created by OTHER integrations (e.g. a warehouse id like
+                # "bl_125017") — `settings` always stores these as strings
+                # (see the save block below), so preselection matches by
+                # str(id) rather than assuming/forcing int, which would
+                # silently fail to preselect a non-numeric current value.
+                def _index_of(options: list, current_raw) -> int:
+                    current = str(current_raw or "")
+                    for i, opt in enumerate(options):
+                        if opt is not None and str(opt) == current:
+                            return i
+                    return 0
+
+                cat_ids = list(by_id.keys())
+                cat_index = _index_of(cat_ids, settings.get("category_id"))
+                category_choice = st.selectbox(
+                    T("settings.select_category"), options=cat_ids,
+                    index=cat_index if cat_ids else 0,
+                    format_func=lambda cid: _category_label(by_id[cid]),
+                ) if cat_ids else None
+
+                _pg_options = [None] + [pg["price_group_id"] for pg in available_price_groups]
+                _pg_by_id = {pg["price_group_id"]: pg for pg in available_price_groups}
+                price_group_choice = st.selectbox(
+                    T("settings.select_price_group"), options=_pg_options,
+                    index=_index_of(_pg_options, settings.get("price_group_id")),
+                    format_func=lambda pid: T("settings.option_none") if pid is None else _pg_by_id[pid].get("name", pid),
                 )
-                inventory_id = st.text_input(T("settings.inventory_id"), value=settings.get("inventory_id") or "")
-                category_id = st.text_input(T("settings.category_id_field"), value=settings.get("category_id") or "")
-                price_group_id = st.text_input(T("settings.price_group_id"), value=settings.get("price_group_id") or "")
-                warehouse_id = st.text_input(T("settings.warehouse_id"), value=settings.get("warehouse_id") or "")
+
+                _wh_options = [None] + [w["_composite_id"] for w in available_warehouses]
+                _wh_by_id = {w["_composite_id"]: w for w in available_warehouses}
+                warehouse_choice = st.selectbox(
+                    T("settings.select_warehouse"), options=_wh_options,
+                    index=_index_of(_wh_options, settings.get("warehouse_id")),
+                    format_func=lambda wid: T("settings.option_none") if wid is None else _wh_by_id[wid].get("name", wid),
+                )
+
                 tax_rate = st.text_input(T("settings.tax_rate"), value=settings.get("tax_rate") or "23")
                 _export_lang_options = [""] + list(company_store.CONTENT_LANGUAGES.keys())
                 _current_export_lang = settings.get("export_language") or ""
@@ -4778,17 +4942,15 @@ elif page == PAGE_SETTINGS:
                 )
                 submitted = st.form_submit_button(T("settings.save_test_connection"), type="primary")
                 if submitted:
-                    if not token and not has_credentials:
-                        st.warning(T("settings.api_token_required"))
-                    elif not inventory_id.strip() or not category_id.strip():
+                    if category_choice is None:
                         st.warning(T("settings.inventory_category_required"))
                     else:
-                        creds = {"token": token} if token else dict(record.credentials)
+                        creds = {"token": options["token"]}
                         new_settings = {
-                            "inventory_id": inventory_id.strip(),
-                            "category_id": category_id.strip(),
-                            "price_group_id": price_group_id.strip(),
-                            "warehouse_id": warehouse_id.strip(),
+                            "inventory_id": str(selected_inventory_id),
+                            "category_id": str(category_choice),
+                            "price_group_id": str(price_group_choice) if price_group_choice is not None else "",
+                            "warehouse_id": str(warehouse_choice) if warehouse_choice is not None else "",
                             "tax_rate": tax_rate.strip() or "23",
                             "export_language": export_language,
                         }
@@ -4797,6 +4959,10 @@ elif page == PAGE_SETTINGS:
                             user_id=current_user.id,
                         )
                         (st.success if result.success else st.error)(result.message)
+                        if result.success:
+                            st.session_state.pop(options_key, None)
+                            st.session_state.pop(categories_key, None)
+                            st.session_state.pop(auto_fetch_key, None)
                         st.rerun()
 
         def _render_deepl_settings(entry, record) -> None:
