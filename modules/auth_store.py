@@ -11,6 +11,7 @@ email) index below), since two unrelated businesses could both have a
 look a user up by email alone without knowing which company first — see
 get_users_by_email() and modules/auth.py's verify_login().
 """
+import hashlib
 import json
 import time
 import uuid
@@ -33,6 +34,8 @@ class User:
     updated_at: float = 0.0
     last_login_at: float = 0.0  # stamped by auth.verify_login() on success
     language: str = "en"  # UI language ("en" | "lv") — see modules/i18n.py
+    failed_login_attempts: int = 0  # reset to 0 on any successful login — see modules/auth.py
+    locked_until: float = 0.0  # 0.0 = not locked; a future unix timestamp = locked until then
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -150,13 +153,29 @@ def count_active_users_for_company(company_id: str) -> int:
 
 
 def update_user(user: User) -> None:
+    """Scoped by (id, company_id) as defense-in-depth, even though every
+    current caller already only ever operates on a User object it obtained
+    from a company-scoped read (get_user_by_email/list_users_for_company)
+    or the caller's own session — this is the one function that can flip
+    `role`/`active`, so it gets the same belt-and-suspenders treatment
+    every other store module's mutations already have."""
     conn = _connect()
     with conn:
         conn.execute(
-            "UPDATE users SET email = ?, data = ? WHERE id = ?",
-            (user.email, json.dumps(user.to_dict()), user.id),
+            "UPDATE users SET email = ?, data = ? WHERE id = ? AND company_id = ?",
+            (user.email, json.dumps(user.to_dict()), user.id, user.company_id),
         )
     conn.close()
+
+
+def _hash_token(token: str) -> str:
+    """Session tokens are secrets.token_urlsafe(32) — 256 bits of real
+    entropy — so a fast, unsalted SHA-256 is fine here (unlike a password,
+    there's no need for bcrypt-style deliberate slowness against a
+    low-entropy secret). Only the hash is ever persisted; the raw token
+    exists only in the browser cookie and this process's memory for the
+    duration of one request."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def create_session_row(token: str, user_id: str, expires_at: float) -> None:
@@ -166,7 +185,7 @@ def create_session_row(token: str, user_id: str, expires_at: float) -> None:
         conn.execute(
             "INSERT INTO sessions (token, user_id, created_at, expires_at, last_seen_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (token, user_id, now, expires_at, now),
+            (_hash_token(token), user_id, now, expires_at, now),
         )
     conn.close()
 
@@ -175,7 +194,7 @@ def get_session(token: str) -> Optional[SessionRow]:
     conn = _connect()
     row = conn.execute(
         "SELECT token, user_id, created_at, expires_at, last_seen_at FROM sessions WHERE token = ?",
-        (token,),
+        (_hash_token(token),),
     ).fetchone()
     conn.close()
     if not row:
@@ -186,8 +205,21 @@ def get_session(token: str) -> Optional[SessionRow]:
 def delete_session(token: str) -> None:
     conn = _connect()
     with conn:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.execute("DELETE FROM sessions WHERE token = ?", (_hash_token(token),))
     conn.close()
+
+
+def delete_sessions_for_user(user_id: str) -> int:
+    """Real, immediate revocation — not just the passive protection
+    validate_session() already provides by re-checking `active` on every
+    call. Called when an admin deactivates a user, so the session row
+    itself is gone, not just functionally inert until its 14-day TTL."""
+    conn = _connect()
+    with conn:
+        cur = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        deleted = cur.rowcount
+    conn.close()
+    return deleted
 
 
 def delete_expired_sessions() -> int:

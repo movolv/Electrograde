@@ -25,6 +25,9 @@ ALL_ROLES = (ROLE_ADMIN, ROLE_EMPLOYEE, ROLE_REVIEWER)
 
 SESSION_TTL_SECONDS = 14 * 24 * 3600  # 14 days, fixed (not sliding) — Phase 1 keeps this simple
 
+LOCKOUT_THRESHOLD = 5  # consecutive failed attempts before a lockout
+LOCKOUT_SECONDS = 15 * 60  # 15 minutes
+
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
@@ -80,20 +83,58 @@ def verify_login(email: str, password: str) -> Optional[User]:
     single match, and returns the first whose password matches AND whose
     user+company are both active. Known, accepted Phase-1 edge case: if two
     different companies' users share both the same email and the same
-    password, whichever is checked first wins — astronomically unlikely."""
+    password, whichever is checked first wins — astronomically unlikely.
+
+    Rate limiting is tracked PER USER ROW, not per raw email string — the
+    same email can belong to unrelated users in different companies, and
+    one company's failed attempts must never lock out a different
+    company's account that happens to share the address. A locked
+    candidate's password is never even checked (so failed attempts against
+    an already-locked account don't extend the lockout or leak timing), and
+    only a genuinely wrong password increments the counter — a correct
+    password rejected for an inactive user/company doesn't count against
+    it."""
     email = email.strip().lower()
+    now = time.time()
     for user in auth_store.get_users_by_email(email):
         if not user.active:
             continue
+        if user.locked_until > now:
+            continue
         if not verify_password(password, user.password_hash):
+            user.failed_login_attempts += 1
+            if user.failed_login_attempts >= LOCKOUT_THRESHOLD:
+                user.locked_until = now + LOCKOUT_SECONDS
+            auth_store.update_user(user)
             continue
         if not _company_is_active(user.company_id):
             continue
-        user.last_login_at = time.time()
+        user.failed_login_attempts = 0
+        user.locked_until = 0.0
+        user.last_login_at = now
         auth_store.update_user(user)
         audit_store.log_audit(user.company_id, user.id, "LOGIN", "user", user.id)
         return user
     return None
+
+
+def get_lockout_remaining_seconds(email: str) -> Optional[float]:
+    """UI-messaging helper only, mirrors is_pending_company_login()'s
+    shape below — tells the caller whether any account matching this
+    email is currently locked out, and for how much longer, without
+    changing verify_login()'s own return contract. Checked independently
+    of the password: a locked account shows the lockout message regardless
+    of what password was just typed, since only revealing it for a
+    correct password would leak which password is right."""
+    email = email.strip().lower()
+    now = time.time()
+    remaining = None
+    for user in auth_store.get_users_by_email(email):
+        if user.active and user.locked_until > now:
+            candidate = user.locked_until - now
+            if remaining is None or candidate > remaining:
+                remaining = candidate
+    return remaining
 
 
 def create_session(user_id: str) -> str:

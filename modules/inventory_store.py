@@ -290,7 +290,7 @@ def delete_product(product_id: str, company_id: str) -> None:
     with conn:
         conn.execute("DELETE FROM products WHERE id = ? AND company_id = ?", (product_id, company_id))
     conn.close()
-    product_translation_store.delete_translations_for_product(product_id)
+    product_translation_store.delete_translations_for_product(product_id, company_id)
 
 
 def list_products_by_manifest(manifest_import_id: str, company_id: str) -> List[Product]:
@@ -325,11 +325,12 @@ def delete_products_by_manifest(
     conn = _connect()
     with conn:
         conn.executemany(
-            "DELETE FROM products WHERE id = ?", [(p.id,) for p in to_delete]
+            "DELETE FROM products WHERE id = ? AND company_id = ?",
+            [(p.id, company_id) for p in to_delete],
         )
     conn.close()
     for p in to_delete:
-        product_translation_store.delete_translations_for_product(p.id)
+        product_translation_store.delete_translations_for_product(p.id, company_id)
     return len(to_delete)
 
 

@@ -15,8 +15,10 @@ miss it.
 
     python scripts/verify_tenant_isolation.py
 """
+import copy
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,8 +32,9 @@ import psycopg  # noqa: E402
 
 from modules import auth, auth_store, company_store, inventory_store  # noqa: E402
 from modules import manifest_store, marketplace_store, repair_store  # noqa: E402
-from modules import integration_store  # noqa: E402
+from modules import integration_store, product_translation_store  # noqa: E402
 from modules.models import Product  # noqa: E402
+from integrations import manager as integration_manager  # noqa: E402
 
 _checks_passed = 0
 _failures = []
@@ -71,6 +74,23 @@ def main() -> int:
     check("session B resolves to admin B only", resolved_b is not None and resolved_b.id == admin_b.id)
     check("session A does not resolve to admin B", resolved_a is None or resolved_a.id != admin_b.id)
 
+    print("\n-- auth_store: user updates must stay company-scoped --")
+    forged = copy.deepcopy(admin_a)
+    forged.company_id = company_b.id  # as if a caller mixed up which company this row belongs to
+    forged.name = "Forged Name"
+    auth_store.update_user(forged)
+    check(
+        "update_user(A's user id, wrong company=B) does not rename A's account",
+        auth_store.get_user_by_id(admin_a.id).name == "Admin A",
+    )
+    legit = copy.deepcopy(admin_a)
+    legit.name = "Admin A Renamed"
+    auth_store.update_user(legit)
+    check(
+        "update_user(A's user id, correct company=A) does apply",
+        auth_store.get_user_by_id(admin_a.id).name == "Admin A Renamed",
+    )
+
     # -------------------------------------------------------- seed data --
     print("\n-- seeding one row per tenant-scoped table, per company --")
     product_a = Product(company_id=company_a.id, sku="A-SKU-1", name="Product A")
@@ -98,6 +118,24 @@ def main() -> int:
     repair_b = repair_store.RepairEvent(product_id=product_b.id, company_id=company_b.id, description="fix B", cost=20.0)
     repair_store.add_repair_event(repair_a)
     repair_store.add_repair_event(repair_b)
+
+    translation_a = product_translation_store.ProductTranslation(
+        product_id=product_a.id, company_id=company_a.id, language="en", title="Product A EN",
+    )
+    translation_b = product_translation_store.ProductTranslation(
+        product_id=product_b.id, company_id=company_b.id, language="en", title="Product B EN",
+    )
+    product_translation_store.upsert_translation(translation_a)
+    product_translation_store.upsert_translation(translation_b)
+
+    # Dedicated draft products linked to each company's manifest batch, used
+    # only by the delete_products_by_manifest cross-tenant test below — kept
+    # separate from product_a/product_b so this doesn't change what any
+    # existing check above is exercising.
+    draft_a = Product(company_id=company_a.id, sku="A-DRAFT-1", name="Draft A", manifest_import_id=batch_a.id, status="draft")
+    draft_b = Product(company_id=company_b.id, sku="B-DRAFT-1", name="Draft B", manifest_import_id=batch_b.id, status="draft")
+    inventory_store.save_product(draft_a)
+    inventory_store.save_product(draft_b)
     print("  seeded.")
 
     # ------------------------------------------- cross-tenant access checks --
@@ -137,6 +175,35 @@ def main() -> int:
     check(
         "list_products_paginated(company=B) never contains A's product",
         product_a.id not in {p.id for p in products_b},
+    )
+    check(
+        "delete_product(A's id, company=B) does not cascade-delete A's translation row",
+        product_translation_store.get_translation(product_a.id, "en") is not None,
+    )
+    deleted_count = inventory_store.delete_products_by_manifest(batch_a.id, company_b.id)
+    check(
+        "delete_products_by_manifest(A's batch, company=B) deletes nothing",
+        deleted_count == 0 and inventory_store.get_product(draft_a.id, company_a.id) is not None,
+    )
+
+    print("\n-- product_translation_store: cross-tenant access must be impossible --")
+    check(
+        "get_translation(A's product) still returns A's own title",
+        product_translation_store.get_translation(product_a.id, "en").title == "Product A EN",
+    )
+    check(
+        "get_translation(B's product) still returns B's own title, not A's",
+        product_translation_store.get_translation(product_b.id, "en").title == "Product B EN",
+    )
+    product_translation_store.delete_translation(product_a.id, company_b.id, "en")
+    check(
+        "delete_translation(A's product, company=B) does not delete it",
+        product_translation_store.get_translation(product_a.id, "en") is not None,
+    )
+    product_translation_store.delete_translations_for_product(product_a.id, company_b.id)
+    check(
+        "delete_translations_for_product(A's product, company=B) does not delete it",
+        product_translation_store.get_translation(product_a.id, "en") is not None,
     )
 
     print("\n-- manifest_store: cross-tenant access must be impossible --")
@@ -254,6 +321,22 @@ def main() -> int:
         integration_store.get_integration(company_b.id, "baselinker").credentials == {},
     )
 
+    print("\n-- integrations.manager: connector resolution must stay company-scoped --")
+    try:
+        integration_manager.get(company_b.id, "baselinker")
+        manager_get_b_raised = False
+    except integration_manager.IntegrationNotConnectedError:
+        manager_get_b_raised = True
+    check(
+        "manager.get(company=B, 'baselinker') raises IntegrationNotConnectedError after B disconnected",
+        manager_get_b_raised,
+    )
+    connector_a = integration_manager.get(company_a.id, "baselinker")
+    check(
+        "manager.get(company=A, 'baselinker') still resolves A's own connector with A's credentials",
+        connector_a.credentials.get("token") == secret_a,
+    )
+
     print("\n-- integration_store: credentials must be encrypted at rest, not just query-filtered --")
     raw_conn = psycopg.connect(_DATABASE_URL)
     raw_rows = raw_conn.execute("SELECT company_id, credentials FROM company_integrations").fetchall()
@@ -268,6 +351,37 @@ def main() -> int:
         all(secret_b not in (row[1] or "") for row in raw_rows),
     )
 
+    # ------------------------------------------------------ rate limiting --
+    print("\n-- login rate limiting: repeated failures lock out only the targeted account --")
+    rl_user = auth.register_user(company_a.id, "RL Victim", "victim@companya.test", "CorrectPass1!", role=auth.ROLE_EMPLOYEE)
+    for _ in range(auth.LOCKOUT_THRESHOLD):
+        auth.verify_login("victim@companya.test", "WrongPassword!")
+    check(
+        f"{auth.LOCKOUT_THRESHOLD} wrong passwords locks out the account",
+        auth.get_lockout_remaining_seconds("victim@companya.test") is not None,
+    )
+    check(
+        "locked account rejects even the correct password",
+        auth.verify_login("victim@companya.test", "CorrectPass1!") is None,
+    )
+    check(
+        "a different company's unrelated account is unaffected by A's lockout",
+        auth.verify_login("admin@companyb.test", "PasswordB1!") is not None,
+    )
+
+    locked_row = auth_store.get_user_by_email(company_a.id, "victim@companya.test")
+    locked_row.locked_until = time.time() - 1  # simulate the lockout window having elapsed
+    auth_store.update_user(locked_row)
+    unlocked_login = auth.verify_login("victim@companya.test", "CorrectPass1!")
+    check(
+        "once the lockout window elapses, the correct password succeeds again",
+        unlocked_login is not None and unlocked_login.id == rl_user.id,
+    )
+    check(
+        "a successful login resets the failure counter",
+        auth_store.get_user_by_id(rl_user.id).failed_login_attempts == 0,
+    )
+
     # --------------------------------------------------- company suspension --
     print("\n-- company suspension revokes access for ALL its users --")
     company_a.status = company_store.STATUS_SUSPENDED
@@ -277,6 +391,28 @@ def main() -> int:
     check("company B is unaffected", auth.validate_session(token_b) is not None)
     company_a.status = company_store.STATUS_ACTIVE
     company_store.update_company(company_a)
+
+    # ------------------------------------------------ photo folder scoping --
+    print("\n-- app.py: uploaded-photo folder paths must be scoped by company_id (static check) --")
+    # app.py can't be safely imported outside a live Streamlit ScriptRunContext
+    # (it renders UI at module scope and reads st.session_state on import), so
+    # this is a source-level regression check rather than a dynamic one: it
+    # fails loudly if a future edit removes company_id from any of the three
+    # places a product's upload folder is built, re-introducing the
+    # cross-tenant photo-folder-collision bug fixed in this phase (two
+    # different companies' auto-numbered SKUs both start at 2000, so without
+    # this fix they resolved to the exact same data/uploads/<sku>/ folder,
+    # silently colliding — and overwriting each other's photo — when brand
+    # and model also matched).
+    _app_py_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
+    with open(_app_py_path, "r", encoding="utf-8") as f:
+        _app_source_lines = f.read().splitlines()
+    _item_dir_lines = [l for l in _app_source_lines if "UPLOAD_DIR /" in l and "sku_folder_name(" in l]
+    check("found the expected number of UPLOAD_DIR item_dir call sites", len(_item_dir_lines) == 3)
+    check(
+        "every UPLOAD_DIR item_dir call site scopes the path by company_id",
+        all(".company_id" in l for l in _item_dir_lines),
+    )
 
     # ------------------------------------------------------------- summary --
     print(f"\n{_checks_passed} check(s) passed, {len(_failures)} failed.")

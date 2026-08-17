@@ -221,20 +221,27 @@ def upsert_translations_bulk(translations: List[ProductTranslation]) -> None:
     conn.close()
 
 
-def delete_translation(product_id: str, language: str) -> None:
+def delete_translation(product_id: str, company_id: str, language: str) -> None:
     conn = _connect()
     with conn:
         conn.execute(
-            "DELETE FROM product_translations WHERE product_id = ? AND language = ?",
-            (product_id, language),
+            "DELETE FROM product_translations WHERE product_id = ? AND company_id = ? AND language = ?",
+            (product_id, company_id, language),
         )
     conn.close()
 
 
-def delete_translations_for_product(product_id: str) -> None:
+def delete_translations_for_product(product_id: str, company_id: str) -> None:
     """Called when a product itself is deleted (see inventory_store.delete_product())
-    so translation rows never outlive their product."""
+    so translation rows never outlive their product. Scoped by company_id
+    even though the product_id itself is already unique — defense in
+    depth, matching every other delete in this codebase, since a caller
+    passing the wrong company's product_id here must never be able to
+    delete another tenant's translation rows."""
     conn = _connect()
     with conn:
-        conn.execute("DELETE FROM product_translations WHERE product_id = ?", (product_id,))
+        conn.execute(
+            "DELETE FROM product_translations WHERE product_id = ? AND company_id = ?",
+            (product_id, company_id),
+        )
     conn.close()

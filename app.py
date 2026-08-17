@@ -234,7 +234,7 @@ def _save_imported_photo(product, image_url: str) -> None:
         norm = _normalize_captured_photo(resp.content)
     except Exception:
         return
-    item_dir = UPLOAD_DIR / sku_folder_name(product.sku, product.id)
+    item_dir = UPLOAD_DIR / product.company_id / sku_folder_name(product.sku, product.id)
     item_dir.mkdir(parents=True, exist_ok=True)
     fp = item_dir / seo_photo_filename(product, _next_photo_index(item_dir))
     fp.write_bytes(norm)
@@ -1213,8 +1213,14 @@ def _render_login_form():
                     # is a different situation than a wrong password — worth
                     # a distinct message, without changing verify_login()'s
                     # own pass/fail behavior at all (see
-                    # auth.is_pending_company_login()'s docstring).
-                    if auth.is_pending_company_login(email_in, password_in):
+                    # auth.is_pending_company_login()'s docstring). Same idea
+                    # for a locked-out account — checked independently of
+                    # whatever password was just typed, see
+                    # auth.get_lockout_remaining_seconds()'s docstring.
+                    lockout_remaining = auth.get_lockout_remaining_seconds(email_in)
+                    if lockout_remaining is not None:
+                        st.error(T("login.locked_out", minutes=max(1, round(lockout_remaining / 60))))
+                    elif auth.is_pending_company_login(email_in, password_in):
                         st.warning(T("login.pending_approval"))
                     else:
                         st.error(T("login.invalid_credentials"))
@@ -2304,7 +2310,7 @@ if page == PAGE_NEW_ITEM:
                 product.review_status = "ready"
                 product.company_id = st.session_state.company_id
 
-                item_dir = UPLOAD_DIR / sku_folder_name(product.sku, product.id)
+                item_dir = UPLOAD_DIR / product.company_id / sku_folder_name(product.sku, product.id)
                 item_dir.mkdir(parents=True, exist_ok=True)
                 saved_paths = []
                 for i, img_bytes in enumerate(st.session_state.captured_photos, start=1):
@@ -2674,6 +2680,11 @@ elif page == PAGE_PRODUCT_LIST:
 
     @st.dialog(T("product_list.export_dialog_title"))
     def _confirm_export_dialog(selected_products):
+        try:
+            auth.require_role(current_user, auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
+        except PermissionError:
+            st.error(T("common.admins_reviewers_only"))
+            st.stop()
         # Destination is never hardcoded to BaseLinker — any connected
         # marketplace integration is a valid target (IntegrationManager.get
         # already accepts any integration_type). Same connected-integrations
@@ -2750,6 +2761,11 @@ elif page == PAGE_PRODUCT_LIST:
 
     @st.dialog(T("product_list.delete_dialog_title"))
     def _confirm_delete_dialog(selected_products):
+        try:
+            auth.require_role(current_user, auth.ROLE_ADMIN)
+        except PermissionError:
+            st.error(T("common.admins_only"))
+            st.stop()
         st.warning(T("product_list.delete_confirm_text", count=len(selected_products)))
         col1, col2 = st.columns(2)
         with col1:
@@ -2771,6 +2787,11 @@ elif page == PAGE_PRODUCT_LIST:
 
     @st.dialog(T("product_list.bulk_edit_title"))
     def _confirm_bulk_edit_dialog(selected_products):
+        try:
+            auth.require_role(current_user, auth.ROLE_ADMIN)
+        except PermissionError:
+            st.error(T("common.admins_only"))
+            st.stop()
         st.write(f"**{T('product_list.bulk_edit_heading', count=len(selected_products))}**")
         field = st.selectbox(
             T("product_list.field_to_edit"), list(BULK_EDIT_FIELDS), format_func=lambda k: BULK_EDIT_FIELDS[k],
@@ -2996,6 +3017,11 @@ elif page == PAGE_PRODUCT_LIST:
 
     @st.dialog(T("product_list.change_status_title"))
     def _confirm_change_status_dialog(selected_products):
+        try:
+            auth.require_role(current_user, auth.ROLE_ADMIN)
+        except PermissionError:
+            st.error(T("common.admins_only"))
+            st.stop()
         st.write(T("product_list.change_status_heading", count=len(selected_products)))
         new_status = st.selectbox(T("product_list.new_status"), BULK_STATUS_OPTIONS, key="rex_status_value")
         col1, col2 = st.columns(2)
@@ -3149,7 +3175,14 @@ elif page == PAGE_PRODUCT_LIST:
                 st.rerun()
         with qa3:
             st.write("")
-            if st.button(T("common.delete"), key=f"rex_delete_{p.id}", use_container_width=True):
+            _can_delete_product = current_user.role == auth.ROLE_ADMIN
+            if st.button(
+                T("common.delete"), key=f"rex_delete_{p.id}", use_container_width=True,
+                disabled=not _can_delete_product,
+            ):
+                if not _can_delete_product:
+                    st.error(T("common.admins_only"))
+                    st.stop()
                 inventory_store.delete_product(p.id, p.company_id)
                 audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
                 st.session_state.rex_open_product_id = None
@@ -3331,7 +3364,7 @@ elif page == PAGE_PRODUCT_LIST:
                         to_add = new_photo_files[:remaining_slots]
                         if len(new_photo_files) > remaining_slots:
                             st.warning(T("product_list.only_added_photos", remaining=remaining_slots, max=REVIEW_CARD_MAX_PHOTOS))
-                        item_dir = UPLOAD_DIR / sku_folder_name(p.sku, p.id)
+                        item_dir = UPLOAD_DIR / p.company_id / sku_folder_name(p.sku, p.id)
                         item_dir.mkdir(parents=True, exist_ok=True)
                         next_index = _next_photo_index(item_dir)
                         added_paths = []
@@ -3521,12 +3554,23 @@ elif page == PAGE_PRODUCT_LIST:
                 st.caption(T("product_list.not_listed_yet"))
 
             if IntegrationManager.is_connected(p.company_id, "baselinker"):
+                # Same Admin-or-Reviewer boundary as the bulk Export/Sync
+                # actions — Preview is deliberately left open to everyone
+                # (read-only, exposes nothing beyond the product card
+                # itself already shows).
+                _can_marketplace_action = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
                 bl_col1, bl_col2, bl_col3, bl_col4 = st.columns(4)
                 with bl_col1:
                     if st.button(T("product_list.preview_export"), key=f"preview_{p.id}", use_container_width=True):
                         st.session_state[f"show_export_preview_{p.id}"] = True
                 with bl_col2:
-                    if st.button(T("product_list.push_to_baselinker"), key=f"push_{p.id}", use_container_width=True):
+                    if st.button(
+                        T("product_list.push_to_baselinker"), key=f"push_{p.id}", use_container_width=True,
+                        disabled=not _can_marketplace_action,
+                    ):
+                        if not _can_marketplace_action:
+                            st.error(T("common.admins_reviewers_only"))
+                            st.stop()
                         result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
                         if result.success:
                             audit_store.log_audit(
@@ -3538,16 +3582,30 @@ elif page == PAGE_PRODUCT_LIST:
                         else:
                             st.error(result.message)
                 with bl_col3:
-                    if st.button(T("product_list.sync_now"), key=f"sync_now_{p.id}", use_container_width=True):
+                    if st.button(
+                        T("product_list.sync_now"), key=f"sync_now_{p.id}", use_container_width=True,
+                        disabled=not _can_marketplace_action,
+                    ):
+                        if not _can_marketplace_action:
+                            st.error(T("common.admins_reviewers_only"))
+                            st.stop()
                         st.session_state[f"sync_now_results_{p.id}"] = sync_service.run_manual_sync(
                             p.company_id, p, "baselinker",
                         )
                 with bl_col4:
-                    if st.button(T("product_list.pull_now"), key=f"pull_now_{p.id}", use_container_width=True):
+                    if st.button(
+                        T("product_list.pull_now"), key=f"pull_now_{p.id}", use_container_width=True,
+                        disabled=not _can_marketplace_action,
+                    ):
+                        if not _can_marketplace_action:
+                            st.error(T("common.admins_reviewers_only"))
+                            st.stop()
                         st.session_state[f"pull_now_results_{p.id}"] = sync_engine.pull_product(
                             p.company_id, p, "baselinker",
                         )
                         st.rerun()
+                if not _can_marketplace_action:
+                    st.caption(T("common.admins_reviewers_only"))
 
                 if st.session_state.get(f"sync_now_results_{p.id}"):
                     # export is real (delegates to the same export_product()
@@ -3998,12 +4056,27 @@ elif page == PAGE_PRODUCT_LIST:
                     """,
                     unsafe_allow_html=True,
                 )
+                # Admin-or-Reviewer (export/download) vs Admin-only
+                # (delete/bulk edit/change status) — these disabled= hints
+                # are the UI-visible half of the permission matrix; the
+                # real boundary is the auth.require_role() check inside
+                # each dialog function itself (and inside the single-
+                # product equivalents in _render_product_card), since a
+                # disabled attribute alone is only ever a hint, never
+                # enforcement.
                 can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
-                if st.button(T("product_list.bulk_edit"), use_container_width=True, key="rex_op_bulk_edit"):
+                can_delete_or_bulk_admin = current_user.role == auth.ROLE_ADMIN
+                if st.button(
+                    T("product_list.bulk_edit"), disabled=not can_delete_or_bulk_admin,
+                    use_container_width=True, key="rex_op_bulk_edit",
+                ):
                     st.session_state.rex_bulk_edit_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
-                if st.button(T("product_list.change_status"), use_container_width=True, key="rex_op_change_status"):
+                if st.button(
+                    T("product_list.change_status"), disabled=not can_delete_or_bulk_admin,
+                    use_container_width=True, key="rex_op_change_status",
+                ):
                     st.session_state.rex_status_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
@@ -4020,13 +4093,13 @@ elif page == PAGE_PRODUCT_LIST:
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
                 if st.button(
-                    T("product_list.delete_products"), disabled=not can_export, use_container_width=True,
+                    T("product_list.delete_products"), disabled=not can_delete_or_bulk_admin, use_container_width=True,
                     key="rex_op_delete",
                 ):
                     st.session_state.rex_delete_requested = True
                     st.session_state.rex_ops_popover_seq += 1
                     st.rerun()
-                if not can_export:
+                if not can_delete_or_bulk_admin:
                     st.caption(T("product_list.admins_reviewers_only"))
                 if st.button(T("product_list.clear_selection"), use_container_width=True, key="rex_clear_selection"):
                     st.session_state.rex_selected_ids = set()
@@ -4034,25 +4107,36 @@ elif page == PAGE_PRODUCT_LIST:
                     st.session_state["_rex_skip_table_merge"] = True
                     st.rerun()
         with top3:
-            with st.popover(T("product_list.download"), disabled=n_selected == 0, use_container_width=True):
-                _dl_products = _get_selected_products() if n_selected else []
-                st.download_button(
-                    T("product_list.download_excel"),
-                    data=export.to_excel_bytes(_dl_products) if _dl_products else b"",
-                    file_name="baselinker_export.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    disabled=n_selected == 0,
-                    use_container_width=True,
-                )
-                st.download_button(
-                    T("product_list.download_csv"),
-                    data=export.to_csv_bytes(_dl_products) if _dl_products else b"",
-                    file_name="baselinker_export.csv",
-                    mime="text/csv",
-                    disabled=n_selected == 0,
-                    use_container_width=True,
-                )
-                st.caption(T("product_list.image_links_note"))
+            with st.popover(
+                T("product_list.download"), disabled=n_selected == 0 or not can_export, use_container_width=True,
+            ):
+                # The popover's own disabled= above is only a UI hint (an
+                # st.popover's body still runs on every rerun regardless of
+                # whether it's open) — the real boundary is this branch:
+                # export.to_*_bytes() is never even called, so the file
+                # content is never computed or sent to the browser at all
+                # for a role that isn't allowed to have it.
+                if can_export:
+                    _dl_products = _get_selected_products() if n_selected else []
+                    st.download_button(
+                        T("product_list.download_excel"),
+                        data=export.to_excel_bytes(_dl_products) if _dl_products else b"",
+                        file_name="baselinker_export.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=n_selected == 0,
+                        use_container_width=True,
+                    )
+                    st.download_button(
+                        T("product_list.download_csv"),
+                        data=export.to_csv_bytes(_dl_products) if _dl_products else b"",
+                        file_name="baselinker_export.csv",
+                        mime="text/csv",
+                        disabled=n_selected == 0,
+                        use_container_width=True,
+                    )
+                    st.caption(T("product_list.image_links_note"))
+                else:
+                    st.caption(T("common.admins_reviewers_only"))
         with top1:
             st.caption(T("product_list.total_count_selected", total=total_count, selected=n_selected))
 
@@ -4437,6 +4521,10 @@ elif page == PAGE_MANAGE_USERS:
                 u.active = not u.active
                 auth_store.update_user(u)
                 if not u.active:
+                    # Real, immediate revocation — not just the passive
+                    # protection validate_session() already provides by
+                    # re-checking `active` on every request.
+                    auth_store.delete_sessions_for_user(u.id)
                     audit_store.log_audit(current_user.company_id, current_user.id, "DEACTIVATE_USER", "user", u.id)
                 else:
                     audit_store.log_audit(

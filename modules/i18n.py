@@ -53,6 +53,7 @@ TRANSLATIONS: dict = {
     "common.all": {"en": "All", "lv": "Visi"},
     "common.none_dash": {"en": "—", "lv": "—"},
     "common.admins_only": {"en": "Admins only.", "lv": "Tikai administratoriem."},
+    "common.admins_reviewers_only": {"en": "Only Admins and Reviewers can do this.", "lv": "To drīkst darīt tikai administratori un pārbaudītāji."},
 
     # ---- login / register (pre-auth screen) ----
     "login.mode_login": {"en": "Log in", "lv": "Ieiet"},
@@ -62,6 +63,10 @@ TRANSLATIONS: dict = {
         "lv": "Tava uzņēmuma reģistrācija gaida apstiprinājumu. Varēsi ieiet, tiklīdz tā būs apstiprināta.",
     },
     "login.invalid_credentials": {"en": "Invalid email or password.", "lv": "Nepareizs e-pasts vai parole."},
+    "login.locked_out": {
+        "en": "Too many failed attempts. Try again in {minutes} minute(s).",
+        "lv": "Pārāk daudz neveiksmīgu mēģinājumu. Mēģini vēlreiz pēc {minutes} minūtes(-ēm).",
+    },
     "login.register_caption": {
         "en": "A platform Super Admin reviews and approves new companies before you can log in.",
         "lv": "Platformas Super Admin izskata un apstiprina jaunus uzņēmumus, pirms vari ieiet.",
