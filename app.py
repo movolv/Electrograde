@@ -98,6 +98,7 @@ _PRODUCT_TABLE_COLUMNS = [
     {"field": "brand", "headerName": "Brand", "width": 110, "minWidth": 90},
     {"field": "quantity", "headerName": "Qty", "width": 90, "minWidth": 70, "type": "numeric"},
     {"field": "price", "headerName": "Price", "width": 100, "minWidth": 80, "type": "price"},
+    {"field": "weight_kg", "headerName": "Weight (kg)", "width": 110, "minWidth": 90, "type": "numeric"},
     {"field": "product_condition", "headerName": "Product Condition", "width": 130, "minWidth": 100},
     {"field": "triage", "headerName": "Triage", "width": 140, "minWidth": 110},
     {"field": "location", "headerName": "Location", "width": 110, "minWidth": 90},
@@ -217,7 +218,21 @@ def _record_sync_field_changes(product, diffs: dict, user_id: str) -> None:
     own docstring for why other save paths aren't touched here). Notifies
     every connected marketplace integration for this company, never
     hardcoding "baselinker" — a future second marketplace connector needs
-    no change here."""
+    no change here.
+
+    Also pushes the change to the marketplace immediately: a Sync Queue row
+    by itself is never picked up in this deployment (integrations/
+    scheduler.py's EXECUTORS registry is still empty and per-company
+    auto_sync_enabled defaults to False — see its own docstring), so an
+    edit to an ElectroGrader-owned field like price or weight would
+    otherwise sit in sync_queue forever, looking saved but never actually
+    reaching BaseLinker. record_and_enqueue() already tells us exactly
+    which fields are genuinely ours to push (owner == "electrograder" AND
+    the change came from ElectroGrader) — those trigger one real,
+    synchronous export_product() per already-listed integration, right
+    here. A product with no existing listing yet is unaffected; its first
+    export still goes through the New Item wizard / explicit "Push to
+    BaseLinker" button."""
     connected = [
         i for i in integration_store.list_integrations(product.company_id)
         if i.integration_category == integration_store.CATEGORY_MARKETPLACE
@@ -225,15 +240,30 @@ def _record_sync_field_changes(product, diffs: dict, user_id: str) -> None:
     ]
     if not connected:
         return
+    push_needed = set()
     for field_name, (old_value, new_value) in diffs.items():
         if old_value == new_value:
             continue
         for integration in connected:
-            change_detector.record_and_enqueue(
+            enqueued = change_detector.record_and_enqueue(
                 product.company_id, product.id, integration.integration_type, field_name,
                 old_value, new_value, source_system=product_change_log_store.SOURCE_ELECTROGRADER,
                 changed_by=f"user:{user_id}",
             )
+            if enqueued:
+                push_needed.add(integration.integration_type)
+
+    for integration_type in push_needed:
+        listing = marketplace_store.get_listing(product.id, integration_type, product.company_id)
+        if listing is None or not listing.external_listing_id:
+            continue  # nothing exported yet — not this function's job to create it
+        try:
+            connector = IntegrationManager.get(product.company_id, integration_type)
+        except (IntegrationNotConnectedError, IntegrationNotAvailableError):
+            continue
+        result = connector.export_product(product)
+        if not result.success:
+            st.warning(T("product_list.sync_push_failed", integration=integration_type, error=result.message))
 
 
 def _save_imported_photo(product, image_url: str) -> None:
@@ -2591,13 +2621,18 @@ if page == PAGE_NEW_ITEM:
         )
 
         st.caption(T("new_item.box_dimensions_caption"))
-        dim_cols = st.columns(3)
+        dim_cols = st.columns(4)
         with dim_cols[0]:
             length_in = st.number_input(T("new_item.box_length"), min_value=0.0, value=float(product.box_length_cm), step=0.5)
         with dim_cols[1]:
             width_in = st.number_input(T("new_item.box_width"), min_value=0.0, value=float(product.box_width_cm), step=0.5)
         with dim_cols[2]:
             height_in = st.number_input(T("new_item.box_height"), min_value=0.0, value=float(product.box_height_cm), step=0.5)
+        with dim_cols[3]:
+            weight_kg_in = st.number_input(
+                T("new_item.box_weight"), min_value=0.0,
+                value=float(product.weight_kg or product.manifest_weight_kg), step=0.1,
+            )
 
         price_override_in = st.number_input(
             T("new_item.final_price"),
@@ -2647,6 +2682,7 @@ if page == PAGE_NEW_ITEM:
                 product.box_length_cm = float(length_in)
                 product.box_width_cm = float(width_in)
                 product.box_height_cm = float(height_in)
+                product.weight_kg = float(weight_kg_in)
                 product.price = float(price_override_in)
                 product.quantity = int(quantity_in)
                 product.status = "completed"
@@ -3647,7 +3683,7 @@ elif page == PAGE_PRODUCT_LIST:
         )
 
         st.markdown(f"**{T('product_list.pricing')}**")
-        pr1, pr2 = st.columns(2)
+        pr1, pr2, pr3 = st.columns(3)
         with pr1:
             price_in = st.number_input(
                 T("product_list.price_eur"), min_value=0.0, value=float(p.price), step=1.0, key=f"rex_price_{p.id}",
@@ -3655,6 +3691,15 @@ elif page == PAGE_PRODUCT_LIST:
         with pr2:
             quantity_in = st.number_input(
                 T("common.quantity"), min_value=1, value=int(p.quantity or 1), step=1, key=f"rex_qty_{p.id}",
+            )
+        with pr3:
+            # Seeds from manifest_weight_kg only when weight_kg itself is
+            # still blank (a product manifest-imported before this field
+            # existed, or without a weight column mapped) — never overrides
+            # a value a human already set/edited.
+            weight_kg_in = st.number_input(
+                T("product_list.weight_kg"), min_value=0.0,
+                value=float(p.weight_kg or p.manifest_weight_kg), step=0.1, key=f"rex_weight_{p.id}",
             )
 
         # -- Content language: name/product_description/condition_description/
@@ -3850,6 +3895,7 @@ elif page == PAGE_PRODUCT_LIST:
                 or product_condition_in != p.product_condition
                 or float(price_in) != float(p.price)
                 or int(quantity_in) != p.quantity
+                or float(weight_kg_in) != float(p.weight_kg)
             )
 
             # Snapshot pre-change values for the fields the real
@@ -3869,6 +3915,7 @@ elif page == PAGE_PRODUCT_LIST:
                 "product_condition": (p.product_condition, product_condition_in),
                 "price": (p.price, float(price_in)),
                 "quantity": (p.quantity, int(quantity_in)),
+                "weight_kg": (p.weight_kg, float(weight_kg_in)),
                 "product_description": (p.product_description, desc_in.strip() if is_primary_tab else p.product_description),
             }
 
@@ -3883,6 +3930,7 @@ elif page == PAGE_PRODUCT_LIST:
             p.product_condition = product_condition_in
             p.price = float(price_in)
             p.quantity = int(quantity_in)
+            p.weight_kg = float(weight_kg_in)
             if changed:
                 p.review_status = "edited"
 
@@ -4633,6 +4681,7 @@ elif page == PAGE_PRODUCT_LIST:
                         "location": p.location or "—",
                         "quantity": p.quantity or 1,
                         "price": p.price or 0,
+                        "weight_kg": p.weight_kg or p.manifest_weight_kg or 0,
                         "baselinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
                         "status": _status_badge(p),
                         "date": (

@@ -104,6 +104,13 @@ class Product:
     box_length_cm: float = 0.0
     box_width_cm: float = 0.0
     box_height_cm: float = 0.0
+    # Authoritative, human-editable shipping weight — distinct from
+    # manifest_weight_kg above (an unverified manifest claim), same
+    # relationship as quantity vs. manifest_qty. Seeded from
+    # manifest_weight_kg at manifest-import time when the manifest mapped a
+    # weight column, but editable afterward regardless of origin. This is
+    # the value every export/API path (BaseLinker included) actually sends.
+    weight_kg: float = 0.0
     purchase_price_allocated: float = 0.0  # this item's share of the manifest/lot cost, for profit calc
     quantity: int = 1  # unit count this record represents; always >= 1, editable everywhere. Not
     # the same as `manifest_qty` above (an unverified manifest claim) — this is the

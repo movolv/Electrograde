@@ -187,6 +187,13 @@ def rows_to_draft_products(
         # never clobbers a quantity a human has since corrected.
         if p.manifest_qty > 0:
             p.quantity = p.manifest_qty
+        # Same one-time-at-creation treatment for a manifest-provided weight:
+        # seeds the authoritative, editable weight_kg so a human doesn't have
+        # to retype a value the manifest already gave — only when the column
+        # was actually mapped/present (manifest_weight_kg > 0), otherwise
+        # weight_kg stays 0.0 and is left for manual entry in Product List.
+        if p.manifest_weight_kg > 0:
+            p.weight_kg = p.manifest_weight_kg
         # Same one-time-at-creation treatment for a manifest-provided SKU
         # (blank if the file had no SKU column/value for this row — the
         # caller then falls back to inventory_store.next_sku_batch() for

@@ -178,8 +178,13 @@ def build_payload(
         val = getattr(product, product_attr)
         if val:
             payload[api_field] = val
-    if product.manifest_weight_kg:
-        payload["weight"] = product.manifest_weight_kg
+    # product.weight_kg is the authoritative, human-editable value (seeded
+    # from manifest_weight_kg at import time when the manifest had it, but
+    # editable afterward regardless of origin — see modules/models.py).
+    # manifest_weight_kg itself is deliberately never sent: it's an
+    # unverified manifest claim, same reasoning as quantity vs. manifest_qty.
+    if _wanted("weight_kg") and product.weight_kg:
+        payload["weight"] = product.weight_kg
 
     if _wanted("image_paths") and include_images and product.image_paths:
         payload["images"] = {

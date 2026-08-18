@@ -203,12 +203,12 @@ class BaselinkerConnector(MarketplaceConnector):
     # subset of.
     IMPLEMENTED_SYNC_FIELDS = {
         "name", "product_description", "condition_description",
-        "image_paths", "price", "quantity", "barcode",
+        "image_paths", "price", "quantity", "weight_kg", "barcode",
         "brand", "model", "product_condition", "color", "power",
     }
     DEFAULT_SYNC_FIELDS = [
         "name", "product_description", "condition_description",
-        "image_paths", "price", "quantity", "sku", "barcode",
+        "image_paths", "price", "quantity", "weight_kg", "sku", "barcode",
         "brand", "model", "product_condition", "color", "power",
     ]
 

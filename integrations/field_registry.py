@@ -26,6 +26,7 @@ SYNCABLE_FIELDS = {
     "image_paths": {"label": "Images", "type": "images"},
     "price": {"label": "Price", "type": "number"},
     "quantity": {"label": "Quantity", "type": "number"},
+    "weight_kg": {"label": "Weight (kg)", "type": "number"},
     "sku": {"label": "SKU", "type": "identifier"},
     "category": {"label": "Category", "type": "text"},
     "barcode": {"label": "Barcode", "type": "identifier"},
@@ -65,6 +66,7 @@ SYNC_OWNERSHIP_FIELDS = {
     "defects": {"label": "Defects", "group": "Product Content", "default_owner": "electrograder"},
     "barcode": {"label": "Barcode", "group": "Product Content", "default_owner": "electrograder"},
     "price": {"label": "Price", "group": "Sales Data", "default_owner": "electrograder"},
+    "weight_kg": {"label": "Weight (kg)", "group": "Sales Data", "default_owner": "electrograder"},
     "quantity": {"label": "Quantity", "group": "Sales Data", "default_owner": "<connector>"},
     "status": {"label": "Status", "group": "Sales Data", "default_owner": "<connector>"},
 }
