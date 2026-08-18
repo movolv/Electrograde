@@ -2473,6 +2473,21 @@ if page == PAGE_NEW_ITEM:
                     for img_bytes in st.session_state.captured_photos:
                         decoded_barcodes.extend(barcode_scanner.decode_barcodes(img_bytes))
 
+                    # Raw pyzbar output includes ANY symbol found in a photo —
+                    # a manual/warranty QR code, a courier label, a serial
+                    # number barcode, whatever else happens to be in frame —
+                    # not just the product's own EAN. Only the subset that
+                    # actually looks like a real EAN/GTIN (right digit count,
+                    # valid check digit) is trustworthy enough to either
+                    # auto-fill product.ean or hard-flag a manifest mismatch
+                    # in grade_item() below — an unfiltered QR/other-barcode
+                    # payload "not matching" the manifest EAN isn't evidence
+                    # of anything, it was never a candidate EAN to begin with.
+                    ean_candidates = [
+                        code for code in decoded_barcodes
+                        if identifier_lookup.looks_like_ean(code) and identifier_lookup.validate_gtin_checksum(code)
+                    ]
+
                     # A barcode decoded straight from one of the item's own
                     # photos (e.g. a box/label shot among the front/back/
                     # sides photos from Step 2) is a direct physical read of
@@ -2480,17 +2495,11 @@ if page == PAGE_NEW_ITEM:
                     # result, and effectively free here since these photos
                     # are already being decoded for the manifest cross-check
                     # below. Only fills a still-blank EAN (existing data
-                    # always wins), and only a checksum-valid candidate is
-                    # ever accepted — pyzbar can occasionally misread a
-                    # digit, and the checksum catches that the same way it
-                    # catches a bad OCR'd number from a web page.
-                    if not product.ean:
-                        for code in decoded_barcodes:
-                            if identifier_lookup.looks_like_ean(code) and identifier_lookup.validate_gtin_checksum(code):
-                                product.ean = code
-                                product.ean_status = identifier_lookup.STATUS_FOUND
-                                product.ean_source = "scanned from photo"
-                                break
+                    # always wins).
+                    if not product.ean and ean_candidates:
+                        product.ean = ean_candidates[0]
+                        product.ean_status = identifier_lookup.STATUS_FOUND
+                        product.ean_source = "scanned from photo"
 
                     # Still nothing — one more background attempt, now with
                     # whatever brand/model/category is known by this point
@@ -2526,7 +2535,7 @@ if page == PAGE_NEW_ITEM:
                                 "category": product.category,
                             },
                             manifest_ean=product.manifest_barcode,
-                            photo_decoded_barcodes=decoded_barcodes,
+                            photo_decoded_barcodes=ean_candidates,
                         )
                     except (anthropic.RateLimitError, anthropic.OverloadedError):
                         st.error(T("new_item.ai_busy"))
