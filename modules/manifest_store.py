@@ -37,6 +37,22 @@ class ManifestBatch:
     column_map: dict = field(default_factory=dict)
     status: str = STATUS_PROCESSING
     error_message: str = ""
+    # Live progress during the identifier-lookup step of an import/replace
+    # (app.py) — updated once per item so status=STATUS_PROCESSING is
+    # observable from the batches list/detail view even after a page
+    # reload or from a different browser tab, instead of a silent
+    # "Processing" with no indication of whether it's still alive or how
+    # far along it is. processed_count/lookup_total span EVERY item in the
+    # batch (== row_count) — an earlier version denominated this in just
+    # the subset actually missing an EAN/ASIN (often a small fraction of
+    # row_count), which was technically accurate but read as confusing/
+    # stalled-then-sudden-jump against an upload the user thinks of by its
+    # total row count (reported directly). ensure_identifiers() is still
+    # only actually CALLED (the slow part — web search + AI) for rows that
+    # need it; the rest tick past almost instantly.
+    processed_count: int = 0
+    lookup_total: int = 0
+    current_item: str = ""
 
 
 def _connect():
@@ -82,6 +98,9 @@ def save_batch(batch: ManifestBatch) -> None:
                         "column_map": batch.column_map,
                         "status": batch.status,
                         "error_message": batch.error_message,
+                        "processed_count": batch.processed_count,
+                        "lookup_total": batch.lookup_total,
+                        "current_item": batch.current_item,
                     }
                 ),
             ),

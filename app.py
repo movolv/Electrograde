@@ -121,6 +121,19 @@ _ORDER_TABLE_COLUMNS = [
 ]
 _ORDER_TABLE_MOBILE_FIELDS = ["order_number", "customer_name", "price_total"]
 
+# review_table()'s column config for the Import Manifest page — one row per
+# modules/manifest_store.ManifestBatch (not per product; clicking a row
+# opens a read-only detail view of that batch's linked products, see
+# PAGE_IMPORT_MANIFEST below).
+_MANIFEST_TABLE_COLUMNS = [
+    {"field": "filename", "headerName": "File", "flex": 1, "minWidth": 160},
+    {"field": "status", "headerName": "Status", "width": 130, "minWidth": 110},
+    {"field": "date", "headerName": "Date", "width": 140, "minWidth": 120},
+    {"field": "row_count", "headerName": "Rows", "width": 90, "minWidth": 70, "type": "numeric"},
+    {"field": "linked_summary", "headerName": "Linked", "width": 180, "minWidth": 140},
+]
+_MANIFEST_TABLE_MOBILE_FIELDS = ["filename", "status", "linked_summary"]
+
 
 def _ensure_thumbnail(image_path: str) -> Path | None:
     """Generates (and disk-caches) a small JPEG thumbnail for the given
@@ -273,6 +286,146 @@ def _render_import_progress(company_id: str, connector_name: str) -> None:
         return
     st.progress(job.imported / job.total if job.total else 0.0)
     st.caption(T("settings.importing_progress", imported=job.imported, total=job.total, skipped=job.skipped, error_count=job.error_count))
+
+
+def _start_manifest_import(
+    rows: list, confirmed_map: dict, filename: str, company_id: str, user_id: str,
+) -> "manifest_store.ManifestBatch":
+    """Creates the ManifestBatch + draft Products and hands the
+    identifier-lookup step off to the background (_run_manifest_identifier_lookup_job,
+    below) — called from the "Import" button. Deliberately does NOT check
+    or avoid SKU collisions: every manifest-provided SKU (colliding or
+    not) is saved exactly as given; a row with no SKU at all still falls
+    back to a fresh auto-generated one. Any collision is surfaced to a
+    human AFTER import completes, by _manifest_import_progress_dialog's
+    conflict-resolution phase — see that function's docstring for why this
+    is better than avoiding/flagging collisions before anything is saved.
+    Returns the batch; on a (synchronous, pre-background) failure its
+    status is STATUS_ERROR with error_message set, rather than raising."""
+    batch = manifest_store.ManifestBatch(
+        company_id=company_id, filename=filename, row_count=len(rows),
+        column_map=confirmed_map, status=manifest_store.STATUS_PROCESSING,
+    )
+    manifest_store.save_batch(batch)  # visible as "Processing" immediately
+    try:
+        drafts = manifest_import.rows_to_draft_products(rows, company_id=company_id, manifest_import_id=batch.id)
+
+        needs_auto_sku = [d for d in drafts if not d.sku]
+        if needs_auto_sku:
+            fresh_skus = inventory_store.next_sku_batch(len(needs_auto_sku), company_id=company_id)
+            for d, sku in zip(needs_auto_sku, fresh_skus):
+                d.sku = sku
+
+        # The identifier-lookup step (web search + AI per item) runs in the
+        # background from here on, via the shared _lookup_executor() pool
+        # (same one Step 3's deep enrichment already uses) — submitting and
+        # returning immediately means a large manifest's import is no
+        # longer tied to this browser tab/tunnel connection staying open
+        # for however long the lookups take. See
+        # _run_manifest_identifier_lookup_job's docstring for why this
+        # matters.
+        _lookup_executor().submit(_run_manifest_identifier_lookup_job, batch.id, company_id, user_id, drafts)
+    except Exception as e:
+        batch.status = manifest_store.STATUS_ERROR
+        batch.error_message = str(e)
+        manifest_store.save_batch(batch)
+    return batch
+
+
+def _run_manifest_identifier_lookup_job(batch_id: str, company_id: str, user_id: str, drafts: list) -> None:
+    """Runs entirely inside _lookup_executor()'s background thread — MUST
+    NEVER call any st.* function (no Streamlit ScriptRunContext exists in a
+    plain worker thread), same rule _run_import_job() above follows.
+    Progress is persisted to the ManifestBatch record after every item
+    (processed_count/current_item) so _render_manifest_import_progress()
+    (running in a real Streamlit session, possibly a different one than
+    whichever request triggered this) can poll it independently.
+
+    This is what makes a manifest import survive the triggering browser
+    tab/tunnel connection dropping mid-run — before this, the whole
+    identifier-lookup loop ran synchronously inside the upload button's own
+    request; if that connection dropped partway through a large (100+ row)
+    manifest, the script run was abandoned with the batch permanently
+    stuck at STATUS_PROCESSING and nothing left running to ever finish or
+    fail it. Observed directly: with the browser kept open the entire
+    lookup completed normally in ~15s/item; the "stuck forever" reports
+    only ever happened when the session was interrupted mid-run."""
+    batch = manifest_store.get_batch(batch_id, company_id)
+    if batch is None:
+        return
+    try:
+        # Progress is denominated in ALL drafts (== row_count), not just
+        # the subset actually missing an EAN/ASIN — showing "5/7" against
+        # an upload the user thinks of as "231 products" was confusing
+        # (reported directly), even though it was technically accurate for
+        # just the lookup step. Every draft still gets exactly one
+        # processed_count tick, but ensure_identifiers() itself is only
+        # called (the only part that's actually slow — web search + AI)
+        # for rows that need it; identifier_lookup.needs_lookup()'s cheap
+        # in-memory check keeps the rest of the 231 ticking through almost
+        # instantly.
+        if _ai_configured():
+            batch.lookup_total = len(drafts)
+            for i, d in enumerate(drafts):
+                batch.processed_count = i
+                batch.current_item = d.manifest_item_description or d.sku
+                manifest_store.save_batch(batch)
+                if identifier_lookup.needs_lookup(d):
+                    identifier_lookup.ensure_identifiers(
+                        d, product_name=d.manifest_item_description, other_info=d.manifest_subcategory,
+                    )
+            batch.processed_count = len(drafts)
+
+        inventory_store.save_products_bulk(drafts)
+        batch.status = manifest_store.STATUS_IMPORTED
+        batch.current_item = ""
+        manifest_store.save_batch(batch)
+        audit_store.log_audit(
+            company_id, user_id, "IMPORT_MANIFEST", "manifest_batch", batch.id,
+            f"{len(drafts)} item(s), file={batch.filename}",
+        )
+    except Exception as e:  # noqa: BLE001 - a background thread must never crash silently
+        batch.status = manifest_store.STATUS_ERROR
+        batch.error_message = str(e)
+        batch.current_item = ""
+        manifest_store.save_batch(batch)
+
+
+@st.fragment(run_every=2)
+def _render_manifest_import_progress(batch_id: str, company_id: str) -> None:
+    """Auto-refreshing progress display for a manifest batch whose
+    identifier-lookup step is running in the background — same
+    st.fragment(run_every=...) pattern as _render_import_progress() above.
+    Reads the ManifestBatch record fresh from the DB each tick, so it
+    reflects reality even if the background job is being driven by a
+    different session/request than the one currently viewing this page."""
+    batch = manifest_store.get_batch(batch_id, company_id)
+    if batch is None:
+        return
+    if batch.status != manifest_store.STATUS_PROCESSING:
+        # The background job finished (or failed) since this fragment's
+        # last tick. A fragment ticking on its own timer only reruns
+        # ITSELF — the caller (_manifest_import_progress_dialog's phase
+        # branch, or the batch detail view) only re-evaluates which phase/
+        # view to show on a full script rerun, which nothing else was
+        # triggering here. Without this, a batch that finished while this
+        # fragment was the only thing "watching" it would sit showing a
+        # stale progress bar forever, until something unrelated (switching
+        # pages, a manual refresh) forced a full rerun — observed directly
+        # as a reported bug. st.rerun() here is deliberately NOT
+        # scope="fragment" — it needs to rerun the whole script so the
+        # caller re-reads the new status.
+        st.rerun()
+    # Denominated in lookup_total (how many rows actually need a lookup —
+    # often far fewer than row_count, see ManifestBatch.lookup_total's
+    # docstring), not row_count, or this looked like it stalled partway
+    # through and then jumped straight to done.
+    if batch.lookup_total:
+        st.progress(batch.processed_count / batch.lookup_total)
+    if batch.current_item:
+        st.caption(T("import_manifest.status_processing_detail", done=batch.processed_count, total=batch.lookup_total, item=batch.current_item))
+    else:
+        st.caption(T("import_manifest.status_processing"))
 
 
 _UNSAFE_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\s]+')
@@ -1335,6 +1488,23 @@ def _init_state():
         "wizard_translate_hint_shown": False,
         "manifest_df": None,
         "manifest_uploaded_name": None,
+        # Bumped after a successful "Import" click to force the file_uploader
+        # widget below to remount empty (Streamlit file_uploaders otherwise
+        # keep showing/re-feeding the same selected file across reruns even
+        # after manifest_df/manifest_uploaded_name are cleared — a widget
+        # only actually resets when its `key` changes) — see the uploader's
+        # key= below.
+        "manifest_uploader_seq": 0,
+        # Import Manifest batches table (review_table, same pattern as
+        # Review & Export's rex_* keys above, minus pagination — a
+        # company's manifest batches all load in one page).
+        "manifest_selected_ids": set(),   # batch ids checked for bulk delete
+        "manifest_open_id": None,         # batch id whose detail view is open, or None for list view
+        "manifest_clear_seq": 0,          # bumped to tell the grid to deselect all
+        "manifest_ops_popover_seq": 0,    # bumped to force the Operations popover closed when a dialog opens
+        "manifest_delete_requested": False,  # set inside the fragment, consumed outside it to open the dialog
+        "manifest_progress_batch_id": None,  # batch id whose progress/conflict-resolution dialog is open, or None
+        "manifest_confirm_delete_id": None,  # product id currently showing the inline "confirm delete duplicate" sub-state
         # Review & Export page (merged Review + CSV/Excel Export) — single
         # shared session-state set; selection/open-card state persists
         # across pages of the paginated list (rex_selected_ids is NOT
@@ -1573,28 +1743,200 @@ def _render_column_mapping_ui(df: pd.DataFrame, key_prefix: str):
     return confirmed_map, missing_required
 
 
-@st.dialog(T("import_manifest.delete_batch_title"))
-def _confirm_delete_batch_dialog(batch, linked_products):
-    pending_count = sum(1 for p in linked_products if p.status == "draft")
-    processed_count = len(linked_products) - pending_count
+def _render_manifest_rows_preview(rows: list) -> None:
+    """Shared by the initial import and the Replace flow. A plain preview
+    table — SKU collisions are deliberately NOT checked or flagged here.
+    Manifest-provided SKUs (colliding or not) are saved exactly as given;
+    any collision is resolved by a human AFTER import, via
+    _manifest_import_progress_dialog's conflict-resolution phase, which
+    shows the actual imported product side-by-side with the pre-existing
+    one it collided with — a preview-time-only signal (a red row before
+    anything is even saved) can't offer that same before/after comparison."""
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+
+def _clear_manifest_progress_dialog() -> None:
+    """on_dismiss callback for _manifest_import_progress_dialog below —
+    without this, dismissing via X/ESC/click-outside (as opposed to its
+    own explicit Close button) left manifest_progress_batch_id set, so
+    the SAME dialog silently reopened on the very next unrelated rerun
+    (e.g. clicking a checkbox elsewhere on the page) and blocked
+    interaction with the rest of the page — the "manifest page hangs,
+    can't upload again" bug this fixes. Every dismissal path now clears
+    the flag the same way the Close button already did."""
+    st.session_state.manifest_progress_batch_id = None
+
+
+@st.dialog(T("import_manifest.progress_dialog_title"), on_dismiss=_clear_manifest_progress_dialog)
+def _manifest_import_progress_dialog(batch_id: str, company_id: str) -> None:
+    """One dialog, three phases, opened right after Import starts (and
+    re-openable later from the batches list/detail view's conflict
+    indicator):
+
+    Phase A (batch still PROCESSING): the live auto-refreshing progress
+    fragment (_render_manifest_import_progress, already fragment-based —
+    confirmed working nested inside a dialog).
+
+    Phase B (done, unresolved SKU conflicts): manifest import
+    deliberately never avoids or flags a colliding SKU before saving (see
+    _start_manifest_import's docstring) — every manifest-provided SKU is
+    saved exactly as given, so a genuine duplicate can exist in the DB
+    for a moment. This phase finds those (inventory_store.find_sku_conflicts,
+    scoped to this batch's own products) and, for each one, shows the
+    just-imported product side-by-side with the pre-existing product it
+    collided with (SKU/EAN/name both sides) so a human can compare and
+    decide: confirm it's genuinely the same product (deletes the
+    duplicate — behind its own inline two-step confirm, since only one
+    @st.dialog can be open at a time so a second modal isn't an option),
+    or confirm it's a different product and give the new one a fresh SKU.
+
+    Phase C (done, no conflicts left): a short success message and a
+    Close button.
+
+    Dismissible in every phase — closing early (X/ESC/click-outside)
+    never loses anything, since progress and unresolved conflicts both
+    live in the DB, not in this dialog's own state."""
+    batch = manifest_store.get_batch(batch_id, company_id)
+    if batch is None:
+        # The batch this dialog was opened for got deleted (e.g. the user
+        # deleted it from the list while this was still the "open" one) —
+        # without clearing the flag, manifest_progress_batch_id stays set
+        # forever, and this same empty dialog (title bar, no body, no
+        # button) reopens on every future rerun of the whole Import
+        # Manifest page — including blocking a fresh upload, since a
+        # modal dialog sits over the rest of the page. Observed directly
+        # as a reported bug ("manifesta lapa uzkārās").
+        st.session_state.manifest_progress_batch_id = None
+        st.rerun()
+
+    if batch.status == manifest_store.STATUS_PROCESSING:
+        _render_manifest_import_progress(batch_id, company_id)
+        return
+
+    if batch.status == manifest_store.STATUS_ERROR:
+        st.error(T("import_manifest.import_failed", error=batch.error_message))
+        if st.button(T("common.close"), key="manifest_progress_close_error"):
+            st.session_state.manifest_progress_batch_id = None
+            st.rerun()
+        return
+
+    linked = inventory_store.list_products_by_manifest(batch.id, company_id)
+    conflicts = inventory_store.find_sku_conflicts(company_id, [p.id for p in linked])
+
+    if not conflicts:
+        st.success(T("import_manifest.batch_started", batch_id=batch.id, count=len(linked)))
+        st.caption(T("import_manifest.process_hint"))
+        if st.button(T("common.close"), key="manifest_progress_close_done"):
+            st.session_state.manifest_progress_batch_id = None
+            st.rerun()
+        return
+
+    st.warning(T("import_manifest.sku_conflicts_intro", count=len(conflicts)))
+    by_id = {p.id: p for p in linked}
+    for new_id, existing in conflicts.items():
+        new_product = by_id.get(new_id)
+        if new_product is None:
+            continue
+        st.divider()
+        col_new, col_existing = st.columns(2)
+        with col_new:
+            st.caption(T("import_manifest.conflict_from_manifest"))
+            st.write(f"**{new_product.name or new_product.manifest_item_description or '—'}**")
+            st.caption(f"SKU: {new_product.sku or '—'} · EAN: {new_product.ean or new_product.manifest_barcode or '—'}")
+        with col_existing:
+            st.caption(T("import_manifest.conflict_already_in_inventory"))
+            st.write(f"**{existing.name or existing.manifest_item_description or '—'}**")
+            st.caption(f"SKU: {existing.sku or '—'} · EAN: {existing.ean or existing.manifest_barcode or '—'}")
+
+        if st.session_state.manifest_confirm_delete_id == new_id:
+            st.error(T("import_manifest.confirm_delete_duplicate_warning", name=new_product.name or new_product.manifest_item_description or new_product.sku))
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if st.button(T("common.cancel"), key=f"manifest_conflict_cancel_{new_id}", use_container_width=True):
+                    st.session_state.manifest_confirm_delete_id = None
+                    st.rerun()
+            with cc2:
+                if st.button(T("import_manifest.confirm_delete_duplicate"), type="primary", key=f"manifest_conflict_delete_{new_id}", use_container_width=True):
+                    inventory_store.delete_product(new_id, company_id)
+                    st.session_state.manifest_confirm_delete_id = None
+                    st.rerun()
+        else:
+            bc1, bc2, bc3 = st.columns([1.3, 1, 0.7])
+            with bc1:
+                if st.button(T("import_manifest.same_product_delete"), key=f"manifest_conflict_same_{new_id}", use_container_width=True):
+                    st.session_state.manifest_confirm_delete_id = new_id
+                    st.rerun()
+            with bc2:
+                suggested = inventory_store.next_sku_batch(1, company_id=company_id)[0]
+                new_sku_input = st.text_input(
+                    T("import_manifest.new_sku_label"), value=suggested,
+                    key=f"manifest_conflict_newsku_{new_id}", label_visibility="collapsed",
+                )
+            with bc3:
+                if st.button(T("import_manifest.different_product_assign"), key=f"manifest_conflict_assign_{new_id}", use_container_width=True):
+                    candidate = new_sku_input.strip()
+                    other = inventory_store.get_product_by_sku(company_id, candidate) if candidate else None
+                    if not candidate:
+                        st.error(T("import_manifest.sku_required"))
+                    elif other is not None and other.id != new_id:
+                        st.error(T("import_manifest.sku_still_conflicts", sku=candidate))
+                    else:
+                        new_product.sku = candidate
+                        inventory_store.save_product(new_product)
+                        st.rerun()
+
+
+@st.dialog(T("import_manifest.delete_batches_title"))
+def _confirm_delete_batches_dialog(batches: list):
+    """Bulk-capable — also the only delete path now, invoked from the
+    Operations popover with however many manifest batches are checked
+    (one or many). Every other bulk-mutating dialog in this codebase
+    re-checks its role requirement itself as defense-in-depth even when
+    the whole page is already gated (see PHASE1_SECURITY_REPORT.md's
+    A1-A7); this one does the same, even though PAGE_IMPORT_MANIFEST
+    already requires ROLE_ADMIN at the top of the page."""
+    try:
+        auth.require_role(current_user, auth.ROLE_ADMIN)
+    except PermissionError:
+        st.error(T("common.admins_only"))
+        st.stop()
+
+    linked_by_batch = {
+        b.id: inventory_store.list_products_by_manifest(b.id, st.session_state.company_id) for b in batches
+    }
+    pending_total = sum(sum(1 for p in linked if p.status == "draft") for linked in linked_by_batch.values())
+    processed_total = sum(len(linked) for linked in linked_by_batch.values()) - pending_total
+
     st.warning(
-        T("import_manifest.delete_batch_warning", filename=batch.filename, batch_id=batch.id, pending=pending_count)
-        + (T("import_manifest.delete_batch_kept_note", processed=processed_count) if processed_count else "")
+        T("import_manifest.delete_batches_warning", count=len(batches), pending=pending_total)
+        + (T("import_manifest.delete_batch_kept_note", processed=processed_total) if processed_total else "")
         + "\n\n" + T("import_manifest.cannot_be_undone")
     )
-    confirm = st.checkbox(T("import_manifest.confirm_delete_checkbox"))
+    for b in batches:
+        st.caption(f"• {b.filename} (`{b.id}`)")
+    confirm = st.checkbox(T("import_manifest.confirm_delete_batches_checkbox"))
     col1, col2 = st.columns(2)
     with col1:
         if st.button(T("common.cancel"), use_container_width=True):
             st.rerun()
     with col2:
         if st.button(T("common.delete"), type="primary", disabled=not confirm, use_container_width=True):
-            deleted_count = inventory_store.delete_products_by_manifest(
-                batch.id, company_id=st.session_state.company_id
-            )
-            manifest_store.delete_batch(batch.id, st.session_state.company_id)
-            audit_store.log_audit(st.session_state.company_id, current_user.id, "DELETE_MANIFEST", "manifest_batch", batch.id)
-            st.success(T("import_manifest.deleted_batch_success", count=deleted_count))
+            deleted_count = 0
+            for b in batches:
+                deleted_count += inventory_store.delete_products_by_manifest(b.id, company_id=st.session_state.company_id)
+                manifest_store.delete_batch(b.id, st.session_state.company_id)
+                audit_store.log_audit(st.session_state.company_id, current_user.id, "DELETE_MANIFEST", "manifest_batch", b.id)
+            st.session_state.manifest_selected_ids = set()
+            st.session_state.manifest_clear_seq += 1
+            st.session_state.manifest_open_id = None
+            if st.session_state.manifest_progress_batch_id in {b.id for b in batches}:
+                # Otherwise the progress/conflict dialog would try to reopen
+                # for a batch that no longer exists on the very next rerun —
+                # _manifest_import_progress_dialog's batch-is-None branch
+                # already self-heals this too, but clearing it here avoids
+                # even the momentary empty-dialog flash.
+                st.session_state.manifest_progress_batch_id = None
+            st.success(T("import_manifest.deleted_batches_success", batches=len(batches), count=deleted_count))
             st.rerun()
 
 
@@ -2379,16 +2721,15 @@ elif page == PAGE_IMPORT_MANIFEST:
     except PermissionError:
         st.error(T("common.admins_only"))
         st.stop()
-    st.caption(
-        "Upload an Amazon liquidation manifest (.xlsx or .csv). Only these "
-        "fields are imported: Target #, Subcategory, ASIN, EAN/Barcode, Item "
-        "description, Qty, Weight (kg) — everything else (brand, model, "
-        "product condition, price, descriptions...) is determined later by AI + photos, "
-        "never assumed from the manifest. This is purely additive — it does "
-        "not replace the existing manual scan/search flow in '🆕 New Item'."
-    )
+    st.caption(T("import_manifest.page_caption"))
 
-    uploaded = st.file_uploader(T("import_manifest.manifest_file"), type=["xlsx", "csv"])
+    if st.session_state.manifest_progress_batch_id:
+        _manifest_import_progress_dialog(st.session_state.manifest_progress_batch_id, st.session_state.company_id)
+
+    uploaded = st.file_uploader(
+        T("import_manifest.manifest_file"), type=["xlsx", "csv"],
+        key=f"manifest_file_uploader_{st.session_state.manifest_uploader_seq}",
+    )
     if uploaded is not None and st.session_state.manifest_uploaded_name != uploaded.name:
         df = manifest_import.read_table(uploaded.getvalue(), uploaded.name)
         st.session_state.manifest_df = df
@@ -2403,57 +2744,31 @@ elif page == PAGE_IMPORT_MANIFEST:
         rows = manifest_import.extract_rows(df, confirmed_map)
         st.write(f"**{T('import_manifest.preview_rows', count=len(rows))}**")
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            _render_manifest_rows_preview(rows)
 
         if st.button(T("import_manifest.import_batch_button"), type="primary", disabled=bool(missing_required) or not rows):
-            batch = manifest_store.ManifestBatch(
-                company_id=st.session_state.company_id,
-                filename=uploaded.name if uploaded else st.session_state.manifest_uploaded_name,
-                row_count=len(rows),
-                column_map=confirmed_map,
-                status=manifest_store.STATUS_PROCESSING,
+            batch = _start_manifest_import(
+                rows, confirmed_map, uploaded.name if uploaded else st.session_state.manifest_uploaded_name,
+                st.session_state.company_id, current_user.id,
             )
-            manifest_store.save_batch(batch)  # visible as "Processing" immediately
-
-            try:
-                drafts = manifest_import.rows_to_draft_products(
-                    rows, company_id=st.session_state.company_id, manifest_import_id=batch.id
-                )
-
-                skus = inventory_store.next_sku_batch(len(drafts), company_id=st.session_state.company_id)
-                for d, sku in zip(drafts, skus):
-                    d.sku = sku
-
-                to_check = [d for d in drafts if identifier_lookup.needs_lookup(d)]
-                if to_check and _ai_configured():
-                    progress = st.progress(0.0, text=T("import_manifest.looking_up_identifiers", count=len(to_check)))
-                    for i, d in enumerate(to_check):
-                        identifier_lookup.ensure_identifiers(
-                            d,
-                            product_name=d.manifest_item_description,
-                            other_info=d.manifest_subcategory,
-                        )
-                        progress.progress((i + 1) / len(to_check), text=T("import_manifest.checked_progress", done=i + 1, total=len(to_check)))
-                    progress.empty()
-
-                inventory_store.save_products_bulk(drafts)
-                batch.status = manifest_store.STATUS_IMPORTED
-                manifest_store.save_batch(batch)
-                audit_store.log_audit(
-                    st.session_state.company_id, current_user.id, "IMPORT_MANIFEST", "manifest_batch", batch.id,
-                    f"{len(drafts)} item(s), file={batch.filename}",
-                )
-
-                st.success(T("import_manifest.batch_created", batch_id=batch.id, count=len(drafts), first_sku=skus[0], last_sku=skus[-1]))
-                st.caption(T("import_manifest.process_hint"))
-            except Exception as e:
-                batch.status = manifest_store.STATUS_ERROR
-                batch.error_message = str(e)
-                manifest_store.save_batch(batch)
-                st.error(T("import_manifest.import_failed", error=e))
-
-            st.session_state.manifest_df = None
-            st.session_state.manifest_uploaded_name = None
+            if batch.status != manifest_store.STATUS_ERROR:
+                st.session_state.manifest_progress_batch_id = batch.id
+                st.session_state.manifest_df = None
+                st.session_state.manifest_uploaded_name = None
+                # Resets the file_uploader widget (below) back to empty —
+                # clearing manifest_df/manifest_uploaded_name alone doesn't
+                # do this; Streamlit keeps re-feeding the same selected file
+                # back in on every future rerun unless the widget's key
+                # itself changes. Without this, the old mapping/preview
+                # ("Missing required mapping...", "Preview (N rows)...")
+                # stayed stuck on screen after a successful import, blocking
+                # a next upload — reported directly.
+                st.session_state.manifest_uploader_seq += 1
+                st.rerun()
+            else:
+                st.error(T("import_manifest.import_failed", error=batch.error_message))
+                st.session_state.manifest_df = None
+                st.session_state.manifest_uploaded_name = None
 
     st.divider()
     st.subheader(T("import_manifest.manifest_batches"))
@@ -2466,107 +2781,224 @@ elif page == PAGE_IMPORT_MANIFEST:
             manifest_store.STATUS_IMPORTED: T("import_manifest.status_imported"),
             manifest_store.STATUS_ERROR: T("import_manifest.status_error"),
         }
-        for b in batches:
+        batches_by_id = {b.id: b for b in batches}
+
+        if st.session_state.manifest_open_id is None:
+            # -------------------------------------------------- LIST VIEW --
+            # Fold the grid's most recently reported click into
+            # manifest_selected_ids/manifest_open_id before rendering the
+            # Operations popover, same merge pattern Review & Export uses
+            # for rex_table (app.py) — simpler here since manifest batches
+            # aren't paginated, so there's no cross-page union to do.
+            _prior_result = st.session_state.get("manifest_table")
+            if _prior_result:
+                st.session_state.manifest_selected_ids = set(_prior_result.get("selected_ids") or [])
+                if (
+                    _prior_result.get("open_id")
+                    and _prior_result["open_id"] != st.session_state.manifest_open_id
+                ):
+                    st.session_state.manifest_open_id = _prior_result["open_id"]
+                    st.rerun()
+
+            n_selected = len(st.session_state.manifest_selected_ids)
+            top1, top2 = st.columns([1, 3])
+            with top1:
+                # key includes manifest_ops_popover_seq so opening the delete
+                # dialog remounts (and closes) this popover — same technique
+                # Review & Export's Operations popover uses (app.py).
+                with st.popover(
+                    T("import_manifest.operations"), disabled=n_selected == 0, use_container_width=True,
+                    key=f"manifest_ops_popover_{st.session_state.manifest_ops_popover_seq}",
+                ):
+                    if st.button(
+                        T("import_manifest.delete_manifests_op"), use_container_width=True, key="manifest_op_delete",
+                    ):
+                        st.session_state.manifest_delete_requested = True
+                        st.session_state.manifest_ops_popover_seq += 1
+                        st.rerun()
+                    if st.button(
+                        T("import_manifest.clear_selection"), use_container_width=True, key="manifest_clear_selection",
+                    ):
+                        st.session_state.manifest_selected_ids = set()
+                        st.session_state.manifest_clear_seq += 1
+                        st.rerun()
+            with top2:
+                st.caption(T("import_manifest.selected_count", selected=n_selected, total=len(batches)))
+
+            any_processing = any(b.status == manifest_store.STATUS_PROCESSING for b in batches)
+            if any_processing:
+                if st.button(T("import_manifest.refresh_progress"), key="manifest_refresh_progress"):
+                    st.rerun()
+
+            table_rows = []
+            for b in batches:
+                if b.status == manifest_store.STATUS_PROCESSING:
+                    # Live progress written by the identifier-lookup loop
+                    # (see ManifestBatch.processed_count/current_item) —
+                    # observable here even though that loop runs inside a
+                    # DIFFERENT script execution (the upload button's own
+                    # request), since it's read fresh from the DB on every
+                    # render, not from session_state.
+                    status_cell = status_badges.get(b.status, b.status)
+                    linked_cell = T(
+                        "import_manifest.status_processing_detail",
+                        done=b.processed_count, total=b.lookup_total, item=b.current_item,
+                    ) if b.current_item else status_cell
+                else:
+                    linked = inventory_store.list_products_by_manifest(b.id, st.session_state.company_id)
+                    pending = sum(1 for p in linked if p.status == "draft")
+                    processed = len(linked) - pending
+                    status_cell = status_badges.get(b.status, b.status)
+                    if b.status == manifest_store.STATUS_IMPORTED and linked:
+                        n_conflicts = len(inventory_store.find_sku_conflicts(st.session_state.company_id, [p.id for p in linked]))
+                        if n_conflicts:
+                            status_cell = T("import_manifest.sku_conflicts_badge", count=n_conflicts)
+                    linked_cell = T(
+                        "import_manifest.linked_summary_cell", linked=len(linked), pending=pending, processed=processed,
+                    )
+                table_rows.append({
+                    "id": b.id,
+                    "filename": b.filename,
+                    "status": status_cell,
+                    "date": pd.to_datetime(b.imported_at, unit="s").strftime("%Y-%m-%d %H:%M"),
+                    "row_count": b.row_count,
+                    "linked_summary": linked_cell,
+                })
+
+            review_table(
+                rows=table_rows,
+                columns=_translated_columns(_MANIFEST_TABLE_COLUMNS),
+                mobile_fields=_MANIFEST_TABLE_MOBILE_FIELDS,
+                state_key="manifests",
+                clear_seq=st.session_state.manifest_clear_seq,
+                key="manifest_table",
+            )
+
+            if st.session_state.manifest_delete_requested:
+                st.session_state.manifest_delete_requested = False
+                selected_batches = [
+                    batches_by_id[bid] for bid in st.session_state.manifest_selected_ids if bid in batches_by_id
+                ]
+                if selected_batches:
+                    _confirm_delete_batches_dialog(selected_batches)
+
+        else:
+            # ------------------------------------------------ DETAIL VIEW --
+            # Read-only: this is a manifest batch's linked products, not an
+            # editable grid — editing individual products stays in Product
+            # List / the New Item wizard, same as before this page became a
+            # table.
+            b = batches_by_id.get(st.session_state.manifest_open_id)
+            if b is None:
+                st.session_state.manifest_open_id = None
+                st.rerun()
+
+            if st.button(T("import_manifest.back_to_manifests"), key="manifest_detail_back"):
+                st.session_state.manifest_open_id = None
+                st.rerun()
+
             linked = inventory_store.list_products_by_manifest(b.id, st.session_state.company_id)
             pending = sum(1 for p in linked if p.status == "draft")
             processed = len(linked) - pending
             badge = status_badges.get(b.status, b.status)
             uploaded_str = pd.to_datetime(b.imported_at, unit="s").strftime("%Y-%m-%d %H:%M")
 
-            with st.container(border=True):
-                st.write(f"**{b.filename}**")
+            st.write(f"**{b.filename}**")
+            if b.status == manifest_store.STATUS_PROCESSING:
+                _render_manifest_import_progress(b.id, st.session_state.company_id)
+            else:
                 st.caption(
                     T("import_manifest.batch_summary_line", badge=badge, uploaded=uploaded_str,
                       row_count=b.row_count, linked=len(linked), pending=pending, processed=processed)
                 )
-                if b.status == manifest_store.STATUS_ERROR and b.error_message:
-                    st.error(b.error_message)
+            if b.status == manifest_store.STATUS_ERROR and b.error_message:
+                st.error(b.error_message)
+            if b.status == manifest_store.STATUS_IMPORTED and linked:
+                n_conflicts = len(inventory_store.find_sku_conflicts(st.session_state.company_id, [p.id for p in linked]))
+                if n_conflicts:
+                    st.warning(T("import_manifest.sku_conflicts_badge", count=n_conflicts))
+                    if st.button(T("import_manifest.resolve_conflicts_button"), key=f"detail_resolve_conflicts_{b.id}"):
+                        st.session_state.manifest_progress_batch_id = b.id
+                        st.rerun()
+            if st.button(T("common.delete"), key=f"detail_delete_{b.id}"):
+                _confirm_delete_batches_dialog([b])
 
-                bcol1, bcol2, bcol3 = st.columns(3)
-                with bcol1:
-                    if st.button(T("import_manifest.view_button"), key=f"view_{b.id}", use_container_width=True):
-                        st.session_state[f"show_view_{b.id}"] = not st.session_state.get(f"show_view_{b.id}", False)
-                with bcol2:
-                    if st.button(T("import_manifest.replace_button"), key=f"replace_{b.id}", use_container_width=True):
-                        st.session_state[f"show_replace_{b.id}"] = not st.session_state.get(f"show_replace_{b.id}", False)
-                with bcol3:
-                    if st.button(T("common.delete"), key=f"delete_{b.id}", use_container_width=True):
-                        _confirm_delete_batch_dialog(b, linked)
+            st.write(f"**{T('import_manifest.column_mapping_used')}**")
+            st.json(b.column_map)
+            st.write(f"**{T('import_manifest.linked_products')}**")
+            if linked:
+                view_df = pd.DataFrame(
+                    [
+                        {
+                            T("common.sku"): p.sku,
+                            T("common.status"): p.status,
+                            T("import_manifest.name_description_col"): p.name or p.manifest_item_description,
+                            "ASIN": p.asin,
+                            "EAN": p.manifest_barcode,
+                        }
+                        for p in linked
+                    ]
+                )
+                st.dataframe(view_df, use_container_width=True)
+            else:
+                st.caption(T("import_manifest.no_linked_products"))
 
-                if st.session_state.get(f"show_view_{b.id}"):
-                    st.write(f"**{T('import_manifest.column_mapping_used')}**")
-                    st.json(b.column_map)
-                    st.write(f"**{T('import_manifest.linked_products')}**")
-                    if linked:
-                        view_df = pd.DataFrame(
-                            [
-                                {
-                                    T("common.sku"): p.sku,
-                                    T("common.status"): p.status,
-                                    T("import_manifest.name_description_col"): p.name or p.manifest_item_description,
-                                    "ASIN": p.asin,
-                                    "EAN": p.manifest_barcode,
-                                }
-                                for p in linked
-                            ]
-                        )
-                        st.dataframe(view_df, use_container_width=True)
-                    else:
-                        st.caption(T("import_manifest.no_linked_products"))
+            with st.expander(T("import_manifest.replace_button")):
+                st.caption(T("import_manifest.replace_caption"))
+                replace_upload = st.file_uploader(
+                    T("import_manifest.new_manifest_file"), type=["xlsx", "csv"], key=f"replace_upload_{b.id}"
+                )
+                if replace_upload is not None:
+                    replace_df = manifest_import.read_table(replace_upload.getvalue(), replace_upload.name)
+                    st.write(f"**{T('import_manifest.rows_found', count=len(replace_df))}**")
+                    r_confirmed_map, r_missing = _render_column_mapping_ui(replace_df, key_prefix=f"replace_{b.id}")
+                    r_rows = manifest_import.extract_rows(replace_df, r_confirmed_map)
+                    st.write(f"**{T('import_manifest.preview_rows', count=len(r_rows))}**")
+                    if r_rows:
+                        _render_manifest_rows_preview(r_rows)
 
-                if st.session_state.get(f"show_replace_{b.id}"):
-                    st.write(f"**{T('import_manifest.upload_new_version')}**")
-                    st.caption(T("import_manifest.replace_caption"))
-                    replace_upload = st.file_uploader(
-                        T("import_manifest.new_manifest_file"), type=["xlsx", "csv"], key=f"replace_upload_{b.id}"
-                    )
-                    if replace_upload is not None:
-                        replace_df = manifest_import.read_table(replace_upload.getvalue(), replace_upload.name)
-                        st.write(f"**{T('import_manifest.rows_found', count=len(replace_df))}**")
-                        r_confirmed_map, r_missing = _render_column_mapping_ui(replace_df, key_prefix=f"replace_{b.id}")
-                        r_rows = manifest_import.extract_rows(replace_df, r_confirmed_map)
-                        st.write(f"**{T('import_manifest.preview_rows', count=len(r_rows))}**")
-                        if r_rows:
-                            st.dataframe(pd.DataFrame(r_rows), use_container_width=True)
-
-                        if st.button(
-                            T("import_manifest.confirm_replace"), type="primary", key=f"confirm_replace_{b.id}",
-                            disabled=bool(r_missing) or not r_rows,
-                        ):
-                            try:
-                                updated, new = manifest_import.sync_rows_to_products(
-                                    r_rows, linked, company_id=st.session_state.company_id,
-                                    manifest_import_id=b.id,
+                    if st.button(
+                        T("import_manifest.confirm_replace"), type="primary", key=f"confirm_replace_{b.id}",
+                        disabled=bool(r_missing) or not r_rows,
+                    ):
+                        try:
+                            updated, new = manifest_import.sync_rows_to_products(
+                                r_rows, linked, company_id=st.session_state.company_id,
+                                manifest_import_id=b.id,
+                            )
+                            # Same manifest-SKU-honored rule as the main Import flow
+                            # (_start_manifest_import) — a manifest-provided SKU
+                            # (colliding or not) is saved exactly as given; only a
+                            # row with no SKU at all falls back to auto-generation.
+                            needs_auto_sku = [d for d in new if not d.sku]
+                            if needs_auto_sku:
+                                new_skus = inventory_store.next_sku_batch(
+                                    len(needs_auto_sku), company_id=st.session_state.company_id
                                 )
-                                if new:
-                                    new_skus = inventory_store.next_sku_batch(
-                                        len(new), company_id=st.session_state.company_id
-                                    )
-                                    for d, sku in zip(new, new_skus):
-                                        d.sku = sku
+                                for d, sku in zip(needs_auto_sku, new_skus):
+                                    d.sku = sku
 
-                                inventory_store.save_products_bulk(updated + new)
-                                b.filename = replace_upload.name
-                                b.row_count = len(r_rows)
-                                b.column_map = r_confirmed_map
-                                b.updated_at = time.time()
-                                b.status = manifest_store.STATUS_IMPORTED
-                                b.error_message = ""
-                                manifest_store.save_batch(b)
-                                audit_store.log_audit(
-                                    st.session_state.company_id, current_user.id, "IMPORT_MANIFEST",
-                                    "manifest_batch", b.id,
-                                    f"replace: {len(updated)} updated, {len(new)} new, file={b.filename}",
-                                )
+                            inventory_store.save_products_bulk(updated + new)
+                            b.filename = replace_upload.name
+                            b.row_count = len(r_rows)
+                            b.column_map = r_confirmed_map
+                            b.updated_at = time.time()
+                            b.status = manifest_store.STATUS_IMPORTED
+                            b.error_message = ""
+                            manifest_store.save_batch(b)
+                            audit_store.log_audit(
+                                st.session_state.company_id, current_user.id, "IMPORT_MANIFEST",
+                                "manifest_batch", b.id,
+                                f"replace: {len(updated)} updated, {len(new)} new, file={b.filename}",
+                            )
 
-                                st.success(T("import_manifest.replaced_success", updated=len(updated), new=len(new)))
-                                st.session_state[f"show_replace_{b.id}"] = False
-                                st.rerun()
-                            except Exception as e:
-                                b.status = manifest_store.STATUS_ERROR
-                                b.error_message = str(e)
-                                manifest_store.save_batch(b)
-                                st.error(T("import_manifest.replace_failed", error=e))
+                            st.success(T("import_manifest.replaced_success", updated=len(updated), new=len(new)))
+                            st.rerun()
+                        except Exception as e:
+                            b.status = manifest_store.STATUS_ERROR
+                            b.error_message = str(e)
+                            manifest_store.save_batch(b)
+                            st.error(T("import_manifest.replace_failed", error=e))
 
 # ============================================================ INVENTORY ==
 elif page == PAGE_PRODUCT_LIST:

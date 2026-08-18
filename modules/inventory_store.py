@@ -14,7 +14,7 @@ save) instead of relying on scanning/deserializing the full JSON blob for
 every row — see search_products().
 """
 import json
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from modules import db, product_translation_store
 from modules.models import Product
@@ -384,6 +384,30 @@ def get_product_by_sku(company_id: str, sku: str) -> Optional[Product]:
     if not row:
         return None
     return _hydrate_primary_language(Product.from_dict(json.loads(row[0])))
+
+
+def find_sku_conflicts(company_id: str, product_ids: List[str]) -> Dict[str, Product]:
+    """For each given product id, if another product (different id) in the
+    SAME company shares its SKU (case-insensitive, blank SKUs never
+    conflict), returns {product_id: the_other_product}. Used by
+    app.py's post-import SKU-conflict resolution dialog — manifest import
+    deliberately no longer avoids/flags collisions before saving (see
+    _start_manifest_import's docstring), so this is how they're found
+    afterward, scoped to just the batch's own products rather than
+    scanning the whole company."""
+    conn = _connect()
+    conflicts: Dict[str, Product] = {}
+    for pid in product_ids:
+        row = conn.execute(
+            "SELECT p2.data FROM products p1 JOIN products p2 "
+            "ON UPPER(p1.sku) = UPPER(p2.sku) AND p1.company_id = p2.company_id "
+            "WHERE p1.id = ? AND p1.company_id = ? AND p2.id != ? AND p1.sku != ''",
+            (pid, company_id, pid),
+        ).fetchone()
+        if row:
+            conflicts[pid] = Product.from_dict(json.loads(row[0]))
+    conn.close()
+    return conflicts
 
 
 def search_products(query: str, company_id: str) -> List[Tuple[Product, str]]:

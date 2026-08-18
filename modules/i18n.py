@@ -353,6 +353,22 @@ TRANSLATIONS: dict = {
     "new_item.take_photo_shutter": {"en": "Take Photo", "lv": "Uzņemt"},
 
     # ---- Import Manifest ----
+    "import_manifest.page_caption": {
+        "en": "Upload an Amazon liquidation manifest (.xlsx or .csv). Importable fields: Target #, "
+              "Subcategory, ASIN, EAN/Barcode, Item description, Qty, Weight (kg), SKU, Shelf location "
+              "— only Item description is required, the rest can be left unmapped if your file doesn't "
+              "have them (a missing ASIN/EAN is looked up automatically after import). Everything else "
+              "(brand, model, product condition, price, descriptions...) is determined later by AI + "
+              "photos, never assumed from the manifest. This is purely additive — it does not replace "
+              "the existing manual scan/search flow in '🆕 New Item'.",
+        "lv": "Augšupielādē Amazon likvidācijas manifestu (.xlsx vai .csv). Importējamie lauki: Target #, "
+              "Subcategory, ASIN, EAN/Barcode, Item description, Qty, Weight (kg), SKU, Vieta plauktā "
+              "— obligāts ir tikai Item description, pārējos var atstāt nesasaistītus, ja tavā failā to "
+              "nav (trūkstošs ASIN/EAN pēc importa tiek meklēts automātiski). Viss pārējais (zīmols, "
+              "modelis, stāvoklis, cena, apraksti...) tiek noteikts vēlāk ar AI + fotogrāfijām, nekad "
+              "netiek pieņemts no manifesta. Tas ir tikai papildinošs — neaizstāj esošo manuālo "
+              "skenēšanas/meklēšanas plūsmu '🆕 Jauns produkts'.",
+    },
     "import_manifest.manifest_file": {"en": "Manifest file", "lv": "Manifesta fails"},
     "import_manifest.rows_found": {"en": "{count} row(s) found.", "lv": "Atrastas {count} rinda(s)."},
     "import_manifest.columns_in_file": {"en": "Columns in file: {columns}", "lv": "Kolonnas failā: {columns}"},
@@ -362,12 +378,31 @@ TRANSLATIONS: dict = {
     },
     "import_manifest.preview_rows": {"en": "Preview ({count} row(s) with the confirmed mapping):", "lv": "Priekšskatījums ({count} rinda(s) ar apstiprināto sasaisti):"},
     "import_manifest.import_batch_button": {"en": "✅ Import as new manifest batch", "lv": "✅ Importēt kā jaunu manifesta partiju"},
-    "import_manifest.looking_up_identifiers": {"en": "Looking up missing EAN/ASIN for {count} item(s)...", "lv": "Meklē trūkstošos EAN/ASIN {count} precei(-ēm)..."},
-    "import_manifest.checked_progress": {"en": "Checked {done}/{total} item(s)...", "lv": "Pārbaudīts {done}/{total} prece(-es)..."},
-    "import_manifest.batch_created": {
-        "en": "Created manifest batch **{batch_id}** with {count} item(s), assigned SKU **{first_sku}** to **{last_sku}**.",
-        "lv": "Izveidota manifesta partija **{batch_id}** ar {count} preci(-ēm), piešķirti SKU no **{first_sku}** līdz **{last_sku}**.",
+    "import_manifest.status_processing_detail": {"en": "🔄 Processing {done}/{total} — currently: {item}", "lv": "🔄 Apstrādā {done}/{total} — pašlaik: {item}"},
+    "import_manifest.refresh_progress": {"en": "🔄 Refresh progress", "lv": "🔄 Atsvaidzināt progresu"},
+    "import_manifest.progress_dialog_title": {"en": "Manifest import", "lv": "Manifesta imports"},
+    "import_manifest.batch_started": {
+        "en": "Imported manifest batch **{batch_id}** — {count} item(s) saved.",
+        "lv": "Importēta manifesta partija **{batch_id}** — saglabātas {count} preces.",
     },
+    "import_manifest.sku_conflicts_badge": {"en": "⚠️ {count} SKU conflict(s)", "lv": "⚠️ {count} SKU sadursme(-es)"},
+    "import_manifest.sku_conflicts_intro": {
+        "en": "{count} item(s) from this manifest were saved with a SKU that already belongs to another product. Resolve each one below.",
+        "lv": "{count} šī manifesta prece(-es) tika saglabāta(-s) ar SKU, kas jau pieder citam produktam. Atrisini katru zemāk.",
+    },
+    "import_manifest.conflict_from_manifest": {"en": "From this manifest", "lv": "No šī manifesta"},
+    "import_manifest.conflict_already_in_inventory": {"en": "Already in inventory", "lv": "Jau inventārā"},
+    "import_manifest.same_product_delete": {"en": "✅ Same product — delete duplicate", "lv": "✅ Tā pati prece — dzēst dublikātu"},
+    "import_manifest.different_product_assign": {"en": "🔀 Assign", "lv": "🔀 Piešķirt"},
+    "import_manifest.new_sku_label": {"en": "New SKU", "lv": "Jauns SKU"},
+    "import_manifest.confirm_delete_duplicate_warning": {
+        "en": "Delete the just-imported duplicate **{name}**? This cannot be undone.",
+        "lv": "Dzēst tikko importēto dublikātu **{name}**? Šo nevar atsaukt.",
+    },
+    "import_manifest.confirm_delete_duplicate": {"en": "Confirm delete", "lv": "Apstiprināt dzēšanu"},
+    "import_manifest.sku_required": {"en": "Enter a SKU.", "lv": "Ievadi SKU."},
+    "import_manifest.sku_still_conflicts": {"en": "SKU {sku} also already exists — pick a different one.", "lv": "SKU {sku} arī jau eksistē — izvēlies citu."},
+    "import_manifest.resolve_conflicts_button": {"en": "Resolve SKU conflicts", "lv": "Atrisināt SKU sadursmes"},
     "import_manifest.process_hint": {
         "en": "Go to '🆕 New Item' → '📥 From a pending manifest item' to process them one by one.",
         "lv": "Ej uz '🆕 Jauns produkts' → '📥 No gaidoša manifesta ieraksta', lai apstrādātu tās pa vienai.",
@@ -382,7 +417,10 @@ TRANSLATIONS: dict = {
         "en": "{badge}  •  Uploaded {uploaded}  •  {row_count} product(s) in file  •  {linked} linked ({pending} pending, {processed} processed)",
         "lv": "{badge}  •  Augšupielādēts {uploaded}  •  {row_count} produkts(-i) failā  •  {linked} saistīti ({pending} gaida, {processed} apstrādāti)",
     },
-    "import_manifest.view_button": {"en": "👁️ View", "lv": "👁️ Skatīt"},
+    "import_manifest.linked_summary_cell": {
+        "en": "{linked} ({pending} pending, {processed} processed)",
+        "lv": "{linked} ({pending} gaida, {processed} apstrādāti)",
+    },
     "import_manifest.replace_button": {"en": "🔄 Replace", "lv": "🔄 Aizstāt"},
     "import_manifest.column_mapping_used": {"en": "Column mapping used:", "lv": "Izmantotā kolonnu sasaiste:"},
     "import_manifest.linked_products": {"en": "Linked products:", "lv": "Saistītie produkti:"},
@@ -408,15 +446,6 @@ TRANSLATIONS: dict = {
     "import_manifest.replace_failed": {"en": "Replace failed: {error}", "lv": "Aizstāšana neizdevās: {error}"},
 
     "import_manifest.missing_mapping": {"en": "Missing required mapping for: {labels}", "lv": "Trūkst obligātās sasaistes: {labels}"},
-    "import_manifest.delete_batch_title": {"en": "Delete manifest batch?", "lv": "Dzēst manifesta partiju?"},
-    "import_manifest.delete_batch_warning": {
-        "en": "This will permanently delete the manifest batch record for "
-              "**{filename}** (`{batch_id}`) and its "
-              "**{pending} still-pending (unprocessed) product(s)**.\n\n",
-        "lv": "Šī darbība neatgriezeniski dzēsīs manifesta partijas ierakstu "
-              "**{filename}** (`{batch_id}`) un tās "
-              "**{pending} vēl gaidošo(-s) (neapstrādāto(-s)) produktu(-us)**.\n\n",
-    },
     "import_manifest.delete_batch_kept_note": {
         "en": "**{processed} already-processed product(s) will be kept** "
               "in your inventory — they'll just lose their manifest reference. ",
@@ -424,8 +453,20 @@ TRANSLATIONS: dict = {
               "tavā inventārā — tie vienkārši zaudēs manifesta atsauci. ",
     },
     "import_manifest.cannot_be_undone": {"en": "This cannot be undone.", "lv": "Šo darbību nevar atsaukt."},
-    "import_manifest.confirm_delete_checkbox": {"en": "I understand, delete this batch", "lv": "Es saprotu, dzēst šo partiju"},
-    "import_manifest.deleted_batch_success": {"en": "Deleted batch and {count} pending product(s).", "lv": "Dzēsta partija un {count} gaidošais(-ie) produkts(-i)."},
+    "import_manifest.operations": {"en": "⚙️ Operations", "lv": "⚙️ Darbības"},
+    "import_manifest.delete_manifests_op": {"en": "🗑️ Delete manifest(s)", "lv": "🗑️ Dzēst manifestu(s)"},
+    "import_manifest.clear_selection": {"en": "Clear selection", "lv": "Notīrīt atlasi"},
+    "import_manifest.selected_count": {"en": "{selected} of {total} selected", "lv": "Atlasīti {selected} no {total}"},
+    "import_manifest.back_to_manifests": {"en": "← Back to manifests", "lv": "← Atpakaļ uz manifestiem"},
+    "import_manifest.delete_batches_title": {"en": "Delete manifest batch(es)?", "lv": "Dzēst manifesta partiju(as)?"},
+    "import_manifest.delete_batches_warning": {
+        "en": "This will permanently delete **{count} manifest batch(es)** and their "
+              "**{pending} still-pending (unprocessed) product(s)**.\n\n",
+        "lv": "Šī darbība neatgriezeniski dzēsīs **{count} manifesta partiju(as)** un to "
+              "**{pending} vēl gaidošo(-s) (neapstrādāto(-s)) produktu(-us)**.\n\n",
+    },
+    "import_manifest.confirm_delete_batches_checkbox": {"en": "I understand, delete the selected batch(es)", "lv": "Es saprotu, dzēst atlasīto(-ās) partiju(as)"},
+    "import_manifest.deleted_batches_success": {"en": "Deleted {batches} batch(es) and {count} pending product(s).", "lv": "Dzēstas {batches} partija(as) un {count} gaidošais(-ie) produkts(-i)."},
 
     # ---- Product List ----
     "product_list.page_caption": {
@@ -749,6 +790,9 @@ TRANSLATIONS: dict = {
     "table_col.order_date_label": {"en": "Date", "lv": "Datums"},
     "table_col.status_label": {"en": "Status", "lv": "Statuss"},
     "table_col.marketplace": {"en": "Marketplace", "lv": "Tirdz. vieta"},
+    "table_col.filename": {"en": "File", "lv": "Fails"},
+    "table_col.row_count": {"en": "Rows", "lv": "Rindas"},
+    "table_col.linked_summary": {"en": "Linked", "lv": "Saistīti"},
 
     # ---- Manage Users ----
     "manage_users.users_in": {"en": "Users in {company}", "lv": "Lietotāji uzņēmumā {company}"},

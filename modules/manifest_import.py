@@ -31,6 +31,8 @@ FIELD_HEADER_ALIASES: Dict[str, List[str]] = {
     "item_description": ["item description", "description", "product description", "item name"],
     "qty": ["qty", "quantity", "units"],
     "weight_kg": ["weight (kg)", "weight kg", "weight", "item weight (kg)"],
+    "sku": ["sku", "seller sku", "sku #"],
+    "location": ["location", "shelf", "shelf location", "bin", "bin location", "warehouse location"],
 }
 
 FIELD_LABELS: Dict[str, str] = {
@@ -41,9 +43,17 @@ FIELD_LABELS: Dict[str, str] = {
     "item_description": "Item description",
     "qty": "Qty",
     "weight_kg": "Weight (kg)",
+    "sku": "SKU",
+    "location": "Shelf location",
 }
 
-REQUIRED_FIELDS = ["target_no", "asin", "ean_barcode", "item_description"]
+# Only item_description is truly indispensable — without it there's nothing
+# to identify or search for. target_no/asin/ean_barcode are deliberately
+# NOT required: a manifest missing them is exactly what the identifier-
+# lookup step (find_identifiers(), run automatically after import) exists
+# to fill in — requiring them up front would defeat that feature and block
+# real manifests that simply don't carry every column.
+REQUIRED_FIELDS = ["item_description"]
 
 
 def _normalize_header(h: str) -> str:
@@ -177,8 +187,44 @@ def rows_to_draft_products(
         # never clobbers a quantity a human has since corrected.
         if p.manifest_qty > 0:
             p.quantity = p.manifest_qty
+        # Same one-time-at-creation treatment for a manifest-provided SKU
+        # (blank if the file had no SKU column/value for this row — the
+        # caller then falls back to inventory_store.next_sku_batch() for
+        # exactly those). _apply_manifest_fields() itself must never touch
+        # sku, since it also runs against already-existing matched products
+        # in the Replace flow (see its own docstring).
+        p.sku = row.get("sku", "")
+        # Same reasoning for a manifest-provided shelf location: seeded once
+        # at creation only, never touched by _apply_manifest_fields() so a
+        # Replace-sync of an already-placed product never overwrites a
+        # human's since-corrected shelf location.
+        p.location = row.get("location", "")
         products.append(p)
     return products
+
+
+def check_sku_collisions(rows: List[dict], company_id: str) -> Dict[int, str]:
+    """Returns {row_index: sku} for every row whose manifest-provided SKU
+    already belongs to another product in this SAME company's inventory
+    (tenant-scoped via inventory_store.list_skus(company_id) — a SKU
+    colliding in a different company is not a collision at all). Read-only;
+    used by the Import/Replace preview to flag rows before anything is
+    saved, and again at save time to know which rows must fall back to a
+    fresh auto-generated SKU instead of the manifest's own value."""
+    from modules import inventory_store
+
+    # Uppercased for comparison — SKU lookups elsewhere in this codebase
+    # (e.g. inventory_store.get_product_by_sku()) are case-insensitive, so
+    # collision detection matches that convention rather than being
+    # stricter (and missing a real collision) or looser than the rest of
+    # the app.
+    existing = {s.upper() for s in inventory_store.list_skus(company_id)}
+    collisions: Dict[int, str] = {}
+    for i, row in enumerate(rows):
+        sku = (row.get("sku") or "").strip()
+        if sku and sku.upper() in existing:
+            collisions[i] = sku
+    return collisions
 
 
 def sync_rows_to_products(

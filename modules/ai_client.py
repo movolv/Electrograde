@@ -29,7 +29,17 @@ def _client() -> anthropic.Anthropic:
     # least once in a given call — the SDK already retries these with
     # exponential backoff internally, this just gives it more attempts
     # before giving up and raising to the caller.
-    return anthropic.Anthropic(api_key=api_key, max_retries=5)
+    #
+    # timeout=60 (SDK default is 600s/10min PER ATTEMPT): observed directly
+    # — a manifest import's background identifier-lookup loop stuck for
+    # 10+ minutes on a single ask_json() call with the process at 0% CPU
+    # (blocked on network I/O, not looping), stalling the whole batch at
+    # "Processing" forever with no exception ever raised (5 retries x up to
+    # 10min default = up to ~50min worst case). Every call site that uses
+    # this client already handles a raised exception as a normal "nothing
+    # found" outcome (see identifier_lookup.find_identifiers' try/except
+    # around ask_json), so failing fast here is strictly safer than hanging.
+    return anthropic.Anthropic(api_key=api_key, max_retries=5, timeout=60.0)
 
 
 def _extract_json(text: str) -> dict:

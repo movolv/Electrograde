@@ -50,6 +50,43 @@ def _ddgs_rate_limit_wait() -> None:
 # "this particular attempt happened to draw an unlucky engine subset".
 _RETRY_EMPTY_ATTEMPTS = 2  # extra attempts beyond the first, only if empty
 
+# ddgs 9.x pulls in a much heavier backend stack than its name suggests
+# (multiple search engines plus a DHT/peer-discovery component) and its
+# own internal timeouts don't reliably bound a call — observed directly: a
+# manifest import's identifier-lookup loop stuck for 10+ minutes on a
+# single query with the process at 0% CPU (blocked on I/O, not looping),
+# which stalled a 231-row batch at "Processing" forever with no exception
+# ever raised. Every call is now hard-capped from the outside via a
+# worker-thread timeout, regardless of what's actually stalling inside
+# ddgs — a `search()` result "not found" is a normal, handled outcome
+# everywhere it's called (identifier_lookup.py, spec_lookup.py, pricing.py
+# all fall back gracefully on empty), so timing out and returning [] is
+# safe, unlike letting the calling request hang indefinitely.
+_DDGS_CALL_TIMEOUT_SECONDS = 15
+
+
+def _ddgs_text(query: str, max_results: int) -> List[dict]:
+    with DDGS() as ddgs:
+        return list(ddgs.text(query, max_results=max_results))
+
+
+def _ddgs_text_bounded(query: str, max_results: int) -> List[dict]:
+    """Runs _ddgs_text in a worker thread with a hard wall-clock timeout.
+    On timeout, the pool is shut down WITHOUT waiting for the still-hung
+    worker (shutdown(wait=False)) — waiting would just reintroduce the same
+    indefinite hang this exists to prevent. The orphaned thread dies on its
+    own whenever (if ever) the underlying call finally returns; harmless to
+    leak occasionally in a long-running server process."""
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_ddgs_text, query, max_results)
+        try:
+            return future.result(timeout=_DDGS_CALL_TIMEOUT_SECONDS)
+        except Exception:
+            return []
+    finally:
+        pool.shutdown(wait=False)
+
 
 def search(query: str, max_results: int = 5, retry_on_empty: bool = False) -> List[dict]:
     """Returns raw ddgs.text() hit dicts (each with 'title'/'href'/'body').
@@ -68,11 +105,7 @@ def search(query: str, max_results: int = 5, retry_on_empty: bool = False) -> Li
     hits: List[dict] = []
     for attempt in range(max_attempts):
         _ddgs_rate_limit_wait()
-        try:
-            with DDGS() as ddgs:
-                hits = list(ddgs.text(query, max_results=max_results))
-        except Exception:
-            hits = []
+        hits = _ddgs_text_bounded(query, max_results)
         if hits:
             break
     return hits
