@@ -98,9 +98,8 @@ def build_payload(
     if _wanted("product_description"):
         text_fields[f"description|{language}"] = description or ""
     if _wanted("condition_description") and condition_description:
-        text_fields[f"description_extra1|{language}"] = (
-            f"Condition & Scratches Details: {condition_description}"
-        )
+        label = field_labels_i18n.label("condition_scratches_details", language)
+        text_fields[f"description_extra1|{language}"] = f"{label}: {condition_description}"
 
     # BaseLinker requires a non-empty name (and, empirically, rejects the
     # whole addInventoryProduct call with "Product name not provided" if
@@ -118,8 +117,9 @@ def build_payload(
         if _wanted("product_description"):
             text_fields[f"description|{primary_language}"] = primary_description or ""
         if _wanted("condition_description") and primary_condition_description:
+            primary_label = field_labels_i18n.label("condition_scratches_details", primary_language)
             text_fields[f"description_extra1|{primary_language}"] = (
-                f"Condition & Scratches Details: {primary_condition_description}"
+                f"{primary_label}: {primary_condition_description}"
             )
 
     if existing_listing_id:

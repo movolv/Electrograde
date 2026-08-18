@@ -24,6 +24,11 @@ LABELS = {
     "color": {"en": "Color", "de": "Farbe", "lv": "Krāsa"},
     "power": {"en": "Power", "de": "Leistung", "lv": "Jauda"},
     "barcode": {"en": "EAN", "de": "EAN", "lv": "EAN"},
+    "condition_scratches_details": {
+        "en": "Condition & Scratches Details",
+        "de": "Zustand & Kratzer-Details",
+        "lv": "Stāvoklis un skrāpējumu detaļas",
+    },
 }
 
 
