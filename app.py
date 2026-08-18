@@ -1467,6 +1467,11 @@ current_company = company_store.get_company(current_user.company_id)
 def _init_state():
     defaults = {
         "wizard_step": 1,
+        "last_saved_item_name": "",  # set right before the post-save rerun so
+                                      # Step 1 can show a confirmation banner —
+                                      # an st.success() called just before that
+                                      # rerun would otherwise never reach the
+                                      # screen at all.
         "product": Product(company_id=current_user.company_id),
         "captured_photos": [],       # list of raw bytes
         "pending_photos": {},        # job_id -> concurrent.futures.Future,
@@ -2059,6 +2064,9 @@ if page == PAGE_NEW_ITEM:
 
     # ---- Step 1: Identify — from a manifest draft, or from scratch ----
     if st.session_state.wizard_step == 1:
+        if st.session_state.last_saved_item_name:
+            st.success(T("new_item.saved_to_inventory", name=st.session_state.last_saved_item_name))
+            st.session_state.last_saved_item_name = ""
         st.subheader(T("new_item.start_item"))
         source = st.radio(
             T("new_item.how_to_start"),
@@ -2740,9 +2748,10 @@ if page == PAGE_NEW_ITEM:
                     ))
 
                 audit_store.log_audit(product.company_id, current_user.id, "CREATE_PRODUCT", "product", product.id)
-                st.success(T("new_item.saved_to_inventory", name=product.name or product.model_number))
-                st.balloons()
+                saved_name = product.name or product.model_number
                 reset_wizard()
+                st.session_state.last_saved_item_name = saved_name
+                st.rerun()
 
     st.divider()
     if st.button(T("new_item.start_over")):
