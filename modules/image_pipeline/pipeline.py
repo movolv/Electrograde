@@ -80,13 +80,24 @@ def process_image(
     image = image.convert("RGB")
 
     # Step 2 — detection.
-    rgba, mask, confidence = detector.detect(image, use_gpu=config.use_gpu)
+    rgba, mask, confidence, segmentation = detector.detect(image, use_gpu=config.use_gpu, config=config)
     if not mask.any():
         raise ValueError("No foreground product detected in this photo.")
+    log.separation = segmentation["separation"]
+    log.low_contrast_segmentation = segmentation["low_contrast"]
+    log.mask_threshold_used = segmentation["mask_threshold"]
+    log.components_dropped = segmentation["components_dropped"]
+    log.holes_filled = segmentation["holes_filled"]
 
     # Step 4 — perspective correction (in-plane rotation only; see
-    # perspective.py for why full 3D correction isn't attempted).
-    rgba, mask, _ = perspective.correct_perspective(rgba, mask)
+    # perspective.py for why full 3D correction isn't attempted). The mask
+    # threshold is passed through so the post-rotation mask is rebuilt with
+    # the SAME definition of "product pixel" detection just used — on a
+    # low-contrast photo detection lowers that threshold, and re-deriving
+    # the mask at a stricter one here would quietly undo part of the repair.
+    rgba, mask, _ = perspective.correct_perspective(
+        rgba, mask, mask_threshold=segmentation["mask_threshold"]
+    )
 
     # Step 3 — background removal outcome: crop to just the product.
     cropped = background.crop_to_mask(rgba, mask)

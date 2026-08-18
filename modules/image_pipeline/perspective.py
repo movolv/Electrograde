@@ -37,10 +37,16 @@ def _normalize_angle(angle: float) -> float:
     return angle
 
 
-def correct_perspective(rgba: Image.Image, mask: np.ndarray) -> tuple[Image.Image, np.ndarray, bool]:
+def correct_perspective(
+    rgba: Image.Image, mask: np.ndarray, mask_threshold: int = 10
+) -> tuple[Image.Image, np.ndarray, bool]:
     """Returns (possibly-rotated rgba, updated mask, corrected: bool).
     No-ops (returns inputs unchanged, corrected=False) if the mask is
     empty, degenerate, or already close enough to axis-aligned.
+
+    `mask_threshold` is only used to rebuild the mask after a rotation
+    actually happens, and must match whatever detector.detect() used for
+    this photo — the rotation itself is unchanged.
     """
     mask_u8 = mask.astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -67,5 +73,5 @@ def correct_perspective(rgba: Image.Image, mask: np.ndarray) -> tuple[Image.Imag
         return rgba, mask, False
 
     rotated = rgba.rotate(-angle, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0))
-    rotated_mask = np.array(rotated.getchannel("A")) > 10
+    rotated_mask = np.array(rotated.getchannel("A")) > mask_threshold
     return rotated, rotated_mask, True

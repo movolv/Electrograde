@@ -39,6 +39,15 @@ class ProcessingLog:
     re-running the pipeline with print statements added back in."""
     material_profile: str = "neutral"
     specular_coverage: float = 0.0
+    # Segmentation (detector.py): what the adaptive path decided and what
+    # it had to repair. `separation` is the measured product-vs-background
+    # tonal distance the low_contrast decision came from, so a bad cutout
+    # can be diagnosed without re-running segmentation by hand.
+    separation: float = 0.0
+    low_contrast_segmentation: bool = False
+    mask_threshold_used: int = 0
+    components_dropped: int = 0
+    holes_filled: int = 0
     exposure_gamma: float = 1.0
     exposure_compressed: bool = False
     denoise_h: float = 0.0
