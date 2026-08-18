@@ -293,6 +293,45 @@ def delete_product(product_id: str, company_id: str) -> None:
     product_translation_store.delete_translations_for_product(product_id, company_id)
 
 
+def find_resumable_item(company_id: str) -> Optional[Product]:
+    """The New Item wizard checkpoints status="in_progress" + wizard_step
+    on every forward step (see app.py) so a lost session — most commonly a
+    phone call interrupting mobile photo capture — has something durable
+    to resume from. Returns the most recently created in_progress record,
+    if any; list_products() already orders by created_at DESC."""
+    items = list_products(company_id, status="in_progress")
+    return items[0] if items else None
+
+
+def revert_manifest_draft(product_id: str, company_id: str) -> None:
+    """Undoes New Item wizard progress on a manifest-sourced item, back to
+    exactly the pristine draft rows_to_draft_products() would have created
+    — used when a user discards a resumable in-progress item rather than
+    finishing it. Only the manifest-origin fields (plus sku/location,
+    seeded once at import time) survive; every AI/manual field the wizard
+    touched is dropped. A product with no manifest_import_id has no
+    "draft" to revert to — callers should delete_product() it instead."""
+    p = get_product(product_id, company_id)
+    if p is None or not p.manifest_import_id:
+        return
+    fresh = Product(
+        id=p.id, company_id=p.company_id, status="draft",
+        sku=p.sku, location=p.location,
+        manifest_import_id=p.manifest_import_id,
+        manifest_target_no=p.manifest_target_no,
+        manifest_subcategory=p.manifest_subcategory,
+        asin=p.asin,
+        manifest_barcode=p.manifest_barcode,
+        manifest_item_description=p.manifest_item_description,
+        manifest_qty=p.manifest_qty,
+        manifest_weight_kg=p.manifest_weight_kg,
+        quantity=p.manifest_qty if p.manifest_qty > 0 else 1,
+        weight_kg=p.manifest_weight_kg if p.manifest_weight_kg > 0 else 0.0,
+        created_at=p.created_at,
+    )
+    save_product(fresh)
+
+
 def list_products_by_manifest(manifest_import_id: str, company_id: str) -> List[Product]:
     """All products (any status) linked to a given manifest batch."""
     conn = _connect()

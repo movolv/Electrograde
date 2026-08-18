@@ -301,6 +301,11 @@ TRANSLATIONS: dict = {
     "new_item.photos_col": {"en": "Photos", "lv": "Fotogrāfijas"},
     "new_item.save_item": {"en": "✅ Save item", "lv": "✅ Saglabāt preci"},
     "new_item.saved_to_inventory": {"en": "Saved '{name}' to inventory.", "lv": "'{name}' saglabāts inventārā."},
+    "new_item.resume_dialog_title": {"en": "Unfinished item", "lv": "Nepabeigta prece"},
+    "new_item.resume_step_caption": {"en": "Left off at step {step} of {total}.", "lv": "Pieturēts pie {step}. soļa no {total}."},
+    "new_item.resume_photo_count": {"en": "{count} photo(s) already captured.", "lv": "Jau uzņemtas {count} fotogrāfija(-as)."},
+    "new_item.resume_continue": {"en": "▶️ Continue", "lv": "▶️ Turpināt"},
+    "new_item.resume_discard": {"en": "🗑️ Discard", "lv": "🗑️ Atmest"},
     "new_item.start_over": {"en": "🔄 Start over / discard this item", "lv": "🔄 Sākt no jauna / atmest šo preci"},
 
     "new_item.photos_captured": {"en": "{count} photo(s) captured", "lv": "Uzņemtas {count} fotogrāfija(s)"},

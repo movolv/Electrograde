@@ -8,6 +8,7 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -73,6 +74,15 @@ load_dotenv()
 
 UPLOAD_DIR = Path(__file__).resolve().parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Staging area for New Item wizard photos, written as each one is captured
+# (not just at the final Save) so an interrupted session — a phone call
+# during Step 2 is the common case — has something durable to resume from.
+# Keyed by product.id (stable from the moment the wizard starts, unlike
+# sku_folder_name()'s SKU-based naming, which for a from-scratch item isn't
+# fixed until Step 2's own "Next"). See _sync_wip_photos_to_disk() /
+# _load_wip_photos_from_disk() / _clear_wip_photos() below.
+WIP_PHOTOS_DIR = UPLOAD_DIR / "_wip"
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 THUMBS_DIR = STATIC_DIR / "thumbnails"
@@ -661,6 +671,36 @@ def _normalize_captured_photo(raw_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+def _wip_photo_dir(product) -> Path:
+    return WIP_PHOTOS_DIR / product.company_id / product.id
+
+
+def _sync_wip_photos_to_disk(product) -> None:
+    """Rewrites the WIP folder from st.session_state.captured_photos —
+    called after every add/replace/delete in Step 2, not just once, so the
+    on-disk copy never drifts from what the wizard actually has. Full
+    rewrite rather than incremental add/remove: at most ~16 small JPEGs,
+    cheap enough to just always match the in-memory list exactly rather
+    than tracking per-photo filenames through deletes/reordering."""
+    wip_dir = _wip_photo_dir(product)
+    wip_dir.mkdir(parents=True, exist_ok=True)
+    for old in wip_dir.glob("*.jpg"):
+        old.unlink()
+    for i, img_bytes in enumerate(st.session_state.captured_photos):
+        (wip_dir / f"{i:03d}.jpg").write_bytes(img_bytes)
+
+
+def _load_wip_photos_from_disk(product) -> list:
+    wip_dir = _wip_photo_dir(product)
+    if not wip_dir.exists():
+        return []
+    return [f.read_bytes() for f in sorted(wip_dir.glob("*.jpg"))]
+
+
+def _clear_wip_photos(product) -> None:
+    shutil.rmtree(_wip_photo_dir(product), ignore_errors=True)
+
+
 @st.fragment(run_every=1)
 def _render_photo_gallery(product):
     """Background-processing-aware Step 2 gallery + SKU + nav controls.
@@ -684,6 +724,7 @@ def _render_photo_gallery(product):
             del st.session_state.pending_photos[job_id]
             try:
                 st.session_state.captured_photos.append(future.result())
+                _sync_wip_photos_to_disk(product)
             except Exception as e:
                 st.error(T("new_item.photo_processing_failed", error=e))
 
@@ -715,6 +756,7 @@ def _render_photo_gallery(product):
                             st.error(T("new_item.background_removal_failed", error=e))
                         else:
                             st.session_state.captured_photos[0] = enhanced.jpeg_bytes
+                            _sync_wip_photos_to_disk(product)
                             if enhanced.low_resolution:
                                 st.session_state.photo0_low_res_warning = True
                             for warning in report.warnings:
@@ -726,6 +768,7 @@ def _render_photo_gallery(product):
                 if i == 0:
                     st.session_state.photo0_low_res_warning = False
                 st.session_state.captured_photos.pop(i)
+                _sync_wip_photos_to_disk(product)
                 st.rerun(scope="fragment")
 
     for j in range(pending_count):
@@ -764,6 +807,9 @@ def _render_photo_gallery(product):
     with col3:
         if st.button(T("common.next"), type="primary", use_container_width=True, disabled=not photos or sku_missing or bool(pending_count)):
             product.sku = sku_input.strip()
+            product.status = "in_progress"
+            product.wizard_step = 3
+            inventory_store.save_product(product)
             st.session_state.wizard_step = 3
             st.rerun()
 
@@ -1472,6 +1518,11 @@ def _init_state():
                                       # an st.success() called just before that
                                       # rerun would otherwise never reach the
                                       # screen at all.
+        "resume_checked": False,     # one-shot per session: has the New Item
+                                      # page already looked for a resumable
+                                      # in-progress item this session?
+        "resume_candidate_id": None, # set when found — drives the Resume/
+                                      # Discard dialog until the user decides.
         "product": Product(company_id=current_user.company_id),
         "captured_photos": [],       # list of raw bytes
         "pending_photos": {},        # job_id -> concurrent.futures.Future,
@@ -2044,8 +2095,72 @@ page = st.sidebar.radio(
 if not _ai_configured():
     st.sidebar.warning(T("sidebar.ai_key_missing"))
 
+
+@st.dialog(T("new_item.resume_dialog_title"))
+def _resume_or_discard_dialog(product_id: str) -> None:
+    """Forces a decision on a stale in_progress item before the New Item
+    wizard can be used for anything else this session — see
+    inventory_store.find_resumable_item()'s docstring for why this exists.
+    No dismiss-and-ignore path: ESC/click-outside just leaves
+    resume_candidate_id set, so the exact same dialog reopens on the very
+    next rerun rather than silently losing track of unresolved work."""
+    product = inventory_store.get_product(product_id, st.session_state.company_id)
+    if product is None:
+        # Resolved from elsewhere (e.g. deleted) since the check ran.
+        st.session_state.resume_candidate_id = None
+        st.rerun()
+        return
+
+    st.write(f"**{T('common.sku')}:** {product.sku or '—'}")
+    st.write(f"**{T('common.name')}:** {product.name or product.manifest_item_description or '—'}")
+    st.caption(T("new_item.resume_step_caption", step=max(1, product.wizard_step), total=6))
+    photo_count = len(list(_wip_photo_dir(product).glob("*.jpg"))) if _wip_photo_dir(product).exists() else 0
+    if photo_count:
+        st.caption(T("new_item.resume_photo_count", count=photo_count))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(T("new_item.resume_continue"), type="primary", use_container_width=True):
+            st.session_state.product = product
+            st.session_state.wizard_step = max(1, product.wizard_step)
+            st.session_state.captured_photos = _load_wip_photos_from_disk(product)
+            st.session_state.seen_photo_hashes = {
+                hashlib.sha256(b).hexdigest() for b in st.session_state.captured_photos
+            }
+            st.session_state.pending_photos = {}
+            st.session_state.resume_candidate_id = None
+            st.rerun()
+    with col2:
+        if st.button(T("new_item.resume_discard"), use_container_width=True):
+            if product.manifest_import_id:
+                inventory_store.revert_manifest_draft(product.id, product.company_id)
+            else:
+                inventory_store.delete_product(product.id, product.company_id)
+            _clear_wip_photos(product)
+            st.session_state.resume_candidate_id = None
+            st.rerun()
+
+
 # =========================================================== NEW ITEM ====
 if page == PAGE_NEW_ITEM:
+    # One-shot per session: does this company have a wizard item that got
+    # checkpointed as "in_progress" but never reached Save? The common
+    # cause is a lost mobile session mid-capture (e.g. a phone call) — see
+    # inventory_store.find_resumable_item()/Product.wizard_step. Checked
+    # once per fresh session, not every rerun, so it never re-interrupts
+    # someone who already decided (or who is simply progressing normally
+    # through their OWN item, which is also "in_progress" the moment they
+    # click past Step 1 — resume_checked being already True by then is
+    # exactly what stops this from firing on their own in-flight work).
+    if not st.session_state.resume_checked:
+        st.session_state.resume_checked = True
+        candidate = inventory_store.find_resumable_item(st.session_state.company_id)
+        if candidate is not None:
+            st.session_state.resume_candidate_id = candidate.id
+
+    if st.session_state.resume_candidate_id:
+        _resume_or_discard_dialog(st.session_state.resume_candidate_id)
+
     st.title(T("nav.new_item"))
     steps = [T("new_item.step1"), T("new_item.step2"), T("new_item.step3"),
              T("new_item.step4"), T("new_item.step5"), T("new_item.step6")]
@@ -2119,6 +2234,8 @@ if page == PAGE_NEW_ITEM:
 
                     if st.button(T("new_item.use_this_item"), type="primary", use_container_width=True):
                         chosen.status = "in_progress"
+                        chosen.wizard_step = 2
+                        inventory_store.save_product(chosen)
                         st.session_state.product = chosen
                         st.session_state.wizard_step = 2
                         st.rerun()
@@ -2157,6 +2274,8 @@ if page == PAGE_NEW_ITEM:
                         product.ean_status = "Found"
                     product.company_id = st.session_state.company_id
                     product.status = "in_progress"
+                    product.wizard_step = 2
+                    inventory_store.save_product(product)
                     st.session_state.wizard_step = 2
                     st.rerun()
 
@@ -2338,6 +2457,8 @@ if page == PAGE_NEW_ITEM:
                     product.asin_source = "manual" if asin_in.strip() else ""
                     product.asin_candidates = []
 
+                product.wizard_step = 4
+                inventory_store.save_product(product)
                 st.session_state.wizard_step = 4
                 st.rerun()
 
@@ -2512,6 +2633,8 @@ if page == PAGE_NEW_ITEM:
                 product.product_match = match_in
                 product.match_confidence = int(match_conf_in)
                 product.match_notes = _wizard_commit_text("match_notes", match_notes_val_en, match_notes_in)
+                product.wizard_step = 5
+                inventory_store.save_product(product)
                 st.session_state.wizard_step = 5
                 st.rerun()
 
@@ -2603,6 +2726,8 @@ if page == PAGE_NEW_ITEM:
                 product.condition_description = _wizard_commit_text(
                     "condition_description", condition_desc_val_en, condition_desc_in,
                 )
+                product.wizard_step = 6
+                inventory_store.save_product(product)
                 st.session_state.wizard_step = 6
                 st.rerun()
 
@@ -2695,6 +2820,7 @@ if page == PAGE_NEW_ITEM:
                 product.quantity = int(quantity_in)
                 product.status = "completed"
                 product.review_status = "ready"
+                product.wizard_step = 0
                 product.company_id = st.session_state.company_id
 
                 item_dir = UPLOAD_DIR / product.company_id / sku_folder_name(product.sku, product.id)
@@ -2705,6 +2831,9 @@ if page == PAGE_NEW_ITEM:
                     fp.write_bytes(img_bytes)
                     saved_paths.append(str(fp))
                 product.image_paths = saved_paths
+                # The WIP copies were only ever a resume safety net — the
+                # real photos now live under item_dir above.
+                _clear_wip_photos(product)
 
                 inventory_store.save_product(
                     product,

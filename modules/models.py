@@ -37,6 +37,12 @@ class Product:
     company_id: str = "default"
     status: str = "draft"  # draft (manifest, unprocessed) -> in_progress -> completed
     sku: str = ""  # manual-only, mandatory before save, never written by AI
+    # Which New Item wizard step this record was last checkpointed at
+    # (1-6), while status == "in_progress" — lets a lost session (e.g. a
+    # phone call interrupting mobile photo capture) resume exactly where
+    # it left off instead of losing the work. Meaningless once status is
+    # "draft" or "completed".
+    wizard_step: int = 0
 
     # -- MANIFEST (imported as-is, read-only origin data; not authoritative) --
     manifest_import_id: str = ""
