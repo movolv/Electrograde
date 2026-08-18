@@ -77,10 +77,17 @@ _HEAD_SNIPPET = """
   }
 
   // Register the service worker against the PARENT window/origin (not this
-  // sandboxed iframe) — best-effort; requires HTTPS or localhost.
+  // sandboxed iframe) — best-effort; requires HTTPS or localhost. Scope is
+  // capped by the browser to the directory the script itself is served
+  // from (sw.js lives under /app/static/, via Streamlit's static file
+  // serving — there's no way to serve it from the site root), so
+  // requesting scope '/' is silently rejected and registration never
+  // succeeds. '/app/static/' is the real max: still enough to control the
+  // shell assets sw.js actually caches (manifest.json, icons/*), which is
+  // all this service worker does — see static/sw.js.
   try {
     if (window.parent.navigator.serviceWorker) {
-      window.parent.navigator.serviceWorker.register(base + '/app/static/sw.js', { scope: base + '/' }).catch(() => {});
+      window.parent.navigator.serviceWorker.register(base + '/app/static/sw.js', { scope: base + '/app/static/' }).catch(() => {});
     }
   } catch (e) { /* cross-origin or unsupported, ignore */ }
 })();

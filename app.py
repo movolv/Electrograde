@@ -1523,6 +1523,7 @@ def _init_state():
                                       # in-progress item this session?
         "resume_candidate_id": None, # set when found — drives the Resume/
                                       # Discard dialog until the user decides.
+        "_last_scrolled_wizard_step": 1,  # see _scroll_wizard_to_top_if_step_changed()
         "product": Product(company_id=current_user.company_id),
         "captured_photos": [],       # list of raw bytes
         "pending_photos": {},        # job_id -> concurrent.futures.Future,
@@ -2141,6 +2142,59 @@ def _resume_or_discard_dialog(product_id: str) -> None:
             st.rerun()
 
 
+def _scroll_wizard_to_top_if_step_changed() -> None:
+    """Scrolls the page to the top exactly when st.session_state.wizard_step
+    has actually changed since the last render — covers Next, Back, "Use
+    this item", Save (which lands back on Step 1), Discard, and the resume
+    dialog's Continue alike, since every one of those is, definitionally,
+    "the step changed" — without hardcoding a list of buttons that would
+    inevitably miss one.
+
+    Deliberately does NOT fire on a rerun that leaves wizard_step
+    unchanged: Step 2's photo gallery is an st.fragment(run_every=1) that
+    ticks on its own every second, and Step 3's spec-lookup status does the
+    same — a naive "scroll on every rerun" would yank those steps back to
+    the top while someone is mid-scroll reviewing photos or reading specs.
+    A fragment's own run_every tick re-executes only the fragment function,
+    never this outer script body, so those ticks never even reach this
+    check; nor does an st.rerun(scope="fragment") from inside one (e.g. the
+    photo gallery's delete/clean-background buttons).
+
+    Streamlit has no scroll API of its own (checked: nothing under
+    st.*scroll* as of the pinned version) and — confirmed by inspecting the
+    live DOM — this app's content does not scroll the browser window at
+    all; the actual overflow container is Streamlit's own
+    section[data-testid="stMain"]. window.scrollTo() alone is a no-op here.
+    Runs against window.parent (this snippet executes inside components.
+    html's own sandboxed iframe) — same cross-origin-safe pattern
+    modules/pwa.py already uses. No mobile-specific branch needed; it's
+    the same DOM API on every browser."""
+    # Gated on an actual step change, not "any rerun", so Step 2/3's own
+    # run_every fragment ticks (which never touch wizard_step) can't yank
+    # the page back to the top while someone is mid-scroll.
+    if st.session_state.wizard_step == st.session_state.get("_last_scrolled_wizard_step"):
+        return
+    st.session_state._last_scrolled_wizard_step = st.session_state.wizard_step
+    st.components.v1.html(
+        """
+        <script>
+        (function() {
+          const doc = window.parent.document;
+          // stMain is what actually scrolls in this app — the browser
+          // window itself never does — so window.scrollTo(0,0) alone is a
+          // no-op here; stAppViewContainer is a fallback for older/other
+          // Streamlit layouts.
+          const main = doc.querySelector('section[data-testid="stMain"]')
+                     || doc.querySelector('[data-testid="stAppViewContainer"]');
+          if (main) { main.scrollTo({top: 0, behavior: 'instant'}); }
+          window.parent.scrollTo(0, 0);
+        })();
+        </script>
+        """,
+        height=0, width=0,
+    )
+
+
 # =========================================================== NEW ITEM ====
 if page == PAGE_NEW_ITEM:
     # One-shot per session: does this company have a wizard item that got
@@ -2167,6 +2221,8 @@ if page == PAGE_NEW_ITEM:
     st.progress((st.session_state.wizard_step - 1) / (len(steps) - 1), text=steps[st.session_state.wizard_step - 1])
 
     product: Product = st.session_state.product
+
+    _scroll_wizard_to_top_if_step_changed()
 
     # Safety net: resolves any Step 3 background lookup jobs that finished
     # since the last rerun, regardless of which wizard step is on screen
