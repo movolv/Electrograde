@@ -1361,19 +1361,169 @@ def _translated_columns(cols: list) -> list:
     return [{**c, "headerName": T(f"table_col.{c['field']}")} for c in cols]
 
 
+# ---- iOS PWA safe-area fix — installed to the home screen (manifest.json's
+# "display": "standalone"), this app runs with no Safari chrome at all, so
+# modules/pwa.py's viewport-fit=cover (needed for edge-to-edge on notched/
+# Dynamic-Island iPhones) means the page starts genuinely at the physical
+# top of the screen, right under the status bar/notch — confirmed via user
+# screenshots that Streamlit's own header (the ">>" sidebar toggle and "⋮"
+# menu) and the language selector below render underneath/behind it there,
+# while a plain Safari TAB (not installed) has no problem at all, because
+# Safari's own chrome already occupies that space and the page never
+# extends into it. env(safe-area-inset-top) is exactly 0 in that normal-tab
+# case (and on any non-notched device/desktop), so this is safe to apply
+# unconditionally rather than needing to detect standalone mode.
+#
+# GROW the bars, don't MOVE them. An earlier version of this fix pushed
+# both header bars DOWN with `top: <offset>`, which lined the buttons up
+# correctly but left a transparent strip above them — and since page
+# content scrolls UNDERNEATH these bars (they're opaque overlays:
+# stHeader's computed background is a solid rgb(17,24,39), confirmed live),
+# that strip let scrolled content show through at the very top of the
+# screen, which is exactly what the user's screenshot showed. Both bars are
+# `box-sizing: border-box; display: flex; align-items: center; height:
+# 60px`, so adding top padding AND the same amount of height keeps their
+# 60px content box (and therefore every button in it) at the identical
+# position the user already confirmed as correct, while the background now
+# starts at y=0 with no gap to see through.
+#
+# The added padding/height is EXACTLY the inset and nothing more, so at
+# env(safe-area-inset-top) = 0 — every desktop browser, and a plain Safari
+# tab, where the user confirmed the layout was already correct — the rules
+# below evaluate to Streamlit's own untouched `padding-top: 0; height:
+# 60px`, i.e. this whole block is a guaranteed no-op there. Verified by
+# measurement, not assumed: header height 70px vs 60px was the giveaway
+# that an earlier `0.6rem + inset` version was quietly shifting the normal
+# (working) case too.
+#
+# --eg-safe-top exists so the inset is named in exactly one place and,
+# critically, so it can be overridden to a fixed pixel value in testing —
+# env(safe-area-inset-top) is always 0 in every browser/emulator available
+# here, which is why several rounds of this fix shipped to the user's phone
+# unverified. Overriding `:root { --eg-safe-top: 62px }` in a Playwright
+# style tag reproduces an iPhone 16 Pro Max's standalone-mode inset
+# locally, which is how this version was checked before shipping.
+_SAFE_TOP = "var(--eg-safe-top)"
+st.markdown(
+    f"""
+    <div style="height: {_SAFE_TOP};"></div>
+    <style>
+    :root {{
+        --eg-safe-top: env(safe-area-inset-top);
+    }}
+    header[data-testid="stHeader"],
+    div[data-testid="stSidebarHeader"] {{
+        top: 0 !important;
+        box-sizing: border-box !important;
+        padding-top: {_SAFE_TOP} !important;
+        height: calc(60px + {_SAFE_TOP}) !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# Belt-and-suspenders JS enforcer for the same header offset, on top of the
+# plain <style> rule above — on the reporting user's real iPhone, a fresh
+# cold-launch from the home-screen icon left the header sitting too low
+# (the CSS rule not yet in effect at first paint), while toggling the
+# sidebar open then closed again self-corrected it — strongly suggesting a
+# first-paint timing race, not a wrong rule. Exact same delivery mechanism
+# already proven reliable on this specific device for the wizard's scroll-
+# to-top fix (see _scroll_wizard_to_top_if_step_changed's docstring for why
+# an in-render-tree, non-display:none <iframe srcdoc> is what actually
+# executes on iOS Safari): sets the same inline style directly via JS.
+#
+# It MEASURES instead of calculating. Every previous version of this fix
+# computed where the bars ought to sit from a model of the device's box
+# model (`padding-top: <inset>`, etc.) and shipped it — and on the real
+# iPhone the buttons landed exactly one full inset lower than that model
+# predicted, meaning something in the standalone-PWA layout offsets these
+# bars in a way not reproducible in any browser available here. Rather
+# than keep guessing at what that something is, this reads the live
+# geometry of the language selector (whose position the user confirmed is
+# correct) and shifts each bar's padding by whatever delta actually
+# remains, so the bars end up on that line by construction, on any device,
+# whatever the underlying cause. Converges in one pass — padding-top moves
+# the bar's centred content 1:1 — and the <1px guard stops it from
+# thrashing once aligned.
+#
+# Height is kept at 60px + padding so the bar's opaque background still
+# covers from y=0 up through the notch: content scrolls UNDERNEATH these
+# bars, so any transparent strip above them shows scrolled content through
+# it, which was its own separate reported bug.
+#
+# A fixed retry schedule (tried first) was not enough: navigating to a
+# heavier page (Orders, with its large data grid) left the bars unfixed on
+# the user's device, that page's rerender simply outlasting the retry
+# window. The MutationObserver re-runs this on every DOM change for as
+# long as the page is open, so it self-heals after ANY rerender regardless
+# of how long that page takes to settle. It deliberately watches only
+# childList/subtree (node additions/removals) and not attributes, so the
+# style writes below cannot re-trigger it.
+_safe_area_js = (
+    "(function(){"
+    "var W=window.parent,D=W.document;"
+    "function align(){"
+    "var lang=D.querySelector('div[class*=st-key-lang_selector]');"
+    "if(!lang){return;}"
+    "var lr=lang.getBoundingClientRect();"
+    "if(!lr.height){return;}"
+    "var target=lr.top+lr.height/2;"
+    "['header[data-testid=stHeader]','div[data-testid=stSidebarHeader]']"
+    ".forEach(function(sel){"
+    "var el=D.querySelector(sel);"
+    "if(!el){return;}"
+    "var btn=el.querySelector('button');"
+    "if(!btn){return;}"
+    "var br=btn.getBoundingClientRect();"
+    "if(!br.height){return;}"
+    "var delta=target-(br.top+br.height/2);"
+    "if(Math.abs(delta)<1){return;}"
+    "var pad=parseFloat(W.getComputedStyle(el).paddingTop)||0;"
+    "var next=Math.max(0,pad+delta);"
+    "el.style.setProperty('top','0','important');"
+    "el.style.setProperty('box-sizing','border-box','important');"
+    "el.style.setProperty('padding-top',next+'px','important');"
+    "el.style.setProperty('height',(60+next)+'px','important');"
+    "});"
+    "}"
+    "align();"
+    "if(!W.__egSafeAreaObserver){"
+    "W.__egSafeAreaObserver=new W.MutationObserver(align);"
+    "W.__egSafeAreaObserver.observe(D.body,{childList:true,subtree:true});"
+    "}"
+    "[50,150,400,900,1800].forEach(function(ms){setTimeout(align,ms);});"
+    "})();"
+)
+_safe_area_srcdoc = html.escape(f"<!--{uuid.uuid4().hex}--><script>{_safe_area_js}</script>", quote=True)
+st.markdown(
+    f'<iframe srcdoc="{_safe_area_srcdoc}" aria-hidden="true" tabindex="-1" '
+    'style="position:absolute;width:1px;height:1px;opacity:0;border:0;'
+    'pointer-events:none;"></iframe>',
+    unsafe_allow_html=True,
+)
+
 # ---- Language selector — fixed top-right, next to Streamlit's own "⋮"
 # menu/Deploy button (rendered by Streamlit's own app shell, not this
 # script's normal layout flow, so a plain st.columns placement can't reach
 # it — CSS position:fixed targeting this selectbox's own st-key-* container
 # is what actually relocates it there; same "target by st-key-<key>" CSS
 # scoping already used elsewhere in this file, e.g. the pagination buttons).
+# The 0.6rem here is Streamlit's own header inset (this selector has to
+# line up with the "⋮" menu button next to it, which sits in a 60px bar
+# whose content is vertically centred); --eg-safe-top then pushes the whole
+# row clear of a notched iPhone's status bar in standalone PWA mode, the
+# same single source of truth the header bars above use. Both land within
+# 1px of each other at inset 0 AND at inset 62px — verified by measuring
+# both under the local safe-area simulation, since guessing at this
+# alignment is exactly what cost several failed rounds.
 # Rendered on every page, including the pre-login screen, never per-page.
 st.markdown(
     """
     <style>
     div[class*="st-key-lang_selector"] {
         position: fixed;
-        top: 0.6rem;
+        top: calc(0.6rem + var(--eg-safe-top));
         right: 4.2rem;
         z-index: 999999;
         width: 6.5rem;
