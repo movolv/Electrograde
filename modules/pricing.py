@@ -5,8 +5,17 @@ Two signals, tried in order:
    same currency (modules/order_store.find_historical_sale_prices) — free,
    zero scraping noise, and already this company's real market. Used
    whenever there's enough history to trust.
-2. Otherwise, a best-effort web search for used-market listings, with
-   prices extracted from result snippets via regex.
+2. Otherwise, a best-effort web search for used-market listings, cached
+   cross-tenant by brand+model+currency for PRICE_CACHE_TTL_SECONDS (see
+   modules/price_cache_store.py) so the same model isn't re-searched from
+   scratch every time — by this company or any other. Prices are extracted
+   by asking Claude to read the actual search snippets/page text and
+   report only prices that are (a) explicitly in EUR and (b) for this same
+   product, not an accessory/case/different variant/unrelated item — see
+   _extract_prices_ai(). A plain regex pass over the same text is kept as a
+   fallback for when the AI call itself fails (no API key configured,
+   rate-limited, network error): strictly worse at judging relevance, but
+   still correctly EUR-only, so the feature degrades instead of going dark.
 
 Either way, the final number is a heuristic, not a guarantee — always
 shown as editable in the UI.
@@ -16,7 +25,7 @@ import statistics
 from dataclasses import dataclass
 from typing import List, Optional
 
-from modules import order_store, web_search
+from modules import ai_client, order_store, price_cache_store, web_search
 
 PRODUCT_CONDITION_MULTIPLIER = {
     "A": 1.00,
@@ -85,21 +94,110 @@ class PriceEstimate:
     reasoning: str = ""
 
 
-def _search_prices(model_name: str, max_results: int = 8) -> List[float]:
+def _regex_extract_prices(hits: List[dict]) -> List[float]:
+    """The original extraction method — kept only as a fallback for when
+    _extract_prices_ai() can't run at all (see module docstring). Cannot
+    tell a price for THIS product apart from one for an accessory, a
+    different variant, or an unrelated item mentioned on the same page;
+    _extract_prices_ai() is what actually fixes that."""
     prices = []
-    query = f"{model_name} used price EUR"
-    # retry_on_empty: this project's own measurements (see web_search.py)
-    # found DDGS returns 0 results on roughly half of all calls purely from
-    # which underlying engine subset it happened to try — worth the extra
-    # latency here since this only runs once per "Estimate market price"
-    # click, not in a tight per-row loop.
-    for hit in web_search.search(query, max_results=max_results, retry_on_empty=True):
+    for hit in hits:
         body = hit.get("body", "") + " " + hit.get("title", "")
         for prefix, suffix in PRICE_RE.findall(body):
             val = _parse_price_str(prefix or suffix)
             if val is not None and 5 <= val <= 5000:
                 prices.append(val)
     return prices
+
+
+def _extract_prices_ai(model_name: str, raw_snippets: List[str]) -> List[float]:
+    """Same "read the real text, extract only what's explicitly stated"
+    pattern already proven in modules/identifier_lookup.find_identifiers()
+    (ai_client.ask_json over search snippets + fetched page text). Fixes
+    what a regex fundamentally cannot: whether a price on the page is
+    actually for THIS product (not an accessory, a different storage/color
+    variant, or an unrelated item the page happens to also mention)."""
+    combined = "\n\n---\n\n".join(raw_snippets)[:16000]
+    system = (
+        "You extract resale/market prices for a SPECIFIC consumer electronics "
+        "product from web search results.\n\n"
+        "CRITICAL RULES:\n"
+        "- Only include a price for THIS EXACT product/model — never an "
+        "accessory, case, bundle, spare part, or a clearly different model/"
+        "storage/color variant.\n"
+        f"- Only include a price explicitly stated in EUR ({TARGET_CURRENCY_SYMBOL} "
+        "or the word 'EUR'/'euro') in the text below. Ignore prices in any "
+        "other currency entirely (e.g. $, £, USD, GBP, PLN) even if the "
+        "number looks similar — never convert or guess at an exchange rate.\n"
+        "- Ignore shipping costs, discounts/coupons, and 'was €X now €Y' "
+        "strike-through prices — only the item's actual asking/sale price.\n"
+        "- Never invent, round, or estimate a price that is not explicitly "
+        "written in the text.\n\n"
+        "Respond with STRICT JSON only, no markdown fences, matching exactly:\n"
+        '{"prices": [number, ...]}  (empty list if none qualify)'
+    )
+    user = f"Product: {model_name}\n\nWeb search results:\n{combined}"
+    try:
+        # FAST_MODEL: this is a narrow, bounded extraction (read the text,
+        # pull out a short list of numbers matching explicit rules) — not
+        # open-ended writing or judgment-heavy grading, so a Haiku-tier
+        # model is measurably faster here without giving up accuracy on
+        # this specific shape of task. See ai_client.FAST_MODEL.
+        data = ai_client.ask_json(system, user, model=ai_client.FAST_MODEL)
+    except Exception:
+        return []
+
+    out = []
+    for p in data.get("prices", []) or []:
+        try:
+            val = float(p)
+        except (TypeError, ValueError):
+            continue
+        if 5 <= val <= 5000:
+            out.append(val)
+    return out
+
+
+def _search_prices(model_name: str, max_results: int = 5) -> List[float]:
+    # max_results=5 (was 8): the full page for each hit gets fetched below,
+    # not just its search snippet — with 8, a single slow/unresponsive
+    # source site can dominate this whole call's latency (each fetch has an
+    # 8s timeout, run in parallel, so the tail is bounded by the SLOWEST of
+    # however many URLs there are), and the larger combined text also costs
+    # more time in the AI extraction call. 5 sources is still comfortably
+    # enough for a median, and directly shortens both the fetch tail and
+    # the AI call.
+    query = f"{model_name} used price EUR"
+    # retry_on_empty: this project's own measurements (see web_search.py)
+    # found DDGS returns 0 results on roughly half of all calls purely from
+    # which underlying engine subset it happened to try — worth the extra
+    # latency here since this only runs once per "Estimate market price"
+    # click, not in a tight per-row loop.
+    hits = web_search.search(query, max_results=max_results, retry_on_empty=True)
+    if not hits:
+        return []
+
+    # Fetch the actual pages, not just DuckDuckGo's short snippets — the
+    # same reasoning as identifier_lookup.py's _gather_variant_snippets():
+    # a search snippet is often too short to contain (or clearly attribute)
+    # a price, while the full listing page usually does.
+    urls = [h.get("href") or h.get("link", "") for h in hits if (h.get("href") or h.get("link", ""))]
+    pages = web_search.fetch_pages_parallel(urls) if urls else {}
+    raw_snippets = []
+    for hit in hits:
+        url = hit.get("href") or hit.get("link", "")
+        raw_snippets.append(f"SOURCE: {hit.get('title', '')} ({url})\n{hit.get('body', '')}")
+        page_text = pages.get(url, "") if url else ""
+        if page_text:
+            raw_snippets.append(f"PAGE CONTENT ({url}):\n{page_text}")
+
+    ai_prices = _extract_prices_ai(model_name, raw_snippets)
+    if ai_prices:
+        return ai_prices
+    # AI extraction found nothing usable, or the call itself failed (no API
+    # key, rate limit, network error) — fall back rather than reporting "no
+    # price data" when the search itself actually returned real results.
+    return _regex_extract_prices(hits)
 
 
 def _estimate_from_prices(prices: List[float], multiplier: float) -> tuple:
@@ -134,7 +232,18 @@ def estimate_price(
                 ),
             )
 
-    prices = _search_prices(model_name)
+    cached = price_cache_store.get(brand, model, TARGET_CURRENCY_CODE) if (brand and model) else None
+    if cached is not None:
+        prices = cached.prices
+    else:
+        prices = _search_prices(model_name)
+        # Only cache a real find — see price_cache_store.upsert()'s
+        # docstring on why an empty/not-found result is never cached (DDGS
+        # itself is flaky enough that "nothing found" is often a fluke, not
+        # a fact worth remembering for two weeks).
+        if brand and model and prices:
+            price_cache_store.upsert(brand, model, TARGET_CURRENCY_CODE, prices)
+
     if not prices:
         return PriceEstimate(
             base_market_price=None,

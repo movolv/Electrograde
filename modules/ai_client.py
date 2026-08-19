@@ -15,6 +15,15 @@ import anthropic
 
 TEXT_MODEL = os.environ.get("ELECTROGRADER_TEXT_MODEL", "claude-sonnet-4-5")
 VISION_MODEL = os.environ.get("ELECTROGRADER_VISION_MODEL", "claude-sonnet-4-5")
+# For narrow, bounded extraction tasks (read this text, pull out a short
+# structured list — no open-ended writing/reasoning) — e.g.
+# modules/pricing.py's price extraction. A Haiku-tier model is measurably
+# faster for exactly this shape of call and this task doesn't need Sonnet's
+# extra reasoning depth; call sites opt into it explicitly via
+# ask_json(..., model=FAST_MODEL) rather than this being the new default,
+# since most ask_json() callers (description generation, EAN/ASIN
+# identification) DO benefit from the stronger model.
+FAST_MODEL = os.environ.get("ELECTROGRADER_FAST_MODEL", "claude-haiku-4-5")
 
 
 def _client() -> anthropic.Anthropic:
@@ -50,10 +59,10 @@ def _extract_json(text: str) -> dict:
     return json.loads(match.group(0))
 
 
-def ask_json(system: str, user: str, max_tokens: int = 1500) -> dict:
+def ask_json(system: str, user: str, max_tokens: int = 1500, model: Optional[str] = None) -> dict:
     client = _client()
     resp = client.messages.create(
-        model=TEXT_MODEL,
+        model=model or TEXT_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
