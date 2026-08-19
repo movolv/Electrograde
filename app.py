@@ -2795,7 +2795,8 @@ if page == PAGE_NEW_ITEM:
             if st.button(T("new_item.estimate_price")):
                 with st.spinner(T("new_item.searching_comparable_prices")):
                     st.session_state.price_estimate = pricing.estimate_price(
-                        f"{product.brand} {product.model} {product.name}".strip(), product.product_condition
+                        f"{product.brand} {product.model} {product.name}".strip(), product.product_condition,
+                        company_id=product.company_id, brand=product.brand, model=product.model,
                     )
                 st.rerun()
 

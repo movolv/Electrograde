@@ -12,6 +12,7 @@ customer PII (name/address/email/phone), so tenant isolation here matters
 more than almost anywhere else in the app.
 """
 import json
+import uuid
 from typing import List, Optional, Tuple
 
 from modules import db
@@ -78,6 +79,39 @@ def _connect():
         "CREATE INDEX IF NOT EXISTS idx_orders_searchable_skus_trgm ON orders USING gin (searchable_skus gin_trgm_ops)"
     )
 
+    # One row per order line item, kept in sync with `orders` by
+    # upsert_order()/delete_order() below. Exists solely so
+    # find_historical_sale_prices() (modules/pricing.py's own-sales-history
+    # price signal) can do an indexed ILIKE over item names instead of
+    # decoding every order's JSON `data` blob in Python — at the 100
+    # companies x 100k products scale target, a company can accumulate a
+    # comparable number of historical order lines, and "load every order,
+    # filter in Python" would not hold up at that volume (see
+    # feedback_electrograder_scale_target). Deliberately NOT a foreign key
+    # to orders (this project enforces tenant scoping at the application
+    # layer, not the schema, same as everywhere else in modules/*_store.py).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_items (
+            id TEXT PRIMARY KEY,
+            company_id TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            name TEXT,
+            sku TEXT,
+            ean TEXT,
+            quantity INTEGER,
+            price NUMERIC,
+            currency TEXT,
+            order_date DOUBLE PRECISION
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_order_items_company_order ON order_items(company_id, order_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_order_items_company_sku ON order_items(company_id, sku)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_order_items_name_trgm ON order_items USING gin (name gin_trgm_ops)"
+    )
+
     conn.commit()
     return conn
 
@@ -122,6 +156,23 @@ def upsert_order(order: Order, searchable_skus: str = "") -> None:
                 order.created_at, order.updated_at,
             ),
         )
+        # Re-derive order_items from scratch on every upsert (delete+insert,
+        # not a diff) — cheap (an order rarely has more than a handful of
+        # lines) and correct even when a re-sync changes the item list,
+        # unlike trying to reconcile old vs. new rows individually.
+        conn.execute("DELETE FROM order_items WHERE company_id = ? AND order_id = ?", (order.company_id, order.id))
+        for item in order.items:
+            if item.price <= 0:
+                continue  # zero/negative-price lines (bundled freebies, adjustments) would skew the price signal
+            conn.execute(
+                """INSERT INTO order_items
+                   (id, company_id, order_id, name, sku, ean, quantity, price, currency, order_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    uuid.uuid4().hex[:12], order.company_id, order.id, item.name, item.sku, item.ean,
+                    item.quantity, item.price, order.currency, order.order_date,
+                ),
+            )
     conn.close()
 
 
@@ -181,7 +232,50 @@ def delete_order(order_id: str, company_id: str) -> None:
     conn = _connect()
     with conn:
         conn.execute("DELETE FROM orders WHERE id = ? AND company_id = ?", (order_id, company_id))
+        conn.execute("DELETE FROM order_items WHERE order_id = ? AND company_id = ?", (order_id, company_id))
     conn.close()
+
+
+def find_historical_sale_prices(
+    company_id: str, brand: str, model: str, currency: str, max_results: int = 20,
+) -> List[float]:
+    """The strongest pricing signal available for a new item: this same
+    company's own confirmed past sale prices of the same brand+model, in
+    the same currency — zero cost, zero web-scraping noise, and already in
+    this company's actual market. See modules/pricing.py's estimate_price(),
+    which tries this before falling back to a web search.
+
+    Matches on order_items.name (the marketplace listing title at time of
+    sale — reliably contains brand+model, since that's exactly what
+    integrations/marketplaces/*/mapper.py puts there) via the trigram-
+    indexed ILIKE below, NOT by decoding every order's JSON blob — see
+    idx_order_items_name_trgm in _connect(). `currency` is required and
+    exact-matched (not defaulted/guessed) so a company with mixed-currency
+    order history never has its own numbers silently averaged together
+    across currencies, which was the exact class of bug this whole feature
+    exists to avoid in the web-search fallback."""
+    brand = (brand or "").strip()
+    model = (model or "").strip()
+    currency = (currency or "").strip()
+    if not currency or (not brand and not model):
+        return []
+
+    where = ["company_id = ?", "currency = ?"]
+    params: list = [company_id, currency]
+    if brand:
+        where.append("name ILIKE ?")
+        params.append(f"%{brand}%")
+    if model:
+        where.append("name ILIKE ?")
+        params.append(f"%{model}%")
+
+    conn = _connect()
+    rows = conn.execute(
+        f"SELECT price FROM order_items WHERE {' AND '.join(where)} ORDER BY order_date DESC LIMIT ?",
+        params + [max_results],
+    ).fetchall()
+    conn.close()
+    return [float(r[0]) for r in rows]
 
 
 def count_orders(company_id: str) -> int:

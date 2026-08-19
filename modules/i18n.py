@@ -246,9 +246,9 @@ TRANSLATIONS: dict = {
         "en": "⚠️ This item was flagged as a possible manifest/photo mismatch in the previous step.",
         "lv": "⚠️ Šī prece iepriekšējā solī tika atzīmēta kā iespējama manifesta/fotogrāfiju neatbilstība.",
     },
-    "new_item.estimate_price": {"en": "💲 Estimate market price", "lv": "💲 Novērtēt tirgus cenu"},
+    "new_item.estimate_price": {"en": "💶 Estimate market price", "lv": "💶 Novērtēt tirgus cenu"},
     "new_item.searching_comparable_prices": {"en": "Searching for comparable prices...", "lv": "Meklē salīdzināmas cenas..."},
-    "new_item.estimated_price": {"en": "Estimated average selling price ($)", "lv": "Aptuvenā vidējā pārdošanas cena (€)"},
+    "new_item.estimated_price": {"en": "Estimated average selling price (€)", "lv": "Aptuvenā vidējā pārdošanas cena (€)"},
     "new_item.estimated_price_help": {
         "en": "AI-suggested market price. You can correct it here, or override it again in the final step.",
         "lv": "AI ieteiktā tirgus cena. Vari to labot šeit vai vēlreiz pēdējā solī.",
