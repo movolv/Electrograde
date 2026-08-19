@@ -13,7 +13,7 @@ found, the caller should fall back to manual entry in the UI.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from modules import ai_client, web_search
 
@@ -24,6 +24,11 @@ class SpecResult:
     brand: str = ""
     model: str = ""
     category: str = ""
+    # True when `existing_categories` was given to lookup() but nothing in
+    # it was a confident enough match — `category` is "" in that case,
+    # never a freshly-invented string. The wizard surfaces this as "needs
+    # category review" rather than silently leaving the field blank.
+    category_needs_review: bool = False
     power: str = ""  # e.g. "1200W" — empty if not found/not applicable
     spec_summary: str = ""
     box_contents: List[str] = field(default_factory=list)
@@ -89,11 +94,29 @@ def lookup(
     asin: str = "",
     model_number: str = "",
     item_description: str = "",
+    existing_categories: Optional[List[str]] = None,
 ) -> SpecResult:
     """Look up product specs from whichever identifiers are available.
 
     At least one of ean/asin/model_number/item_description should be given;
     all available ones are combined into the search query for best results.
+
+    `existing_categories`, when given (the calling product's own company's
+    Category Catalog names — see modules/category_store.py), constrains
+    "category" in the AI response to one of those names verbatim, or ""
+    (with category_needs_review=True) if none fit confidently — the AI is
+    never allowed to invent a new category string. Omitted (None/empty),
+    the call falls back to the old fully-unconstrained free-text behavior.
+
+    Note for callers feeding app.py's cross-tenant lookup_cache_store: the
+    result (including `category`) may get cached and later reused as a
+    Level-0 instant hit for a DIFFERENT company's lookup of the same
+    EAN/ASIN. That's fine — nothing downstream ever writes `category`
+    straight to product.category_id; every consumer re-validates it
+    against that specific product's OWN company catalog first (see app.py's
+    _resolve_lookup_enrichment and the New Item wizard's category picker),
+    so a stale cross-company suggestion just shows as an unmatched caption,
+    never a silent wrong assignment.
     """
     primary = ean or asin or model_number or item_description
     if not primary.strip():
@@ -123,6 +146,15 @@ def lookup(
 
     combined = "\n\n---\n\n".join(raw_snippets)[:12000]
 
+    category_names = [c for c in (existing_categories or []) if c and c.strip()]
+    if category_names:
+        category_field_spec = (
+            '"category": str (MUST be copied VERBATIM from this exact list of '
+            f"existing categories, or \"\" if truly none of them fit: {category_names}), "
+        )
+    else:
+        category_field_spec = '"category": str, '
+
     system = (
         "You extract structured product data from messy web search results "
         "about a consumer electronics item. The identifiers given to you "
@@ -132,13 +164,15 @@ def lookup(
         "results are inconsistent or clearly about a different product. "
         "Respond with STRICT JSON only, no markdown fences, matching this "
         "schema exactly:\n"
-        '{"product_name": str, "brand": str, "model": str, "category": str, '
+        '{"product_name": str, "brand": str, "model": str, ' + category_field_spec +
         '"power": str (e.g. "1200W" — the product\'s rated power/wattage, '
         'empty string if not found or not applicable to this product type), '
         '"spec_summary": str (2-4 sentences, plain English, key specs only), '
         '"box_contents": [str, ...] (standard included accessories/components)}\n'
         "If information is not present in the text, use your best general "
         "knowledge of this exact model, but never invent implausible specifics. "
+        + ("Never invent a category not in the given list — leave it \"\" instead. "
+           if category_names else "") +
         "All text must be in English."
     )
     user = (
@@ -154,12 +188,25 @@ def lookup(
     except Exception:
         return SpecResult(sources=sources)
 
+    category = data.get("category", "") or ""
+    category_needs_review = False
+    if category_names:
+        # Enforced here too, not just in the prompt — a model that ignores
+        # the "verbatim from this list" instruction must never result in a
+        # freshly-invented category string reaching a Product. Any outcome
+        # other than a real verbatim match means "needs review", whether
+        # the model said "" outright or returned something not in the list.
+        if category not in category_names:
+            category = ""
+            category_needs_review = True
+
     return SpecResult(
         product_name=data.get("product_name", ""),
         brand=data.get("brand", ""),
         model=data.get("model", ""),
         power=data.get("power", ""),
-        category=data.get("category", ""),
+        category=category,
+        category_needs_review=category_needs_review,
         spec_summary=data.get("spec_summary", ""),
         box_contents=list(data.get("box_contents", []) or []),
         sources=sources,

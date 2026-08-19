@@ -71,6 +71,16 @@ class Company:
     translation_provider: str = "deepl"  # "deepl" | "openai" — which connected
     # service modules/translation_service.py uses by default.
 
+    # -- CATEGORY CATALOG (see modules/category_store.py) --
+    # Opt-in, OFF by default: when a product's status becomes "completed"
+    # and it has no category_id yet (a user's own manual/AI-confirmed pick
+    # always wins and is never touched), its manifest_subcategory is
+    # resolved into a real Category Catalog entry (find-or-create) — see
+    # app.py's _maybe_promote_manifest_category(). Manifest import itself
+    # never touches the catalog; this is the only automatic path left, and
+    # only ever fires for a genuinely finished product.
+    auto_save_categories_from_completed: bool = False
+
     def to_dict(self) -> dict:
         return asdict(self)
 

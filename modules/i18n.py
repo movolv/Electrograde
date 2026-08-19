@@ -50,6 +50,9 @@ TRANSLATIONS: dict = {
     "common.log_out": {"en": "Log out", "lv": "Izrakstīties"},
     "common.refresh": {"en": "🔄 Refresh", "lv": "🔄 Atsvaidzināt"},
     "common.search": {"en": "Search", "lv": "Meklēt"},
+    "common.create": {"en": "Create", "lv": "Izveidot"},
+    "common.rename": {"en": "Rename", "lv": "Pārdēvēt"},
+    "common.move": {"en": "Move", "lv": "Pārvietot"},
     "common.all": {"en": "All", "lv": "Visi"},
     "common.none_dash": {"en": "—", "lv": "—"},
     "common.admins_only": {"en": "Admins only.", "lv": "Tikai administratoriem."},
@@ -816,6 +819,7 @@ TRANSLATIONS: dict = {
     # ---- Settings / Integrations ----
     "settings.integrations_tab": {"en": "🔌 Integrations", "lv": "🔌 Integrācijas"},
     "settings.translation_tab": {"en": "🌐 Translation", "lv": "🌐 Tulkošana"},
+    "settings.categories_tab": {"en": "🗂️ Categories", "lv": "🗂️ Kategorijas"},
     "settings.translation_tab_caption": {
         "en": "Controls which language new products are shown/translated into by default, "
               "and which service performs the translation. Marketplace exports can override "
@@ -1044,6 +1048,65 @@ TRANSLATIONS: dict = {
         "lv": "Savieno tirdzniecības vietu vai servisu, lai sāktu automātiski sinhronizēt produktus.",
     },
     "settings.last_synced": {"en": "Last synced: {ts}", "lv": "Pēdējoreiz sinhronizēts: {ts}"},
+
+    # ---- Category Catalog (Settings -> Categories, New Item wizard, Review & Export) ----
+    "settings.categories_tab_caption": {
+        "en": "The controlled category catalog every product picks from — used by the New Item wizard, Review & Export, and (soon) BaseLinker category mapping.",
+        "lv": "Kontrolēts kategoriju katalogs, no kura izvēlas katru produktu — izmanto jauna produkta vednis, Review & Export un (drīz) BaseLinker kategoriju sasaiste.",
+    },
+    "category.new_button": {"en": "➕ New Category", "lv": "➕ Jauna kategorija"},
+    "category.add_subcategory": {"en": "Add subcategory", "lv": "Pievienot apakškategoriju"},
+    "category.name_label": {"en": "Category name", "lv": "Kategorijas nosaukums"},
+    "category.parent_label": {"en": "Parent category", "lv": "Vecākkategorija"},
+    "category.new_parent_label": {"en": "New parent category", "lv": "Jaunā vecākkategorija"},
+    "category.no_parent": {"en": "(no parent — top level)", "lv": "(bez vecākkategorijas — augšējais līmenis)"},
+    "category.create_dialog_title": {"en": "New category", "lv": "Jauna kategorija"},
+    "category.delete_dialog_title": {"en": "Delete category", "lv": "Dzēst kategoriju"},
+    "category.created_success": {"en": "Category created.", "lv": "Kategorija izveidota."},
+    "category.search_placeholder": {"en": "🔍 Search categories...", "lv": "🔍 Meklēt kategorijas..."},
+    "category.empty_state": {
+        "en": "No categories yet — create the first one below.",
+        "lv": "Vēl nav neviena kategorijas — izveido pirmo zemāk.",
+    },
+    "category.product_count": {"en": "{count} products", "lv": "{count} produkti"},
+    "category.confirm_delete_empty": {
+        "en": "Delete '{name}'? This can't be undone.",
+        "lv": "Dzēst '{name}'? To nevar atsaukt.",
+    },
+    "category.contains_products": {
+        "en": "This category contains {count} products.",
+        "lv": "Šajā kategorijā ir {count} produkti.",
+    },
+    "category.move_destination_label": {"en": "Move these products to", "lv": "Pārvietot šos produktus uz"},
+    "category.move_and_delete": {"en": "Move products & Delete", "lv": "Pārvietot produktus un dzēst"},
+    "category.moved_and_deleted": {
+        "en": "Moved {count} product(s) and deleted '{name}'.",
+        "lv": "Pārvietoti {count} produkti un dzēsta '{name}'.",
+    },
+    "category.deleted_success": {"en": "'{name}' deleted.", "lv": "'{name}' dzēsta."},
+    "category.no_other_category": {
+        "en": "Create another category first — there's nowhere to move these products yet.",
+        "lv": "Vispirms izveido citu kategoriju — pagaidām nav, uz kurieni pārvietot šos produktus.",
+    },
+    "category.creating_under": {"en": "Creating under: {parent}", "lv": "Izveido zem: {parent}"},
+    "category.needs_review": {
+        "en": "⚠️ AI couldn't confidently match a category — pick one below or add a new one.",
+        "lv": "⚠️ AI nevarēja droši atbilst kategorijai — izvēlies zemāk vai pievieno jaunu.",
+    },
+    "category.ai_suggested_unmatched": {
+        "en": "AI suggested \"{suggestion}\" — not in your catalog yet. Pick one below or add it.",
+        "lv": "AI ieteica \"{suggestion}\" — tā vēl nav tavā katalogā. Izvēlies zemāk vai pievieno to.",
+    },
+    "category.pick_placeholder": {"en": "— pick a category —", "lv": "— izvēlies kategoriju —"},
+    "category.auto_save_setting_label": {
+        "en": "Automatically save categories from completed products",
+        "lv": "Automātiski saglabāt kategorijas no pabeigtiem produktiem",
+    },
+    "category.auto_save_setting_help": {
+        "en": "When a product is marked Completed and has no category chosen yet, its manifest subcategory is added to the catalog (or matched to an existing one). Off by default — a manual/AI-confirmed category choice always wins and is never overridden.",
+        "lv": "Kad produkts tiek atzīmēts kā Completed un tam vēl nav izvēlēta kategorija, tā manifesta subkategorija tiek pievienota katalogā (vai sasaistīta ar esošu). Pēc noklusējuma izslēgts — manuāli vai AI apstiprināti izvēlēta kategorija vienmēr uzvar un netiek pārrakstīta.",
+    },
+    "category.settings_saved": {"en": "Category settings saved.", "lv": "Kategoriju iestatījumi saglabāti."},
 
     # ---- Companies (Super Admin) ----
     "companies.super_admins_only": {"en": "Super Admins only.", "lv": "Tikai Super Admin lietotājiem."},

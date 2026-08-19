@@ -156,7 +156,18 @@ def _parse_qty_weight(row: dict) -> Tuple[int, float]:
 def _apply_manifest_fields(product: Product, row: dict) -> None:
     """Sets/refreshes ONLY the manifest-origin field group (see
     modules/models.py's grouping) on an existing Product — never touches
-    sku, status, or any AI/manual work already done on it."""
+    sku, status, or any AI/manual work already done on it.
+
+    Deliberately does NOT touch product.category/category_id: a manifest's
+    subcategory is an unverified claim, and most manifest rows never reach
+    a finished product (see the audit against real data: 690/702 products
+    had no category, mostly because nothing had ever confirmed the
+    manifest's guess). Auto-creating a Category Catalog entry for every
+    manifest row at IMPORT time polluted the catalog with categories the
+    company may never actually use. Promoting manifest_subcategory into the
+    catalog now only happens opt-in, at the moment a product is marked
+    completed — see modules/category_store.py's
+    promote_from_manifest_on_completion()."""
     qty, weight_kg = _parse_qty_weight(row)
     product.manifest_target_no = row.get("target_no", "")
     product.manifest_subcategory = row.get("subcategory", "")

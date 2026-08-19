@@ -31,6 +31,7 @@ from modules import (
     auth_store,
     barcode_scanner,
     catalog_import_job_store,
+    category_store,
     company_store,
     description_gen,
     export,
@@ -880,11 +881,13 @@ def _deep_enrich(snapshot: dict, ean_hits: list, asin_hits: list):
     find_identifiers() (both unchanged) redo their own full search, exactly
     as before this redesign; nothing about their search/fallback/Claude
     behavior is skipped or altered."""
+    catalog_names = [c.name for c in category_store.list_categories(snapshot["company_id"])]
     sr = spec_lookup.lookup(
         ean=snapshot["ean"] or snapshot["manifest_barcode"] or snapshot["scanned_barcode"],
         asin=snapshot["asin"],
         model_number=snapshot["model_number"],
         item_description=snapshot["manifest_item_description"],
+        existing_categories=catalog_names,
     )
     # find_identifiers() is the existing, UNCHANGED, PURE function (does not
     # mutate its arguments) — safe to call from a background thread.
@@ -1015,8 +1018,18 @@ def _resolve_lookup_enrichment():
                 target.brand = sr.brand
             if not target.model:
                 target.model = sr.model
-            if not target.category:
-                target.category = sr.category
+            if not target.category_id and sr.category:
+                # sr.category was already constrained to SOME company's
+                # Category Catalog at lookup time (see _deep_enrich) — but
+                # that may not be THIS product's company (a cross-tenant
+                # cache hit reused an older result). Re-resolve here,
+                # scoped to target's own company, before ever touching
+                # category_id — never trust the cached/lookup-time company
+                # match blindly (see spec_lookup.lookup()'s docstring).
+                match = category_store.find_by_name(target.company_id, sr.category)
+                if match is not None:
+                    target.category_id = match.id
+                    target.category = match.name
             if not target.power:
                 target.power = sr.power
             if not target.spec_summary:
@@ -2178,6 +2191,93 @@ def _confirm_delete_batches_dialog(batches: list):
             st.rerun()
 
 
+# ------------------------------------------------------- category catalog --
+# Shared across the New Item wizard, Review & Export, and Settings ->
+# Categories — see modules/category_store.py. A category is never invented
+# silently anywhere in this app; every write goes through create_category()/
+# find_or_create_by_name(), always user- or manifest-triggered.
+
+def _category_select_options(company_id: str):
+    """(labels, label_to_id, id_to_label, id_to_name) for every ACTIVE
+    category in this company, flattened via category_store.build_tree into
+    "Parent / Child" breadcrumb labels — `id_to_name` gives just the
+    category's own (non-breadcrumb) name, for writing product.category's
+    display-text copy."""
+    flat = category_store.build_tree(category_store.list_categories(company_id))
+    labels = [row["label"] for row in flat]
+    label_to_id = {row["label"]: row["id"] for row in flat}
+    id_to_label = {row["id"]: row["label"] for row in flat}
+    id_to_name = {row["id"]: row["name"] for row in flat}
+    return labels, label_to_id, id_to_label, id_to_name
+
+
+@st.dialog(T("category.create_dialog_title"))
+def _create_category_dialog(company_id: str, result_state_key: str, default_parent_id: str = ""):
+    """Shared "+ New category" dialog — the New Item wizard, Review &
+    Export, and Settings -> Categories (both its top-level button and each
+    row's "Add subcategory" button) all open this same dialog. Writes the
+    newly created category's id into st.session_state[result_state_key]
+    and reruns; the caller reads that key on its next render to preselect
+    the new entry — same write-then-rerun pattern as every other dialog in
+    this file (e.g. _resume_or_discard_dialog)."""
+    labels, label_to_id, id_to_label, _id_to_name = _category_select_options(company_id)
+    name_in = st.text_input(T("category.name_label"))
+    parent_options = [T("category.no_parent")] + labels
+    default_index = 0
+    if default_parent_id and default_parent_id in id_to_label:
+        try:
+            default_index = parent_options.index(id_to_label[default_parent_id])
+        except ValueError:
+            default_index = 0
+    parent_choice = st.selectbox(T("category.parent_label"), parent_options, index=default_index)
+    parent_id = "" if parent_choice == T("category.no_parent") else label_to_id.get(parent_choice, "")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(T("common.cancel"), use_container_width=True, key="cat_create_cancel"):
+            st.rerun()
+    with col2:
+        if st.button(T("common.create"), type="primary", use_container_width=True, key="cat_create_confirm"):
+            try:
+                cat = category_store.create_category(
+                    company_id, name_in.strip(), parent_id=parent_id, source=category_store.SOURCE_MANUAL,
+                )
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.session_state[result_state_key] = cat.id
+                st.rerun()
+
+
+@st.dialog(T("category.delete_dialog_title"))
+def _delete_category_with_products_dialog(company_id: str, category_id: str, category_name: str, count: int):
+    """The >0-products branch of category deletion (see
+    category_store.move_products_and_delete_category) — 0-products deletes
+    are handled inline by the caller instead, no dialog needed for those."""
+    st.warning(T("category.contains_products", count=count))
+    labels, label_to_id, _id_to_label, _id_to_name = _category_select_options(company_id)
+    other_labels = [l for l, i in label_to_id.items() if i != category_id]
+    if not other_labels:
+        st.error(T("category.no_other_category"))
+        if st.button(T("category.new_button"), key="cat_delete_dialog_new"):
+            _create_category_dialog(company_id, "cat_new_created_id")
+        return
+    dest_choice = st.selectbox(T("category.move_destination_label"), other_labels, key="cat_delete_dialog_dest")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(T("common.cancel"), use_container_width=True, key="cat_delete_dialog_cancel"):
+            st.rerun()
+    with col2:
+        if st.button(T("category.move_and_delete"), type="primary", use_container_width=True, key="cat_delete_dialog_confirm"):
+            dest_id = label_to_id.get(dest_choice, "")
+            try:
+                moved = category_store.move_products_and_delete_category(category_id, company_id, dest_id)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.session_state["cat_deleted_flash"] = T("category.moved_and_deleted", count=moved, name=category_name)
+                st.rerun()
+
+
 # ------------------------------------------------------------------- nav --
 
 st.sidebar.title("📱 ElectroGrader")
@@ -2687,9 +2787,48 @@ if page == PAGE_NEW_ITEM:
             brand_in = st.text_input(T("common.brand"), value=brand_val)
         with cols[1]:
             model_in = st.text_input(T("common.model"), value=model_val)
+        # A newly created category (from the dialog below) is applied here,
+        # before the selectbox is instantiated this run, so it can be
+        # preselected immediately — same "write to session_state, consume
+        # before the widget renders" pattern used for cross-page nav above.
+        if st.session_state.get("new_item_new_category_id"):
+            _new_cat_id = st.session_state.pop("new_item_new_category_id")
+            _new_cat = category_store.get_category(_new_cat_id, product.company_id)
+            if _new_cat is not None:
+                product.category_id = _new_cat.id
+                product.category = _new_cat.name
+
+        cat_labels, cat_label_to_id, cat_id_to_label, cat_id_to_name = _category_select_options(product.company_id)
+        cat_placeholder = T("category.pick_placeholder")
+        cat_options = [cat_placeholder] + cat_labels
+
+        # Preselect priority: an already-assigned category_id on the
+        # product wins; otherwise try to resolve the AI/manifest suggestion
+        # (category_val) against the catalog by exact normalized name —
+        # never fuzzy, never auto-created here — before falling back to the
+        # placeholder. An unmatched suggestion is shown as a caption only,
+        # never silently written to category_id/category.
+        _default_label = None
+        if product.category_id and product.category_id in cat_id_to_label:
+            _default_label = cat_id_to_label[product.category_id]
+        elif category_val:
+            _match = category_store.find_by_name(product.company_id, category_val)
+            if _match is not None and _match.id in cat_id_to_label:
+                _default_label = cat_id_to_label[_match.id]
+        _default_index = cat_options.index(_default_label) if _default_label in cat_options else 0
+
         cat_power_cols = st.columns(2)
         with cat_power_cols[0]:
-            category_in = st.text_input(T("common.category"), value=category_val or "", placeholder=T("new_item.category_placeholder"))
+            category_choice = st.selectbox(
+                T("common.category"), cat_options, index=_default_index,
+                key=f"new_item_category_select_{product.id}",
+            )
+            if sr and sr.category_needs_review:
+                st.caption(T("category.needs_review"))
+            elif category_val and _default_label is None:
+                st.caption(T("category.ai_suggested_unmatched", suggestion=category_val))
+            if st.button(T("category.new_button"), key="new_item_add_category_btn"):
+                _create_category_dialog(product.company_id, "new_item_new_category_id")
         with cat_power_cols[1]:
             power_in = st.text_input(T("common.power"), value=power_val or "", placeholder="e.g. 1200W")
         spec_in = st.text_area(T("new_item.spec_summary"), value=spec_val, height=100)
@@ -2729,7 +2868,14 @@ if page == PAGE_NEW_ITEM:
                 product.name = name_in.strip()
                 product.brand = brand_in.strip()
                 product.model = model_in.strip()
-                product.category = category_in.strip()
+                if category_choice != cat_placeholder:
+                    _chosen_id = cat_label_to_id.get(category_choice, "")
+                    if _chosen_id:
+                        product.category_id = _chosen_id
+                        product.category = cat_id_to_name.get(_chosen_id, "")
+                else:
+                    product.category_id = ""
+                    product.category = ""
                 product.power = power_in.strip()
                 product.spec_summary = _wizard_commit_text("spec_summary", spec_val_en, spec_in)
                 product.box_contents = _wizard_commit_list("box_contents", box_val_en, box_in)
@@ -3119,6 +3265,7 @@ if page == PAGE_NEW_ITEM:
                 product.review_status = "ready"
                 product.wizard_step = 0
                 product.company_id = st.session_state.company_id
+                category_store.promote_from_manifest_on_completion(product)
 
                 item_dir = UPLOAD_DIR / product.company_id / sku_folder_name(product.sku, product.id)
                 item_dir.mkdir(parents=True, exist_ok=True)
@@ -3945,6 +4092,7 @@ elif page == PAGE_PRODUCT_LIST:
         if confirmed:
             for p in selected_products:
                 p.status = new_status
+                category_store.promote_from_manifest_on_completion(p)
                 inventory_store.save_product(p)
                 audit_store.log_audit(
                     p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, f"status -> {new_status}",
@@ -4115,7 +4263,27 @@ elif page == PAGE_PRODUCT_LIST:
             )
         with pi2:
             model_in = st.text_input(T("common.model"), value=p.model, key=f"rex_model_{p.id}")
-            category_in = st.text_input(T("common.category"), value=p.category, key=f"rex_category_{p.id}")
+
+            _rex_labels, _rex_label_to_id, _rex_id_to_label, _rex_id_to_name = _category_select_options(p.company_id)
+            _rex_placeholder = T("category.pick_placeholder")
+            _rex_options = [_rex_placeholder] + _rex_labels
+            _rex_default_label = None
+            if p.category_id and p.category_id in _rex_id_to_label:
+                _rex_default_label = _rex_id_to_label[p.category_id]
+            elif p.category:
+                # Backward compat for products saved before category_id
+                # existed: resolve the old free-text display value against
+                # the catalog by exact normalized name, never fuzzy.
+                _rex_match = category_store.find_by_name(p.company_id, p.category)
+                if _rex_match is not None and _rex_match.id in _rex_id_to_label:
+                    _rex_default_label = _rex_id_to_label[_rex_match.id]
+            _rex_default_index = _rex_options.index(_rex_default_label) if _rex_default_label in _rex_options else 0
+            category_choice_in = st.selectbox(
+                T("common.category"), _rex_options, index=_rex_default_index, key=f"rex_category_{p.id}",
+            )
+            category_id_in = _rex_label_to_id.get(category_choice_in, "") if category_choice_in != _rex_placeholder else ""
+            category_name_in = _rex_id_to_name.get(category_id_in, "") if category_id_in else ""
+
             power_in = st.text_input(T("common.power"), value=p.power, key=f"rex_power_{p.id}")
         product_condition_in = st.selectbox(
             T("common.product_condition"), CONDITION_OPTIONS,
@@ -4331,7 +4499,7 @@ elif page == PAGE_PRODUCT_LIST:
                 language_content_changed
                 or brand_in.strip() != p.brand
                 or model_in.strip() != p.model
-                or category_in.strip() != p.category
+                or category_name_in != p.category
                 or barcode_in.strip() != current_barcode
                 or product_condition_in != p.product_condition
                 or float(price_in) != float(p.price)
@@ -4350,7 +4518,7 @@ elif page == PAGE_PRODUCT_LIST:
                 "name": (p.name, name_in.strip() if is_primary_tab else p.name),
                 "brand": (p.brand, brand_in.strip()),
                 "model": (p.model, model_in.strip()),
-                "category": (p.category, category_in.strip()),
+                "category": (p.category, category_name_in),
                 "power": (p.power, power_in.strip()),
                 "barcode": (current_barcode, barcode_in.strip()),
                 "product_condition": (p.product_condition, product_condition_in),
@@ -4362,7 +4530,8 @@ elif page == PAGE_PRODUCT_LIST:
 
             p.brand = brand_in.strip()
             p.model = model_in.strip()
-            p.category = category_in.strip()
+            p.category_id = category_id_in
+            p.category = category_name_in
             p.power = power_in.strip()
             if barcode_in.strip() != current_barcode:
                 p.ean = barcode_in.strip()
@@ -5489,8 +5658,8 @@ elif page == PAGE_SETTINGS:
         st.error(T("common.admins_only"))
         st.stop()
 
-    tab_integrations, tab_translation = st.tabs(
-        [T("settings.integrations_tab"), T("settings.translation_tab")]
+    tab_integrations, tab_translation, tab_categories = st.tabs(
+        [T("settings.integrations_tab"), T("settings.translation_tab"), T("settings.categories_tab")]
     )
 
     with tab_integrations:
@@ -6465,6 +6634,127 @@ elif page == PAGE_SETTINGS:
                 ))
             else:
                 st.caption(T("settings.translation_provider_connected"))
+
+    with tab_categories:
+        _cat_company_id = current_user.company_id
+        st.caption(T("settings.categories_tab_caption"))
+
+        with st.form("company_categories_settings_form"):
+            _auto_save_in = st.checkbox(
+                T("category.auto_save_setting_label"),
+                value=bool(current_company and current_company.auto_save_categories_from_completed),
+                help=T("category.auto_save_setting_help"),
+            )
+            if st.form_submit_button(T("common.save"), type="primary") and current_company:
+                current_company.auto_save_categories_from_completed = _auto_save_in
+                company_store.update_company(current_company)
+                st.success(T("category.settings_saved"))
+                st.rerun()
+
+        st.divider()
+
+        if st.session_state.get("cat_deleted_flash"):
+            st.success(st.session_state.pop("cat_deleted_flash"))
+        if st.session_state.get("cat_new_created_id"):
+            st.session_state.cat_new_created_id = None
+            st.success(T("category.created_success"))
+
+        if st.button(T("category.new_button"), key="cat_top_new_btn"):
+            _create_category_dialog(_cat_company_id, "cat_new_created_id")
+
+        cat_search = st.text_input(
+            T("common.search"), key="cat_search", placeholder=T("category.search_placeholder"),
+        )
+
+        _cat_flat = category_store.build_tree(category_store.list_categories(_cat_company_id))
+        if cat_search.strip():
+            _q = cat_search.strip().lower()
+            _cat_flat = [row for row in _cat_flat if _q in row["label"].lower()]
+
+        if not _cat_flat:
+            st.info(T("category.empty_state"))
+
+        _cat_labels_all, _cat_label_to_id_all, _cat_id_to_label_all, _cat_id_to_name_all = _category_select_options(_cat_company_id)
+
+        for _row in _cat_flat:
+            _cat_id = _row["id"]
+            _count = category_store.count_products_using(_cat_id, _cat_company_id)
+            _indent = "　" * _row["depth"]
+
+            _c_name, _c_add, _c_rename, _c_move, _c_delete = st.columns([5, 1, 1, 1, 1])
+            with _c_name:
+                st.write(f"{_indent}{_row['name']} · {T('category.product_count', count=_count)}")
+            with _c_add:
+                if st.button("➕", key=f"cat_add_{_cat_id}", help=T("category.add_subcategory")):
+                    _create_category_dialog(_cat_company_id, "cat_new_created_id", default_parent_id=_cat_id)
+            with _c_rename:
+                if st.button("✏️", key=f"cat_rename_{_cat_id}", help=T("common.rename")):
+                    st.session_state["cat_renaming_id"] = (
+                        None if st.session_state.get("cat_renaming_id") == _cat_id else _cat_id
+                    )
+                    st.session_state["cat_moving_id"] = None
+                    st.session_state["cat_deleting_id"] = None
+            with _c_move:
+                if st.button("↔️", key=f"cat_move_{_cat_id}", help=T("common.move")):
+                    st.session_state["cat_moving_id"] = (
+                        None if st.session_state.get("cat_moving_id") == _cat_id else _cat_id
+                    )
+                    st.session_state["cat_renaming_id"] = None
+                    st.session_state["cat_deleting_id"] = None
+            with _c_delete:
+                if st.button("🗑️", key=f"cat_delete_{_cat_id}", help=T("common.delete")):
+                    st.session_state["cat_deleting_id"] = _cat_id
+                    st.session_state["cat_renaming_id"] = None
+                    st.session_state["cat_moving_id"] = None
+
+            if st.session_state.get("cat_renaming_id") == _cat_id:
+                with st.form(f"cat_rename_form_{_cat_id}"):
+                    _new_name = st.text_input(T("category.name_label"), value=_row["name"])
+                    if st.form_submit_button(T("common.save"), type="primary"):
+                        try:
+                            category_store.rename_category(_cat_id, _cat_company_id, _new_name.strip())
+                        except ValueError as e:
+                            st.error(str(e))
+                        else:
+                            st.session_state["cat_renaming_id"] = None
+                            st.rerun()
+
+            if st.session_state.get("cat_moving_id") == _cat_id:
+                with st.form(f"cat_move_form_{_cat_id}"):
+                    _move_options = [T("category.no_parent")] + [
+                        l for l in _cat_labels_all if _cat_label_to_id_all[l] != _cat_id
+                    ]
+                    _dest_choice = st.selectbox(T("category.new_parent_label"), _move_options)
+                    if st.form_submit_button(T("common.save"), type="primary"):
+                        _dest_id = "" if _dest_choice == T("category.no_parent") else _cat_label_to_id_all.get(_dest_choice, "")
+                        try:
+                            category_store.move_category(_cat_id, _cat_company_id, _dest_id)
+                        except ValueError as e:
+                            st.error(str(e))
+                        else:
+                            st.session_state["cat_moving_id"] = None
+                            st.rerun()
+
+            if st.session_state.get("cat_deleting_id") == _cat_id:
+                if _count == 0:
+                    st.warning(T("category.confirm_delete_empty", name=_row["name"]))
+                    _dcol1, _dcol2 = st.columns(2)
+                    with _dcol1:
+                        if st.button(T("common.cancel"), key=f"cat_delete_cancel_{_cat_id}"):
+                            st.session_state["cat_deleting_id"] = None
+                            st.rerun()
+                    with _dcol2:
+                        if st.button(T("common.delete"), key=f"cat_delete_confirm_{_cat_id}", type="primary"):
+                            try:
+                                category_store.delete_category(_cat_id, _cat_company_id)
+                            except ValueError as e:
+                                st.error(str(e))
+                            else:
+                                st.session_state["cat_deleting_id"] = None
+                                st.success(T("category.deleted_success", name=_row["name"]))
+                                st.rerun()
+                else:
+                    _delete_category_with_products_dialog(_cat_company_id, _cat_id, _row["name"], _count)
 
 # =========================================================== COMPANIES ===
 elif page == PAGE_COMPANIES:

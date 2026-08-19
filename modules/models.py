@@ -70,7 +70,13 @@ class Product:
     brand: str = ""
     model: str = ""
     name: str = ""
-    category: str = ""
+    category: str = ""  # denormalized display-text copy — see category_id below
+    # Identity reference into modules/category_store.py's per-company
+    # Category Catalog — the source of truth. `category` above is kept as a
+    # display/export-compatible copy, always written together with this
+    # field (see category_store.rename_category() for how a later rename
+    # keeps the two in sync); never set one without the other in new code.
+    category_id: str = ""
     power: str = ""  # e.g. "1200W" — product's power/wattage rating
     condition_type: str = ""  # "New" | "Used"
     color: str = ""  # e.g. "Black" — determined from photos by vision_grading.grade_item()

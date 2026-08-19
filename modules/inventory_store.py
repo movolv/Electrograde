@@ -58,6 +58,7 @@ def _connect():
         "grade": "TEXT",
         "location": "TEXT",
         "status": "TEXT",
+        "category_id": "TEXT",
     }
     added_any = False
     for col, decl in new_cols.items():
@@ -114,6 +115,7 @@ def _connect():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_product_condition ON products(product_condition)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(location)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_products_status ON products(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id)")
 
     # search_products()/list_products_paginated() filter sku/name/brand/
     # model/model_number/ean/asin/location with "LIKE '%text%'" — a plain
@@ -148,7 +150,7 @@ def _connect():
 def _search_columns(p: Product) -> tuple:
     return (
         p.ean, p.asin, p.model_number, p.model, p.brand, p.name, p.sku, p.manifest_import_id,
-        p.triage_status, p.product_condition, p.location, p.status,
+        p.triage_status, p.product_condition, p.location, p.status, p.category_id,
     )
 
 
@@ -220,15 +222,16 @@ def save_product(product: Product, translated_by: str = "manual") -> None:
         conn.execute(
             """INSERT INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
-                manifest_import_id, triage_status, product_condition, location, status, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                manifest_import_id, triage_status, product_condition, location, status, category_id, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (id) DO UPDATE SET
                    company_id = EXCLUDED.company_id, created_at = EXCLUDED.created_at,
                    ean = EXCLUDED.ean, asin = EXCLUDED.asin, model_number = EXCLUDED.model_number,
                    model = EXCLUDED.model, brand = EXCLUDED.brand, name = EXCLUDED.name,
                    sku = EXCLUDED.sku, manifest_import_id = EXCLUDED.manifest_import_id,
                    triage_status = EXCLUDED.triage_status, product_condition = EXCLUDED.product_condition,
-                   location = EXCLUDED.location, status = EXCLUDED.status, data = EXCLUDED.data""",
+                   location = EXCLUDED.location, status = EXCLUDED.status, category_id = EXCLUDED.category_id,
+                   data = EXCLUDED.data""",
             (product.id, product.company_id, product.created_at, *_search_columns(product),
              json.dumps(_persist_dict(product))),
         )
@@ -255,15 +258,16 @@ def save_products_bulk(products: List[Product]) -> None:
         conn.executemany(
             """INSERT INTO products
                (id, company_id, created_at, ean, asin, model_number, model, brand, name, sku,
-                manifest_import_id, triage_status, product_condition, location, status, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                manifest_import_id, triage_status, product_condition, location, status, category_id, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (id) DO UPDATE SET
                    company_id = EXCLUDED.company_id, created_at = EXCLUDED.created_at,
                    ean = EXCLUDED.ean, asin = EXCLUDED.asin, model_number = EXCLUDED.model_number,
                    model = EXCLUDED.model, brand = EXCLUDED.brand, name = EXCLUDED.name,
                    sku = EXCLUDED.sku, manifest_import_id = EXCLUDED.manifest_import_id,
                    triage_status = EXCLUDED.triage_status, product_condition = EXCLUDED.product_condition,
-                   location = EXCLUDED.location, status = EXCLUDED.status, data = EXCLUDED.data""",
+                   location = EXCLUDED.location, status = EXCLUDED.status, category_id = EXCLUDED.category_id,
+                   data = EXCLUDED.data""",
             [
                 (p.id, p.company_id, p.created_at, *_search_columns(p), json.dumps(_persist_dict(p)))
                 for p in products
@@ -320,6 +324,11 @@ def revert_manifest_draft(product_id: str, company_id: str) -> None:
         manifest_import_id=p.manifest_import_id,
         manifest_target_no=p.manifest_target_no,
         manifest_subcategory=p.manifest_subcategory,
+        # category/category_id are never manifest-origin data (see
+        # modules/manifest_import.py's _apply_manifest_fields) — any value
+        # here came from a manual/AI-confirmed wizard pick, or from the
+        # completed-status auto-promotion, so a revert drops it like every
+        # other AI/manual field below.
         asin=p.asin,
         manifest_barcode=p.manifest_barcode,
         manifest_item_description=p.manifest_item_description,
@@ -601,6 +610,73 @@ def list_products_paginated(
 
     products = _hydrate_primary_language_bulk([Product.from_dict(json.loads(r[0])) for r in rows])
     return products, total
+
+
+def count_products_by_category(company_id: str, category_id: str) -> int:
+    """Backs modules/category_store.py's count_products_using() — an
+    indexed COUNT(*) on the denormalized category_id column, not a JSON
+    scan, so it stays cheap at the 100k-products-per-company scale target."""
+    conn = _connect()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM products WHERE company_id = ? AND category_id = ?",
+        (company_id, category_id),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def reassign_category(company_id: str, category_id: str, new_category_id: str, new_category_name: str) -> int:
+    """Bulk-moves every product currently pointing at `category_id` onto
+    `new_category_id`, rewriting both the denormalized category_id column
+    and the JSON blob's display-text `category` field so the two never
+    drift — see modules/category_store.py's move_products_and_delete_category().
+    Bounded by how many products use the category being moved away from,
+    not a full-table scan. Returns the number of products moved."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT id, data FROM products WHERE company_id = ? AND category_id = ?",
+        (company_id, category_id),
+    ).fetchall()
+    if rows:
+        updates = []
+        for rid, data_json in rows:
+            d = json.loads(data_json)
+            d["category_id"] = new_category_id
+            d["category"] = new_category_name
+            updates.append((new_category_id, json.dumps(d), rid, company_id))
+        with conn:
+            conn.executemany(
+                "UPDATE products SET category_id = ?, data = ? WHERE id = ? AND company_id = ?",
+                updates,
+            )
+    conn.close()
+    return len(rows)
+
+
+def rename_category_display_text(company_id: str, category_id: str, new_name: str) -> int:
+    """Rewrites the JSON blob's display-text `category` field for every
+    product pointing at `category_id`, after an admin renames that
+    category — see modules/category_store.py's rename_category().
+    category_id itself doesn't change, so the denormalized column needs no
+    update here. Returns the number of products touched."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT id, data FROM products WHERE company_id = ? AND category_id = ?",
+        (company_id, category_id),
+    ).fetchall()
+    if rows:
+        updates = []
+        for rid, data_json in rows:
+            d = json.loads(data_json)
+            d["category"] = new_name
+            updates.append((json.dumps(d), rid, company_id))
+        with conn:
+            conn.executemany(
+                "UPDATE products SET data = ? WHERE id = ? AND company_id = ?",
+                updates,
+            )
+    conn.close()
+    return len(rows)
 
 
 def distinct_locations(company_id: str) -> List[str]:
