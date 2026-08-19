@@ -109,16 +109,58 @@ def _require_available(integration_type: str) -> CatalogEntry:
     return entry
 
 
-def get_supported_target_fields(integration_type: str) -> dict:
-    """Field Mapping tab's 'Target field' dropdown source — reads whatever
-    the connector class itself declares (MarketplaceConnector.
-    SUPPORTED_TARGET_FIELDS), never a hardcoded per-integration branch here.
-    {} for service connectors (e.g. DeepL) or unrecognized types — the UI
-    treats that as "nothing to map for this integration."""
+def get_supported_target_fields(integration_type: str, company_id: str = "") -> dict:
+    """Field Mapping tab's 'Target field' dropdown source. {} for service
+    connectors (e.g. DeepL) or unrecognized types — the UI treats that as
+    "nothing to map for this integration."
+
+    With `company_id` and an actually-connected integration, builds a real
+    connector instance and calls its get_target_fields() — for BaseLinker
+    this fetches the company's own custom "extra fields" live (see
+    BaselinkerConnector.get_target_fields), not just the two generic
+    fields every company used to be limited to. Without `company_id` (or
+    if not connected, or the live call fails), falls back to the
+    connector CLASS's static SUPPORTED_TARGET_FIELDS — never a hardcoded
+    per-integration branch here, and never an exception raised up to the
+    UI just because a live fetch didn't work."""
     connector_cls = CONNECTORS.get(integration_type)
     if connector_cls is None:
         return {}
+    if company_id:
+        try:
+            if is_connected(company_id, integration_type):
+                return get(company_id, integration_type).get_target_fields()
+        except Exception:
+            pass  # fall through to the static class-level list below
     return dict(getattr(connector_cls, "SUPPORTED_TARGET_FIELDS", {}))
+
+
+def get_default_structural_mapping(integration_type: str) -> dict:
+    """SYNCABLE_FIELDS key -> the connector's own STRUCTURAL_TARGET_FIELDS
+    key it lands at TODAY with no rule saved — see
+    BaselinkerConnector.DEFAULT_STRUCTURAL_MAPPING. Used to pre-fill the
+    Field Mapping tab's editable table with ordinary, changeable rows the
+    first time a company opens it, instead of either an empty table or a
+    separate read-only section — see app.py's _render_field_mapping_tab.
+    Always the static class-level dict (never a live call): which
+    structural field something lands at by default doesn't depend on the
+    connected account, so there's nothing live to fetch here."""
+    connector_cls = CONNECTORS.get(integration_type)
+    if connector_cls is None:
+        return {}
+    return dict(getattr(connector_cls, "DEFAULT_STRUCTURAL_MAPPING", {}))
+
+
+def get_mappable_source_fields(integration_type: str) -> set:
+    """Field Mapping tab's 'Source field' dropdown source — see
+    MarketplaceConnector.MAPPABLE_SOURCE_FIELDS. Fields NOT in this set have
+    a fixed, hardcoded destination and are deliberately excluded: offering
+    them as a pickable source would be a dead end (see that attribute's
+    docstring)."""
+    connector_cls = CONNECTORS.get(integration_type)
+    if connector_cls is None:
+        return set()
+    return set(getattr(connector_cls, "MAPPABLE_SOURCE_FIELDS", set()))
 
 
 def get_implemented_sync_fields(integration_type: str) -> set:
@@ -237,4 +279,6 @@ class IntegrationManager:
     test = staticmethod(test)
     is_connected = staticmethod(is_connected)
     get_supported_target_fields = staticmethod(get_supported_target_fields)
+    get_default_structural_mapping = staticmethod(get_default_structural_mapping)
+    get_mappable_source_fields = staticmethod(get_mappable_source_fields)
     get_implemented_sync_fields = staticmethod(get_implemented_sync_fields)

@@ -6206,24 +6206,85 @@ elif page == PAGE_SETTINGS:
                 st.rerun()
 
         def _render_field_mapping_tab(entry, mapping: field_mapping_store.FieldMapping) -> None:
-            target_fields = IntegrationManager.get_supported_target_fields(entry.integration_type)
+            # company_id lets this pull the connector's LIVE target fields
+            # (e.g. BaseLinker's own custom "extra fields" for this specific
+            # account) instead of only the static condition_id/category_id
+            # pair every company used to be limited to — see
+            # IntegrationManager.get_supported_target_fields()'s docstring.
+            target_fields = IntegrationManager.get_supported_target_fields(
+                entry.integration_type, company_id=current_user.company_id,
+            )
             if not target_fields:
                 st.info(T("settings.no_mappable_fields", name=entry.display_name))
                 return
 
+            # Every rule shown here IS applied to every real payload this
+            # connector builds (create/update/preview/single-field Sync
+            # Queue push) — see BaselinkerConnector._field_mapping_rules()
+            # and mapper._apply_field_mapping_rules(), applied last so a
+            # matching rule always wins over anything else.
             st.caption(T("settings.field_mapping_caption"))
             search = st.text_input(T("settings.search_mapping_rules"), key=f"mapping_search_{entry.integration_type}")
-            source_field_keys = [k for k, _ in _SYNC_FIELDS_SENT]
 
-            df = pd.DataFrame(
-                [
+            # The table shows/edits human labels ("Brand" / "Marka"), never
+            # the raw technical keys ("brand" / "extra_field_23311") saved
+            # underneath — a raw extra_field_<id> key told the user nothing
+            # about which of THEIR OWN fields a row actually pointed at,
+            # which is the exact "kas ar ko ir samapots" (what's mapped to
+            # what) legibility this table exists for. Both label sets are
+            # already unique (checked: no two SYNCABLE_FIELDS or
+            # get_target_fields() entries share a label), so label<->key is
+            # safe to round-trip through unambiguously.
+            #
+            # "Source field" is further filtered down to
+            # get_mappable_source_fields() — fields with a fixed, hardcoded
+            # destination (name, price, quantity, weight, sku, etc.) have
+            # nowhere reconfigurable to be picked as a source FOR either,
+            # so offering them here would be a dead end, same reasoning as
+            # the target side already had.
+            mappable_source_keys = IntegrationManager.get_mappable_source_fields(entry.integration_type)
+            source_label_by_key = {k: v for k, v in _SYNC_FIELDS_SENT if k in mappable_source_keys}
+            source_key_by_label = {v: k for k, v in source_label_by_key.items()}
+            target_key_by_label = {v: k for k, v in target_fields.items()}
+
+            if mapping.rules:
+                rule_rows = [
                     {
-                        "Source field": r.source_field, "Source value": r.source_value,
-                        "Target field": r.target_field, "Target value": r.target_value,
+                        "Source field": source_label_by_key.get(r.source_field, r.source_field),
+                        "Source value": r.source_value,
+                        "Target field": target_fields.get(r.target_field, r.target_field),
+                        "Target value": r.target_value,
                         "Target label": r.target_label,
                     }
                     for r in mapping.rules
-                ],
+                ]
+            else:
+                # Nothing saved yet for this company — rather than an empty
+                # table (which hid, in code only, that most fields were
+                # already being sent somewhere) or a separate read-only
+                # section, pre-fill with what mapper.py's own hardcoded
+                # defaults do TODAY as ordinary, EDITABLE rows. Purely a
+                # live preview: nothing is written to field_mapping_store
+                # until the user presses Save below — a company that never
+                # touches this tab keeps relying on mapper.py's own
+                # defaults, unaffected by anything here (see
+                # DEFAULT_STRUCTURAL_MAPPING's docstring). The moment Save
+                # is pressed, these become real, individually re-mappable
+                # rules like any other.
+                default_mapping = IntegrationManager.get_default_structural_mapping(entry.integration_type)
+                rule_rows = [
+                    {
+                        "Source field": source_label_by_key.get(source_key, source_key),
+                        "Source value": "",
+                        "Target field": target_fields.get(target_key, target_key),
+                        "Target value": "",
+                        "Target label": "",
+                    }
+                    for source_key, target_key in default_mapping.items()
+                ]
+
+            df = pd.DataFrame(
+                rule_rows,
                 columns=["Source field", "Source value", "Target field", "Target value", "Target label"],
             )
 
@@ -6238,15 +6299,17 @@ elif page == PAGE_SETTINGS:
                 df, num_rows="dynamic", use_container_width=True, hide_index=True,
                 key=f"mapping_editor_{entry.integration_type}",
                 column_config={
-                    "Source field": st.column_config.SelectboxColumn(options=source_field_keys, required=True),
-                    "Target field": st.column_config.SelectboxColumn(options=list(target_fields.keys()), required=True),
+                    "Source field": st.column_config.SelectboxColumn(options=list(source_label_by_key.values()), required=True),
+                    "Target field": st.column_config.SelectboxColumn(options=list(target_fields.values()), required=True),
                 },
             )
             if st.button(T("settings.save_field_mapping"), key=f"mapping_save_{entry.integration_type}", type="primary"):
                 mapping.rules = [
                     field_mapping_store.FieldMappingRule(
-                        source_field=row.get("Source field") or "", source_value=row.get("Source value") or "",
-                        target_field=row.get("Target field") or "", target_value=row.get("Target value") or "",
+                        source_field=source_key_by_label.get(row.get("Source field"), row.get("Source field") or ""),
+                        source_value=row.get("Source value") or "",
+                        target_field=target_key_by_label.get(row.get("Target field"), row.get("Target field") or ""),
+                        target_value=row.get("Target value") or "",
                         target_label=row.get("Target label") or "",
                     )
                     for _, row in edited.iterrows()

@@ -12,7 +12,11 @@ from typing import Optional
 from integrations.marketplaces.baselinker import mapper
 
 
-def build_partial_payload(product, field_name: str, config: dict, existing_listing_id: Optional[str] = None) -> dict:
+def build_partial_payload(
+    product, field_name: str, config: dict, existing_listing_id: Optional[str] = None,
+    field_mapping_rules: Optional[list] = None,
+) -> dict:
     return mapper.build_payload(
         product, config, existing_listing_id=existing_listing_id, fields_send={field_name},
+        field_mapping_rules=field_mapping_rules,
     )

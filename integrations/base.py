@@ -94,6 +94,43 @@ class MarketplaceConnector(IntegrationConnector):
     # Mapping UI itself.
     SUPPORTED_TARGET_FIELDS: dict = {}
 
+    # integrations/field_registry.SYNCABLE_FIELDS key -> the target-field
+    # key (from this connector's own get_target_fields()) it lands at TODAY
+    # with no Field Mapping rule saved — used ONLY to pre-fill the Field
+    # Mapping tab's editable table with "what's already happening" as
+    # ordinary, changeable rows the first time a company opens it (see
+    # app.py's _render_field_mapping_tab and
+    # integrations/manager.get_default_structural_mapping()), never to
+    # drive the connector's own payload-building, which keeps its own
+    # hardcoded defaults so a company who never opens this tab sees zero
+    # behavior change. Empty in the base class, same reasoning as
+    # SUPPORTED_TARGET_FIELDS above.
+    DEFAULT_STRUCTURAL_MAPPING: dict = {}
+
+    # integrations/field_registry.SYNCABLE_FIELDS keys allowed as a Field
+    # Mapping rule's "Source field" — i.e. fields that actually GO
+    # somewhere reconfigurable (see DEFAULT_STRUCTURAL_MAPPING above).
+    # Every SYNCABLE_FIELDS key NOT in this set has a fixed, hardcoded
+    # destination on both sides of the mapping (this connector's own
+    # payload-building AND — since a hardcoded ElectroGrader field has
+    # nowhere reconfigurable to be redirected TO either — the "Target
+    # field" dropdown), so offering it as a pickable source would be a
+    # dead end: picking it and choosing any target would either do
+    # nothing or silently duplicate what's already sent. Empty in the
+    # base class, same reasoning as SUPPORTED_TARGET_FIELDS above.
+    MAPPABLE_SOURCE_FIELDS: set = set()
+
+    def get_target_fields(self) -> dict:
+        """Instance-level counterpart to SUPPORTED_TARGET_FIELDS, for
+        connectors whose real target-field list isn't static — e.g.
+        BaseLinker's per-account custom "extra fields", only knowable via a
+        live API call with this company's own token. Defaults to the static
+        class dict; override to merge in anything fetched live, but ALWAYS
+        keep the static entries too and degrade to them on any API failure
+        (see BaselinkerConnector.get_target_fields) — the Field Mapping tab
+        must still render something usable if the live call fails."""
+        return dict(self.SUPPORTED_TARGET_FIELDS)
+
     # Which integrations/field_registry.SYNCABLE_FIELDS keys this
     # connector's payload-building ACTUALLY gates on today — i.e. whose
     # checkbox state in the Synchronization tab has a real effect. Empty in

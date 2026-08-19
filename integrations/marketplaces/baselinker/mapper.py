@@ -28,6 +28,24 @@ MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024  # BaseLinker's documented cap
 # row BEFORE calling build_payload(); this module never translates or
 # looks anything up itself, only places already-resolved strings.
 
+# The only fields a saved Settings -> Field Mapping rule is allowed to
+# redirect away from their default spot — the five that land in
+# BaseLinker's shared "Information -> Parameters" block
+# (text_fields["features|<lang>"]) by default, see
+# BaselinkerConnector.STRUCTURAL_TARGET_FIELDS. Deliberately scoped to
+# just these five: name/description/price/quantity/weight/box dimensions/
+# sku/EAN's own top-level placement all keep their one hardcoded
+# destination unchanged, exactly as before this feature existed.
+#
+# Public (no leading underscore) so BaselinkerConnector.MAPPABLE_SOURCE_FIELDS
+# (client.py) can reference this SAME set directly rather than keeping a
+# second, easily-drifting copy — it's also what the Field Mapping tab's
+# "Source field" dropdown is filtered down to (see app.py's
+# _render_field_mapping_tab), on the same reasoning as the target side:
+# a hardcoded field has nowhere else to go, so offering it as a pickable
+# source is a dead end regardless of which side of the mapping it's on.
+REDIRECTABLE_FIELDS = {"brand", "model", "product_condition", "color", "power"}
+
 
 def encode_image(path: str, max_base64_bytes: int = MAX_IMAGE_BASE64_BYTES) -> str:
     """Reads an image file and returns BaseLinker's expected inline-image
@@ -56,6 +74,7 @@ def build_payload(
     title: str = "", description: str = "", condition_description: str = "", language: str = "en",
     primary_language: str = "", primary_title: str = "", primary_description: str = "",
     primary_condition_description: str = "", color: str = "",
+    field_mapping_rules: Optional[list] = None,
 ) -> dict:
     """Builds the addInventoryProduct parameters for one Product.
 
@@ -81,9 +100,40 @@ def build_payload(
     Parameters" section) — see the `features` dict built below.
     category/defects still have no destination here — nothing to gate for
     those yet, see BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS.
+
+    `field_mapping_rules` (default None -> no-op, unchanged behavior) is a
+    plain list of modules.field_mapping_store.FieldMappingRule — this stays
+    "pure" per the note above by never fetching them itself; client.py
+    resolves the company's saved Settings -> Field Mapping rules and passes
+    them in as data, same pattern as `title`/`description`/etc.
+
+    A rule with an empty `source_value` (a "redirect", not a value
+    translation) on one of REDIRECTABLE_FIELDS SKIPS that field's default
+    Parameters-block placement below entirely — the rule fully owns where
+    it goes instead, applied at the very end by
+    _apply_field_mapping_rules(). Without this, "remapping" brand/model/
+    condition/color/power in Settings -> Field Mapping would just add a
+    second copy at the new location while the old Parameters entry kept
+    showing it too, which is not what a user asking to move a field
+    expects. A value-specific rule (non-empty source_value) never
+    suppresses the default — it only adds an extra placement for that one
+    matching value, leaving every other value exactly where it already
+    was. Every OTHER field (name, description, price, quantity, weight,
+    box dimensions, sku, barcode) ignores field_mapping_rules entirely for
+    its own default placement — only a rule's presence in the "additive,
+    same spot as always" sense (value-specific) can add a second copy
+    elsewhere for those.
     """
+    redirects = {r.source_field for r in (field_mapping_rules or []) if r.source_field and not r.source_value}
+
     def _wanted(field_key: str) -> bool:
         return fields_send is None or field_key in fields_send
+
+    def _feature_wanted(field_key: str) -> bool:
+        """Gate for the five Parameters-block fields specifically: both the
+        existing Synchronization on/off check AND "no rule has fully
+        redirected this field elsewhere"."""
+        return _wanted(field_key) and field_key not in redirects
 
     payload = {
         "inventory_id": config["inventory_id"],
@@ -137,21 +187,27 @@ def build_payload(
     # Only the parameter NAMES (labels) are localized, via the static
     # field_labels_i18n dict — the VALUES below (product.brand, product.power,
     # etc.) are read straight off Product, exactly as always, never
-    # translated by anything.
+    # translated by anything. brand/model/product_condition/color/power use
+    # `_feature_wanted` (not plain `_wanted`) since these five specifically
+    # can be redirected out of this block entirely — see
+    # REDIRECTABLE_FIELDS above. barcode's Parameters entry stays
+    # unconditional (`_wanted`, not `_feature_wanted`): only its own
+    # top-level `ean` placement below is the "real" barcode field, this is
+    # just a convenience copy, and was never in scope to redirect.
     features = {}
-    if _wanted("brand") and product.brand:
+    if _feature_wanted("brand") and product.brand:
         features[field_labels_i18n.label("brand", language)] = product.brand
-    if _wanted("model") and product.model:
+    if _feature_wanted("model") and product.model:
         features[field_labels_i18n.label("model", language)] = product.model
-    if _wanted("product_condition") and product.product_condition:
+    if _feature_wanted("product_condition") and product.product_condition:
         features[field_labels_i18n.label("product_condition", language)] = product.product_condition
-    if _wanted("color") and color:
+    if _feature_wanted("color") and color:
         # Deliberate exception to "parameter values are never translated"
         # (see the docstring above and modules/translation_service.py) —
         # `color` is resolved by the caller (client.py's
         # _resolve_export_content()), already in the export `language`.
         features[field_labels_i18n.label("color", language)] = color
-    if _wanted("power") and product.power:
+    if _feature_wanted("power") and product.power:
         features[field_labels_i18n.label("power", language)] = product.power
     if _wanted("barcode") and ean:
         features[field_labels_i18n.label("barcode", language)] = ean
@@ -191,4 +247,74 @@ def build_payload(
             str(i): encode_image(p) for i, p in enumerate(product.image_paths[:16])
         }
 
+    if field_mapping_rules:
+        _apply_field_mapping_rules(payload, text_fields, product, field_mapping_rules, language)
+        if text_fields:
+            payload["text_fields"] = text_fields  # re-assign: a rule may add the FIRST text_fields entry
+
     return payload
+
+
+def _apply_field_mapping_rules(
+    payload: dict, text_fields: dict, product, rules: list, language: str,
+) -> None:
+    """Overlays a company's saved Settings -> Field Mapping rules on top of
+    the default payload already built above — lets a company redirect
+    brand/model/product_condition/color/power onto ITS OWN BaseLinker
+    target (a specific extra_field_<id>, confirmed via
+    BaselinkerConnector.get_target_fields() against a real account's
+    getInventoryExtraFields, or one of the two static top-level fields
+    this module has no default placement for: condition_id/category_id)
+    and/or translate a specific value (e.g. product_condition "B" ->
+    "Ļoti labs"). Deliberately applied LAST: a matching rule always wins
+    over whatever this module already placed by default.
+
+    A rule with source_value == "" matches the field regardless of its
+    current value — a pure redirect (its default Parameters-block
+    placement was already skipped above via `redirects`, see
+    build_payload() — only applies to brand/model/product_condition/
+    color/power; every other field ignores redirects entirely, see
+    REDIRECTABLE_FIELDS). A non-empty source_value only applies when the
+    field's actual current value equals it exactly — a value translation
+    for that one specific value, leaving every other value on that field
+    to whatever a DIFFERENT rule (or the default placement) already gave
+    it. "sku" redirects are always refused (BaseLinker's own de-dup/SKU-
+    fallback matching depends on it always landing at the top-level "sku"
+    key — see BaselinkerConnector._find_existing_by_sku()).
+
+    List-valued fields (e.g. defects) are joined with "; " — BaseLinker's
+    text fields are plain strings, there's no native list type to hand
+    them a Python list directly.
+
+    target_field starting with "extra_field_" writes into `text_fields`
+    under BaseLinker's own extra_field_<id>|<language> convention; one
+    starting with "features:" (BaselinkerConnector.STRUCTURAL_TARGET_FIELDS
+    — what the Field Mapping table's default preview rows for brand/model/
+    product_condition/color/power point at, e.g. "features:brand", so
+    saving them unchanged is a genuine no-op back to the same spot they
+    already occupy) writes into the SAME shared Parameters block as the
+    default placement above, under that field's own i18n label; any other
+    target_field (condition_id, category_id, or any future top-level key)
+    is written directly onto the top-level payload dict."""
+    for rule in rules:
+        if not rule.source_field or not rule.target_field or rule.source_field == "sku":
+            continue
+        current = getattr(product, rule.source_field, None)
+        if current is None or current == "" or current == []:
+            continue
+        current_str = "; ".join(str(v) for v in current) if isinstance(current, list) else str(current)
+        if not current_str:
+            continue
+
+        if rule.source_value and rule.source_value != current_str:
+            continue
+        value = rule.target_value or rule.target_label or current_str
+        target = rule.target_field
+        if target.startswith("extra_field_"):
+            text_fields[f"{target}|{language}"] = value
+        elif target.startswith("features:"):
+            label_field = target.split(":", 1)[1]
+            label = field_labels_i18n.label(label_field, language)
+            text_fields.setdefault(f"features|{language}", {})[label] = value
+        else:
+            payload[target] = value

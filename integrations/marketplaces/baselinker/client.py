@@ -27,7 +27,7 @@ import requests
 
 from integrations.base import ConnectionTestResult, ConnectorActionResult, ImportedProductData, MarketplaceConnector
 from integrations.marketplaces.baselinker import import_products, mapper, order_mapper, sync
-from modules import company_store, product_translation_store, sync_rules_store
+from modules import company_store, field_mapping_store, product_translation_store, sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
 _MIN_CALL_INTERVAL = 60.0 / 90  # stay safely under the 100 req/min limit
@@ -180,23 +180,106 @@ def list_categories(token: str, inventory_id: int) -> list:
     return data.get("categories", []) or []
 
 
+def list_extra_fields(token: str) -> list:
+    """Real getInventoryExtraFields call — this account's own custom
+    product fields (e.g. "Modelis", "Plaukts"; confirmed live against a
+    real connected account, no parameters needed — the call is account-
+    wide, not scoped to one inventory_id, unlike list_categories above).
+    Each entry carries `extra_field_id`/`name`; BaselinkerConnector.
+    get_target_fields() turns these into Field Mapping's "Target field"
+    dropdown options so a company can map onto ITS OWN fields instead of
+    only the two generic ones (condition_id/category_id) every company
+    used to be limited to."""
+    data = _call("getInventoryExtraFields", {}, token)
+    return data.get("extra_fields", []) or []
+
+
 class BaselinkerConnector(MarketplaceConnector):
     integration_type = "baselinker"
 
-    # Phase 1: just the dropdown source for Settings -> Field Mapping.
-    # Nothing reads/applies these yet — mapper.py's build_payload() is
-    # unchanged; real field-mapping application is Phase 2 work.
+    # Static fallback for get_target_fields() below — the two real
+    # top-level BaseLinker fields this module has no default placement
+    # for (unlike name/price/etc. below, nothing sends these unless a
+    # rule targets them). Used when there's no live token to call with
+    # (offline preview, disconnected state) or the API call itself fails.
     SUPPORTED_TARGET_FIELDS = {
         "condition_id": "Condition",
         "category_id": "Category",
     }
+
+    # The five fields that land in BaseLinker's shared "Information ->
+    # Parameters" block (text_fields["features|<lang>"]) by default — the
+    # ONLY fields made redirectable (see mapper.py's REDIRECTABLE_FIELDS
+    # for exactly why scoped to just these five: everything else — name,
+    # description, price, quantity, weight, box dimensions, sku, EAN's own
+    # top-level placement — keeps its single hardcoded destination
+    # unchanged, same as before this feature existed). Each key here is
+    # one of _apply_field_mapping_rules()'s "features:<field>" targets:
+    # redirecting e.g. "brand" onto its OWN features:brand target is a
+    # deliberate no-op (put it back where it already was), while
+    # redirecting it onto an extra_field_<id> instead moves it out of the
+    # shared Parameters block entirely.
+    STRUCTURAL_TARGET_FIELDS = {
+        "features:brand": "Parameters → Brand",
+        "features:model": "Parameters → Model",
+        "features:product_condition": "Parameters → Condition",
+        "features:color": "Parameters → Color",
+        "features:power": "Parameters → Power",
+    }
+
+    # integrations/field_registry.SYNCABLE_FIELDS key -> the
+    # STRUCTURAL_TARGET_FIELDS key it lands at TODAY with no rule saved —
+    # used ONLY to pre-fill the Field Mapping tab's editable table with
+    # "what's already happening" as ordinary, changeable rows the first
+    # time a company opens it (see app.py's _render_field_mapping_tab),
+    # not to drive mapper.py itself (that still has its own hardcoded
+    # defaults, unconditionally correct with zero saved rules — see that
+    # module's docstring on why: a company who never opens this tab must
+    # see ZERO behavior change).
+    DEFAULT_STRUCTURAL_MAPPING = {
+        "brand": "features:brand",
+        "model": "features:model",
+        "product_condition": "features:product_condition",
+        "color": "features:color",
+        "power": "features:power",
+    }
+
+    # The same set as mapper.REDIRECTABLE_FIELDS, referenced directly
+    # rather than duplicated — see that module for why exactly these five
+    # and not, say, price/quantity/name. Filters the Field Mapping tab's
+    # "Source field" dropdown down to fields that actually go somewhere
+    # reconfigurable (see MarketplaceConnector.MAPPABLE_SOURCE_FIELDS).
+    MAPPABLE_SOURCE_FIELDS = mapper.REDIRECTABLE_FIELDS
+
+    def get_target_fields(self) -> dict:
+        """STRUCTURAL_TARGET_FIELDS + SUPPORTED_TARGET_FIELDS, extended
+        with this account's own custom fields (list_extra_fields,
+        confirmed live against a real connected account) — e.g.
+        "Modelis"/"Plaukts" — so a company can map onto BaseLinker's real
+        fields OR its own custom ones, not a generic two-field list every
+        company was stuck with before. Falls back to the static dicts
+        alone on any failure (no token yet, API error, rate limit) — the
+        Field Mapping tab must still render, just without the live
+        fields."""
+        fields = {**self.STRUCTURAL_TARGET_FIELDS, **self.SUPPORTED_TARGET_FIELDS}
+        token = self.credentials.get("token", "")
+        if not token:
+            return fields
+        try:
+            for f in list_extra_fields(token):
+                fields[f"extra_field_{f['extra_field_id']}"] = f.get("name") or f"Extra field {f['extra_field_id']}"
+        except Exception:
+            pass  # static fields alone are still a usable dropdown
+        return fields
 
     # Fields whose Synchronization-tab checkbox actually gates something in
     # mapper.build_payload() today. "sku" is deliberately absent — it's
     # always sent regardless of toggle state (see mapper.py), so its
     # checkbox wouldn't do anything. "brand"/"model"/"product_condition"/
     # "color"/"power" land in text_fields["features|en"] (BaseLinker's
-    # "Information -> Parameters" section); "category"/"defects" still have
+    # "Information -> Parameters" section) BY DEFAULT, and are also the
+    # five fields a saved Field Mapping rule can redirect elsewhere instead
+    # (see STRUCTURAL_TARGET_FIELDS above); "category"/"defects" still have
     # no payload destination (category stays the single global category_id
     # setting; defects mapping-application is future work) — see
     # integrations/field_registry.py for the full field list these are a
@@ -223,6 +306,15 @@ class BaselinkerConnector(MarketplaceConnector):
             return None
         return set(rule.fields_send)
 
+    def _field_mapping_rules(self) -> list:
+        """This company's saved Settings -> Field Mapping rules, or [] if
+        none saved yet — passed into mapper.build_payload() as plain data
+        (mapper.py stays DB-free; see its docstring) so a company's own
+        target-field/value overrides are actually applied to every real
+        payload (create/update/preview), not just stored inert as before."""
+        mapping = field_mapping_store.get_mapping(self.company_id, self.integration_type)
+        return mapping.rules if mapping else []
+
     def preview_payload(self, product) -> dict:
         """Same build_payload() call the real push uses, minus actually
         base64-encoding images (wasteful for a preview) — a synthetic
@@ -236,7 +328,7 @@ class BaselinkerConnector(MarketplaceConnector):
             title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
             language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
             primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
-                color=ec["color"],
+                color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
         )
         wants_images = fields_send is None or "image_paths" in fields_send
         payload["_preview_image_count"] = len(product.image_paths) if wants_images and product.image_paths else 0
@@ -388,7 +480,7 @@ class BaselinkerConnector(MarketplaceConnector):
                 title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
                 language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
                 primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
-                color=ec["color"],
+                color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
             )
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
@@ -409,7 +501,7 @@ class BaselinkerConnector(MarketplaceConnector):
                 title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
                 language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
                 primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
-                color=ec["color"],
+                color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
             )
             if "text_fields" in payload:
                 payload["text_fields"] = self._merge_text_fields(external_id, payload["text_fields"], config)
@@ -491,7 +583,7 @@ class BaselinkerConnector(MarketplaceConnector):
             return ConnectorActionResult(success=False, message="No existing BaseLinker listing to push a field to.")
 
         try:
-            return sync.push_field(product, field_name, listing_id, config)
+            return sync.push_field(product, field_name, listing_id, config, self._field_mapping_rules())
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, external_id=listing_id, message=str(e))
 

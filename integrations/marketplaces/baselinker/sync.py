@@ -27,12 +27,22 @@ def pull_state(external_id: str, config: dict) -> dict:
     return field_reader.read_remote_state(raw_product, config)
 
 
-def push_field(product, field_name: str, existing_listing_id: str, config: dict) -> ConnectorActionResult:
+def push_field(
+    product, field_name: str, existing_listing_id: str, config: dict, field_mapping_rules: list = None,
+) -> ConnectorActionResult:
     """Pushes exactly one field's current value to an existing BaseLinker
-    listing (addInventoryProduct, scoped via fields_send to this field)."""
+    listing (addInventoryProduct, scoped via fields_send to this field).
+    `field_mapping_rules` (default None) is threaded through to
+    mapper.build_payload() the same as the full-export paths in client.py —
+    without it, a Sync Queue single-field push would silently ignore a
+    company's saved Field Mapping rule that a full export honors, which is
+    exactly the kind of inconsistency this whole feature is meant to
+    close."""
     from integrations.marketplaces.baselinker import client
 
-    payload = field_writer.build_partial_payload(product, field_name, config, existing_listing_id=existing_listing_id)
+    payload = field_writer.build_partial_payload(
+        product, field_name, config, existing_listing_id=existing_listing_id, field_mapping_rules=field_mapping_rules,
+    )
     data = client._call("addInventoryProduct", payload, config["token"])
     return ConnectorActionResult(
         success=True, external_id=str(data.get("product_id", existing_listing_id)),

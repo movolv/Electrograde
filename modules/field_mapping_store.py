@@ -8,9 +8,12 @@ identified by `profile_name="default"` — but profile_name is a real column
 with a unique index on all three, so a future multi-profile UI (several
 named, switchable mapping sets) is a pure addition, not a schema rewrite.
 
-Pure storage — nothing reads `rules` yet to actually transform outgoing
-payloads; integrations/marketplaces/baselinker/mapper.py is untouched in
-this phase. Shares the same PostgreSQL database as every other modules/*_store.py (modules/db.py).
+Pure storage — this module only persists `rules`; applying them to an
+outgoing payload is integrations/marketplaces/baselinker/client.py's job
+(BaselinkerConnector._field_mapping_rules() reads a company's saved
+mapping and passes it into mapper.build_payload(), which stays DB-free
+itself — see mapper.py's docstring). Shares the same PostgreSQL database as
+every other modules/*_store.py (modules/db.py).
 """
 import json
 import time
