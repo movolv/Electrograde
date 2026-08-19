@@ -5,6 +5,7 @@ Run with:  streamlit run app.py
 """
 import concurrent.futures
 import hashlib
+import html
 import io
 import os
 import re
@@ -703,30 +704,59 @@ def _clear_wip_photos(product) -> None:
 
 @st.fragment(run_every=1)
 def _render_photo_gallery(product):
-    """Background-processing-aware Step 2 gallery + SKU + nav controls.
-    Resolves any _photo_executor jobs that finished since the last tick
-    into captured_photos, shows a "Processing..." placeholder for ones
-    still running, and — because this is an `st.fragment(run_every=1)` —
-    reruns itself once a second independently of the rest of the page.
-    That's what lets a photo finish uploading/normalizing and land in the
-    gallery on its own, without the user needing to tap anything, while
-    they're already back in the camera app taking the next shot.
+    """Background-processing-aware Step 2 gallery ONLY — resolves any
+    _photo_executor jobs that finished since the last tick into
+    captured_photos, shows a "Processing..." placeholder for ones still
+    running, and — because this is an `st.fragment(run_every=1)` — reruns
+    itself once a second independently of the rest of the page. That's
+    what lets a photo finish uploading/normalizing and land in the gallery
+    on its own, without the user needing to tap anything, while they're
+    already back in the camera app taking the next shot.
 
-    The SKU input and Back/Next buttons live in this same fragment (not
-    just the image grid) so the "Next" button's disabled state and the
-    "waiting for processing" caption also update on their own once the
-    last background job finishes — otherwise they'd stay stuck showing
-    stale state until some unrelated interaction forced a full rerun.
+    The SKU input and Back/Next buttons deliberately do NOT live in this
+    fragment (an earlier version put them here) — see
+    _scroll_wizard_to_top_if_step_changed()'s docstring for the full story,
+    but in short: a full st.rerun() triggered by a WIDGET CLICK inside a
+    fragment is unreliable at delivering components.html() scripts
+    elsewhere on the page (confirmed live), which broke the scroll-to-top
+    fix specifically for this step's own Back/Next. Moving those two
+    buttons to plain outer-script code (where every other step's Back/Next
+    already lived, and never showed this problem) fixes that, and — since
+    they're outer-script code now — lets them share one st.columns() row
+    again instead of being split apart.
+
+    That leaves one thing this fragment still needs to do reliably: make
+    the OUTER Next button's disabled state (which depends on
+    photos/pending_count) catch up the instant a background job finishes,
+    with no user interaction. Solved by having the fragment call a full,
+    unscoped st.rerun() itself, from directly inside this run_every tick,
+    whenever it just resolved a job — confirmed live (a throwaway test
+    app, a fragment ticking every 1s and self-triggering a full rerun
+    every 3rd tick over 20s) that a tick-triggered full rerun delivers
+    components.html() scripts 100% reliably, unlike a click-triggered one.
+    So the scroll-to-top fix also benefits: it fires correctly even for
+    "a photo just finished processing" even though nothing here calls it
+    directly — _scroll_wizard_to_top_if_step_changed() runs unconditionally
+    at the bottom of the page on every full rerun, tick-triggered ones
+    included, and is separately gated on wizard_step actually changing, so
+    it correctly does NOT scroll on this kind of rerun (only Next/Back
+    change wizard_step) — it just needed a real full rerun to happen at
+    all, which it now reliably gets.
+
     `product` is the same object as st.session_state.product (not a
-    copy), so mutating product.sku here persists normally."""
+    copy), so mutations here persist normally."""
+    resolved_any = False
     for job_id, future in list(st.session_state.pending_photos.items()):
         if future.done():
             del st.session_state.pending_photos[job_id]
+            resolved_any = True
             try:
                 st.session_state.captured_photos.append(future.result())
                 _sync_wip_photos_to_disk(product)
             except Exception as e:
                 st.error(T("new_item.photo_processing_failed", error=e))
+    if resolved_any:
+        st.rerun()
 
     photos = st.session_state.captured_photos
     pending_count = len(st.session_state.pending_photos)
@@ -769,49 +799,20 @@ def _render_photo_gallery(product):
                     st.session_state.photo0_low_res_warning = False
                 st.session_state.captured_photos.pop(i)
                 _sync_wip_photos_to_disk(product)
-                st.rerun(scope="fragment")
+                # Full rerun, not scope="fragment": deleting changes the
+                # PHOTO COUNT, which the outer Next button's disabled=
+                # depends on — a fragment-scoped rerun would leave that
+                # button showing stale state until an unrelated
+                # interaction forced a full one, same class of bug this
+                # whole restructuring exists to avoid.
+                st.rerun()
 
     for j in range(pending_count):
         with cols[(len(photos) + j) % 4]:
             st.info(T("new_item.processing_ellipsis"))
 
-    st.divider()
-    if product.sku:
-        # Already assigned (manifest import auto-assigns SKU on import) —
-        # nothing to enter here, never changed or generated by AI.
-        st.write(f"**{T('common.sku')}:** {product.sku}")
-        st.caption(T("new_item.sku_from_manifest"))
-        sku_input = product.sku
-        sku_missing = False
-    else:
-        sku_spacer, sku_col = st.columns([1, 1])
-        with sku_col:
-            sku_input = st.text_input(
-                T("new_item.sku_required"),
-                value=product.sku,
-                placeholder=T("new_item.sku_placeholder"),
-                help=T("new_item.sku_help"),
-            )
-            sku_missing = not sku_input.strip()
-            if sku_missing:
-                st.warning(T("new_item.sku_required_warning"))
-
     if pending_count:
         st.caption(T("new_item.waiting_for_processing"))
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button(T("common.back"), use_container_width=True):
-            st.session_state.wizard_step = 1
-            st.rerun()
-    with col3:
-        if st.button(T("common.next"), type="primary", use_container_width=True, disabled=not photos or sku_missing or bool(pending_count)):
-            product.sku = sku_input.strip()
-            product.status = "in_progress"
-            product.wizard_step = 3
-            inventory_store.save_product(product)
-            st.session_state.wizard_step = 3
-            st.rerun()
 
 
 # --------------------------------------------- Step 3 Fast-First lookup --
@@ -2097,6 +2098,7 @@ if not _ai_configured():
     st.sidebar.warning(T("sidebar.ai_key_missing"))
 
 
+
 @st.dialog(T("new_item.resume_dialog_title"))
 def _resume_or_discard_dialog(product_id: str) -> None:
     """Forces a decision on a stale in_progress item before the New Item
@@ -2150,49 +2152,82 @@ def _scroll_wizard_to_top_if_step_changed() -> None:
     "the step changed" — without hardcoding a list of buttons that would
     inevitably miss one.
 
-    Deliberately does NOT fire on a rerun that leaves wizard_step
-    unchanged: Step 2's photo gallery is an st.fragment(run_every=1) that
-    ticks on its own every second, and Step 3's spec-lookup status does the
-    same — a naive "scroll on every rerun" would yank those steps back to
-    the top while someone is mid-scroll reviewing photos or reading specs.
-    A fragment's own run_every tick re-executes only the fragment function,
-    never this outer script body, so those ticks never even reach this
-    check; nor does an st.rerun(scope="fragment") from inside one (e.g. the
-    photo gallery's delete/clean-background buttons).
+    Delivery mechanism — three attempts were ruled out before this one, each
+    for a confirmed reason:
 
-    Streamlit has no scroll API of its own (checked: nothing under
-    st.*scroll* as of the pinned version) and — confirmed by inspecting the
-    live DOM — this app's content does not scroll the browser window at
-    all; the actual overflow container is Streamlit's own
-    section[data-testid="stMain"]. window.scrollTo() alone is a no-op here.
-    Runs against window.parent (this snippet executes inside components.
-    html's own sandboxed iframe) — same cross-origin-safe pattern
-    modules/pwa.py already uses. No mobile-specific branch needed; it's
-    the same DOM API on every browser."""
-    # Gated on an actual step change, not "any rerun", so Step 2/3's own
-    # run_every fragment ticks (which never touch wizard_step) can't yank
-    # the page back to the top while someone is mid-scroll.
-    if st.session_state.wizard_step == st.session_state.get("_last_scrolled_wizard_step"):
+    1. components.html() with a scroll <script>: renders an iframe that
+       loads and runs asynchronously via Streamlit's component protocol,
+       and a widget click inside an st.fragment did not reliably deliver
+       it at all. (The fragment half of that was fixed separately by
+       moving Back/Next out of the fragment; the async delay remained.)
+
+    2. st.markdown(unsafe_allow_html=True) with onload="..." on an <img>:
+       Streamlit strips onXXX="..." event-handler attributes from
+       unsafe_allow_html content (an XSS guard) — the tag survives, the
+       handler silently does not, so nothing ever fires. Confirmed by
+       inspecting the rendered DOM.
+
+    3. The same inline <iframe srcdoc="..."> as below, but styled
+       display:none. This is the one that caused the long-running "still
+       lands at the bottom on my iPhone" bug: a display:none iframe is
+       outside the render tree, and mobile Safari simply never loads it,
+       so the script never ran on the one device where it mattered — while
+       every engine available for testing (Chromium and real WebKit alike,
+       on localhost and through a tunnel) loaded it happily and reported
+       success. Weeks of measurements said "fixed"; the phone said
+       otherwise, and the phone was right.
+
+    Hence the current form: srcdoc (a plain attribute, so it survives the
+    sanitizer; parsed as a real document, so its <script> executes, unlike
+    innerHTML injection) in an iframe kept IN the render tree at 1x1 and
+    fully transparent. Confirmed on the reporting user's own iPhone via an
+    on-screen readout: stMain.scrollTop goes 861 -> 0 within 1ms of the step
+    change and holds at 0 for the full retry window.
+
+    That same readout also settled where the scroll actually lives on real
+    iOS: window/document scroll offsets are always 0 and the document is not
+    scrollable at all (docScr=N) — the only container that moves is
+    Streamlit's own section[data-testid="stMain"], exactly as on desktop.
+    Streamlit has no scroll API of its own (nothing under st.*scroll* as of
+    the pinned version).
+
+    Retries for ~2s after the first correction because a heavier step (AI
+    grading, price/listing copy) can still be streaming content in, which
+    shifts scroll position again as it lands."""
+    step = st.session_state.wizard_step
+    if step == st.session_state.get("_last_scrolled_wizard_step"):
         return
-    st.session_state._last_scrolled_wizard_step = st.session_state.wizard_step
-    st.components.v1.html(
-        """
-        <script>
-        (function() {
-          const doc = window.parent.document;
-          // stMain is what actually scrolls in this app — the browser
-          // window itself never does — so window.scrollTo(0,0) alone is a
-          // no-op here; stAppViewContainer is a fallback for older/other
-          // Streamlit layouts.
-          const main = doc.querySelector('section[data-testid="stMain"]')
-                     || doc.querySelector('[data-testid="stAppViewContainer"]');
-          if (main) { main.scrollTo({top: 0, behavior: 'instant'}); }
-          window.parent.scrollTo(0, 0);
-        })();
-        </script>
-        """,
-        height=0, width=0,
+    st.session_state._last_scrolled_wizard_step = step
+
+    # `step` is embedded in the payload purely so consecutive renders never
+    # produce byte-identical HTML: Streamlit's reconciler reuses a DOM node
+    # whose markup is unchanged, and a reused iframe does not re-parse its
+    # srcdoc, so the script would not run again. Since this only renders when
+    # the step actually changed, including the step is enough to guarantee a
+    # difference from whatever is currently mounted — no random nonce needed.
+    js = (
+        f"(function(){{/*s{step}*/"
+        "function st(){"
+        "var m=window.parent.document.querySelector('section[data-testid=stMain]')"
+        "||window.parent.document.querySelector('[data-testid=stAppViewContainer]');"
+        "if(m){m.scrollTop=0;}"
+        "window.parent.document.documentElement.scrollTop=0;"
+        "window.parent.document.body.scrollTop=0;"
+        "}"
+        "[0,50,150,300,500,800,1200,1600,2000].forEach(function(ms){setTimeout(st,ms);});"
+        "})();"
     )
+    srcdoc = html.escape(f"<script>{js}</script>", quote=True)
+    # Deliberately NOT display:none — see point 3 in the docstring. Visually
+    # absent and unclickable, but unambiguously in the render tree so mobile
+    # Safari actually loads it.
+    st.markdown(
+        f'<iframe srcdoc="{srcdoc}" aria-hidden="true" tabindex="-1" '
+        'style="position:absolute;width:1px;height:1px;opacity:0;border:0;'
+        'pointer-events:none;"></iframe>',
+        unsafe_allow_html=True,
+    )
+
 
 
 # =========================================================== NEW ITEM ====
@@ -2221,8 +2256,6 @@ if page == PAGE_NEW_ITEM:
     st.progress((st.session_state.wizard_step - 1) / (len(steps) - 1), text=steps[st.session_state.wizard_step - 1])
 
     product: Product = st.session_state.product
-
-    _scroll_wizard_to_top_if_step_changed()
 
     # Safety net: resolves any Step 3 background lookup jobs that finished
     # since the last rerun, regardless of which wizard step is on screen
@@ -2382,6 +2415,54 @@ if page == PAGE_NEW_ITEM:
                 st.session_state.pending_photos[job_id] = executor.submit(_normalize_captured_photo, raw)
 
         _render_photo_gallery(product)
+
+        # SKU input + Back/Next: deliberately plain outer-script code, NOT
+        # inside _render_photo_gallery's st.fragment — see that function's
+        # own docstring for the full story. In short, a full st.rerun()
+        # triggered by a widget click INSIDE a fragment unreliably delivers
+        # components.html() scripts elsewhere on the page (confirmed live),
+        # which broke the scroll-to-top fix specifically for this step's
+        # Back/Next when they lived in the fragment. The fragment still
+        # reliably keeps `captured_photos`/`pending_photos` current for the
+        # code below to read (it self-triggers a full rerun the instant a
+        # background job resolves — also confirmed reliable, since THAT
+        # rerun originates from the fragment's own tick, not a click).
+        photos = st.session_state.captured_photos
+        pending_count = len(st.session_state.pending_photos)
+        if product.sku:
+            # Already assigned (manifest import auto-assigns SKU on
+            # import) — nothing to enter here, never changed or generated
+            # by AI.
+            st.write(f"**{T('common.sku')}:** {product.sku}")
+            st.caption(T("new_item.sku_from_manifest"))
+            sku_input = product.sku
+            sku_missing = False
+        else:
+            sku_spacer, sku_col = st.columns([1, 1])
+            with sku_col:
+                sku_input = st.text_input(
+                    T("new_item.sku_required"),
+                    value=product.sku,
+                    placeholder=T("new_item.sku_placeholder"),
+                    help=T("new_item.sku_help"),
+                )
+                sku_missing = not sku_input.strip()
+                if sku_missing:
+                    st.warning(T("new_item.sku_required_warning"))
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button(T("common.back"), use_container_width=True, key="step2_back"):
+                st.session_state.wizard_step = 1
+                st.rerun()
+        with col3:
+            if st.button(T("common.next"), type="primary", use_container_width=True, disabled=not photos or sku_missing or bool(pending_count)):
+                product.sku = sku_input.strip()
+                product.status = "in_progress"
+                product.wizard_step = 3
+                inventory_store.save_product(product)
+                st.session_state.wizard_step = 3
+                st.rerun()
 
     # ---- Step 3: Web spec lookup (Fast-First) ----
     elif st.session_state.wizard_step == 3:
@@ -2951,6 +3032,12 @@ if page == PAGE_NEW_ITEM:
     if st.button(T("new_item.start_over")):
         reset_wizard()
         st.rerun()
+
+    # Called unconditionally every rerun — cheap (a hidden marker element
+    # plus an idempotent, install-once observer script; see its own
+    # docstring for why it's built this way instead of a per-step-change
+    # component call).
+    _scroll_wizard_to_top_if_step_changed()
 
 # ======================================================= IMPORT MANIFEST =
 elif page == PAGE_IMPORT_MANIFEST:
