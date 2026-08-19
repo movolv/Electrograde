@@ -135,6 +135,23 @@ def get_supported_target_fields(integration_type: str, company_id: str = "") -> 
     return dict(getattr(connector_cls, "SUPPORTED_TARGET_FIELDS", {}))
 
 
+def get_external_categories(integration_type: str, company_id: str) -> list:
+    """Category Mapping tab's dropdown source — [{"id", "label"}, ...],
+    always a live call (see MarketplaceConnector.get_external_categories'
+    docstring on why no caching). [] for a not-connected integration, an
+    unrecognized type, or any live-call failure — the UI treats that as
+    "nothing to map yet", never an exception bubbling up."""
+    connector_cls = CONNECTORS.get(integration_type)
+    if connector_cls is None or not company_id:
+        return []
+    try:
+        if is_connected(company_id, integration_type):
+            return get(company_id, integration_type).get_external_categories()
+    except Exception:
+        pass
+    return []
+
+
 def get_default_structural_mapping(integration_type: str) -> dict:
     """SYNCABLE_FIELDS key -> the connector's own STRUCTURAL_TARGET_FIELDS
     key it lands at TODAY with no rule saved — see
@@ -282,3 +299,4 @@ class IntegrationManager:
     get_default_structural_mapping = staticmethod(get_default_structural_mapping)
     get_mappable_source_fields = staticmethod(get_mappable_source_fields)
     get_implemented_sync_fields = staticmethod(get_implemented_sync_fields)
+    get_external_categories = staticmethod(get_external_categories)

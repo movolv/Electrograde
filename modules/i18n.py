@@ -478,6 +478,8 @@ TRANSLATIONS: dict = {
     "import_manifest.deleted_batches_success": {"en": "Deleted {batches} batch(es) and {count} pending product(s).", "lv": "Dzēstas {batches} partija(as) un {count} gaidošais(-ie) produkts(-i)."},
 
     # ---- Product List ----
+    "product_list.settings_tab": {"en": "⚙️ Product List Settings", "lv": "⚙️ Produktu saraksta iestatījumi"},
+    "product_list.settings_categories_heading": {"en": "Categories", "lv": "Kategorijas"},
     "product_list.page_caption": {
         "en": "Review AI-generated info, manage inventory, and export to BaseLinker or download a spreadsheet — all from one list.",
         "lv": "Pārbaudi AI ģenerēto informāciju, pārvaldi inventāru un eksportē uz BaseLinker vai lejupielādē izklājlapu — viss vienā sarakstā.",
@@ -819,7 +821,6 @@ TRANSLATIONS: dict = {
     # ---- Settings / Integrations ----
     "settings.integrations_tab": {"en": "🔌 Integrations", "lv": "🔌 Integrācijas"},
     "settings.translation_tab": {"en": "🌐 Translation", "lv": "🌐 Tulkošana"},
-    "settings.categories_tab": {"en": "🗂️ Categories", "lv": "🗂️ Kategorijas"},
     "settings.translation_tab_caption": {
         "en": "Controls which language new products are shown/translated into by default, "
               "and which service performs the translation. Marketplace exports can override "
@@ -974,6 +975,21 @@ TRANSLATIONS: dict = {
 
     "settings.clear_search_to_edit": {"en": "Clear the search box to edit and save mappings.", "lv": "Notīri meklēšanas lauku, lai rediģētu un saglabātu sasaistes."},
     "settings.save_field_mapping": {"en": "💾 Save field mapping", "lv": "💾 Saglabāt lauku sasaisti"},
+    "settings.tab_category_mapping": {"en": "🔗 Category Mapping", "lv": "🔗 Kategoriju sasaiste"},
+    "settings.no_external_categories": {
+        "en": "No categories found on {name}'s side yet — check the connection, or create one there first.",
+        "lv": "{name} pusē vēl nav atrasta neviena kategorija — pārbaudi savienojumu vai vispirms izveido tur kategoriju.",
+    },
+    "settings.no_electrograder_categories": {
+        "en": "No ElectroGrader categories yet — create some first in Product List -> Product List Settings -> Categories.",
+        "lv": "Vēl nav neviena ElectroGrader kategorijas — vispirms izveido tās sadaļā Product List -> Product List Settings -> Categories.",
+    },
+    "settings.category_mapping_caption": {
+        "en": "Map each ElectroGrader category onto exactly one {name} category. The {name} list is always fetched live — a category created there shows up here the next time this tab opens.",
+        "lv": "Sasaisti katru ElectroGrader kategoriju ar tieši vienu {name} kategoriju. {name} saraksts vienmēr tiek ielasīts dzīvi — tur izveidota kategorija šeit parādās nākamreiz, kad atver šo cilni.",
+    },
+    "settings.save_category_mapping": {"en": "💾 Save category mapping", "lv": "💾 Saglabāt kategoriju sasaisti"},
+    "settings.category_mapping_saved": {"en": "Category mapping saved.", "lv": "Kategoriju sasaiste saglabāta."},
     "settings.ownership_caption": {
         "en": "Which system is the master source of truth for each field. Read by the real Push/Pull "
               "sync engine (manual “Sync now”/“Pull now”, and Automatic Sync once enabled "

@@ -196,13 +196,16 @@ def run_wizard_for(page, photo_path: str, sku: str, pick_category_label=None) ->
 
 
 def set_auto_save_setting(page, enabled: bool) -> None:
-    go_to_page(page, "Settings")
-    page.get_by_role("tab", name="Categories", exact=False).click()
+    # Category Catalog management (including this setting) lives under
+    # Product List -> Product List Settings, NOT the global Settings page
+    # — see the Product List / Settings navigation restructure.
+    go_to_page(page, "Product List")
+    page.get_by_role("tab", name="Product List Settings", exact=False).click()
     page.wait_for_timeout(500)
     box = page.get_by_role("checkbox", name="Automatically save categories from completed products")
     if box.is_checked() != enabled:
         box.dispatch_event("click")
-    page.get_by_role("tabpanel", name="Categories", exact=False).get_by_role("button", name="Save", exact=True).click()
+    page.get_by_role("tabpanel", name="Product List Settings", exact=False).get_by_role("button", name="Save", exact=True).click()
     page.wait_for_timeout(800)
 
 
@@ -244,6 +247,12 @@ def bulk_change_status(page, product_ids, new_status: str = "completed") -> None
     page.wait_for_timeout(400)
     go_to_page(page, "Product List")
     page.wait_for_timeout(1200)
+    # Product List and Product List Settings are now sub-tabs of the same
+    # top-level page — the top-level nav click above doesn't reset which
+    # sub-tab is active, so explicitly select the grid tab in case a
+    # previous call left "Product List Settings" open.
+    page.get_by_role("tab", name="Product List", exact=False).first.click()
+    page.wait_for_timeout(500)
     set_status_filter_all(page)
     page.wait_for_timeout(500)
 
@@ -295,9 +304,22 @@ def run_scenarios(page, company, products, photo_path: str) -> None:
     check("scenario1: no category_id assigned (setting was OFF)", reloaded_a is not None and reloaded_a.category_id == "")
     check("scenario1: 'Test Cat Alpha' was NOT created in the catalog", cat_alpha is None)
 
-    print("\n-- Turning the auto-save setting ON via Settings -> Categories --")
+    print("\n-- Turning the auto-save setting ON via Product List -> Product List Settings --")
     set_auto_save_setting(page, True)
     check("setting is ON in the DB after toggling via UI", company_store.get_company(company.id).auto_save_categories_from_completed is True)
+
+    # Explicitly proves it survives a real browser reload (not just a DB
+    # read) — navigating away and back would re-derive the checkbox value
+    # from a fresh script run either way, but a hard page.reload() is the
+    # more literal interpretation of "persists after reload".
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1000)
+    go_to_page(page, "Product List")
+    page.get_by_role("tab", name="Product List Settings", exact=False).click()
+    page.wait_for_timeout(500)
+    box_after_reload = page.get_by_role("checkbox", name="Automatically save categories from completed products")
+    check("checkbox still shows checked after a hard page reload", box_after_reload.is_checked())
 
     print("\n-- Scenario 2: setting ON + manifest_subcategory -> completed -> category CREATED --")
     run_wizard_for(page, photo_path, "E2E-B")

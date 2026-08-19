@@ -27,7 +27,7 @@ import requests
 
 from integrations.base import ConnectionTestResult, ConnectorActionResult, ImportedProductData, MarketplaceConnector
 from integrations.marketplaces.baselinker import import_products, mapper, order_mapper, sync
-from modules import company_store, field_mapping_store, product_translation_store, sync_rules_store
+from modules import category_mapping_store, company_store, field_mapping_store, product_translation_store, sync_rules_store
 
 API_URL = "https://api.baselinker.com/connector.php"
 _MIN_CALL_INTERVAL = 60.0 / 90  # stay safely under the 100 req/min limit
@@ -320,7 +320,7 @@ class BaselinkerConnector(MarketplaceConnector):
         base64-encoding images (wasteful for a preview) — a synthetic
         `_preview_image_count` key tells the UI how many WOULD be sent
         instead."""
-        config = self._config()
+        config = self._config(product)
         fields_send = self._resolve_fields_send()
         ec = self._resolve_export_content(product)
         payload = mapper.build_payload(
@@ -335,16 +335,54 @@ class BaselinkerConnector(MarketplaceConnector):
         payload["_language_fallback_warning"] = ec["warning"]
         return payload
 
-    def _config(self) -> dict:
+    def _config(self, product=None) -> dict:
         settings = self.settings
         return {
             "token": self.credentials.get("token", ""),
             "inventory_id": int(settings["inventory_id"]),
-            "category_id": int(settings["category_id"]),
+            "category_id": self._resolve_category_id(product, int(settings["category_id"])),
             "price_group_id": settings.get("price_group_id") or None,
             "warehouse_id": settings.get("warehouse_id") or None,
             "tax_rate": float(settings.get("tax_rate") or 23),
         }
+
+    def _resolve_category_id(self, product, default_category_id: int) -> int:
+        """This company's saved Category Mapping (see
+        modules/category_mapping_store.py) for `product.category_id`, if
+        any — else the single default BaseLinker category every product
+        used to be limited to (Settings' own "token -> fetch -> pick"
+        category_id). `product=None` (connection tests, no product in
+        context yet) always uses the default."""
+        if product is None or not getattr(product, "category_id", ""):
+            return default_category_id
+        mapped = category_mapping_store.resolve(self.company_id, self.integration_type, product.category_id)
+        if not mapped:
+            return default_category_id
+        try:
+            return int(mapped)
+        except (TypeError, ValueError):
+            return default_category_id
+
+    def get_external_categories(self) -> list:
+        """This account's real BaseLinker category list, live (never
+        cached) — see integrations/base.py's docstring on why. `name`
+        already carries the full breadcrumb path from BaseLinker itself
+        (confirmed live: e.g. "Haushaltsgeräte/Kleingeräte Küche/
+        Wasserkocher" — BaseLinker bakes hierarchy into the name string
+        rather than a real parent-child tree), displayed with " > "
+        separators to match this app's own Category Catalog breadcrumb
+        style."""
+        token = self.credentials.get("token", "")
+        if not token:
+            return []
+        try:
+            cats = list_categories(token, int(self.settings["inventory_id"]))
+        except Exception:
+            return []
+        return [
+            {"id": str(c["category_id"]), "label": (c.get("name") or str(c["category_id"])).replace("/", " > ")}
+            for c in cats
+        ]
 
     def _resolve_export_content(self, product) -> dict:
         """Resolves which language to export in — this integration's own
@@ -468,7 +506,7 @@ class BaselinkerConnector(MarketplaceConnector):
         return None
 
     def create_product(self, product) -> ConnectorActionResult:
-        config = self._config()
+        config = self._config(product)
         found_id = self._find_existing_by_sku(product.sku, config)
         if found_id:
             return self.update_product(product, found_id)
@@ -493,7 +531,7 @@ class BaselinkerConnector(MarketplaceConnector):
         )
 
     def update_product(self, product, external_id: str) -> ConnectorActionResult:
-        config = self._config()
+        config = self._config(product)
         ec = self._resolve_export_content(product)
         try:
             payload = mapper.build_payload(

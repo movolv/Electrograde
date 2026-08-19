@@ -31,6 +31,7 @@ from modules import (
     auth_store,
     barcode_scanner,
     catalog_import_job_store,
+    category_mapping_store,
     category_store,
     company_store,
     description_gen,
@@ -3626,1774 +3627,1907 @@ elif page == PAGE_IMPORT_MANIFEST:
 
 # ============================================================ INVENTORY ==
 elif page == PAGE_PRODUCT_LIST:
-    REX_FILTER_DEFAULTS = {
-        "rex_search_sku": "", "rex_search_name": "", "rex_search_brand": "",
-        "rex_search_model": "", "rex_search_ean": "", "rex_search_asin": "",
-        "rex_search_location": "", "rex_status_filter": "completed",
-        "rex_triage_filter": "", "rex_condition_filter": "", "rex_batch_filter": "",
-        "rex_exact_search": "",
-    }
+    tab_product_list, tab_product_list_settings = st.tabs(
+        [T("nav.product_list"), T("product_list.settings_tab")]
+    )
 
-    st.title(T("nav.product_list"))
-    st.caption(T("product_list.page_caption"))
+    with tab_product_list:
+        REX_FILTER_DEFAULTS = {
+            "rex_search_sku": "", "rex_search_name": "", "rex_search_brand": "",
+            "rex_search_model": "", "rex_search_ean": "", "rex_search_asin": "",
+            "rex_search_location": "", "rex_status_filter": "completed",
+            "rex_triage_filter": "", "rex_condition_filter": "", "rex_batch_filter": "",
+            "rex_exact_search": "",
+        }
 
-    REVIEW_STATUS_LABELS = {
-        "": T("common.all"),
-        "ready": T("product_list.status_ready"),
-        "edited": T("product_list.status_edited"),
-        "exported": T("product_list.status_exported"),
-        "failed": T("product_list.status_failed"),
-    }
-    CONDITION_OPTIONS = ["A", "B", "C", "D"]
-    TRIAGE_LABELS = {
-        "": T("common.all"),
-        "testing_pending": T("product_list.triage_testing_pending"),
-        "ready_for_sale": T("product_list.triage_ready_for_sale"),
-        "needs_repair": T("product_list.triage_needs_repair"),
-        "for_parts": T("product_list.triage_for_parts"),
-        "written_off": T("product_list.triage_written_off"),
-    }
-    BULK_STATUS_OPTIONS = ["draft", "in_progress", "completed"]
-    # Only fields that already exist on Product and make sense to overwrite
-    # in bulk (never SKU/barcode/photos/AI-generated/per-product text —
-    # those are always product-specific, never mass-edited).
-    BULK_EDIT_FIELDS = {
-        "price": T("common.price"),
-        "category": T("common.category"),
-        "brand": T("common.brand"),
-        "product_condition": T("product_list.grade_condition"),
-        "quantity": T("common.quantity"),
-        "location": T("product_list.warehouse_shelf"),
-    }
-    PRICE_ACTIONS = {
-        "set": T("product_list.set_price"), "inc_amount": T("product_list.increase_by_eur"),
-        "dec_amount": T("product_list.decrease_by_eur"),
-        "inc_pct": T("product_list.increase_by_pct"), "dec_pct": T("product_list.decrease_by_pct"),
-    }
-    QUANTITY_ACTIONS = {
-        "set": T("product_list.set_quantity"), "inc_amount": T("product_list.increase_by"),
-        "dec_amount": T("product_list.decrease_by"),
-    }
+        st.title(T("nav.product_list"))
+        st.caption(T("product_list.page_caption"))
 
-    def _bulk_edit_compute(field: str, action: str, raw_value, current):
-        """Pure — no side effects. Returns (new_value, error_or_None). Both
-        the Preview table and the Apply loop call this exact function, so
-        they can never disagree with each other."""
-        if field == "price":
-            try:
-                v = float(raw_value)
-            except (TypeError, ValueError):
-                return None, T("product_list.invalid_number")
-            new = {
-                "set": v, "inc_amount": current + v, "dec_amount": current - v,
-                "inc_pct": current * (1 + v / 100), "dec_pct": current * (1 - v / 100),
-            }[action]
-            new = round(new, 2)
-            return (new, None) if new > 0 else (None, T("product_list.price_must_be_positive"))
-        if field == "quantity":
-            try:
-                v = int(raw_value)
-            except (TypeError, ValueError):
-                return None, T("product_list.invalid_number")
-            new = {"set": v, "inc_amount": current + v, "dec_amount": current - v}[action]
-            return (new, None) if new >= 1 else (None, T("product_list.quantity_must_be_positive"))
-        if field == "product_condition":
-            return raw_value, None
-        # category / brand / location: free-text "set" only
-        v = (raw_value or "").strip()
-        return (v, None) if v else (None, T("product_list.value_cannot_be_empty"))
-    REX_PAGE_SIZE = 50
-    # Server-side-paginated query (inventory_store.list_products_paginated) —
-    # unlike the old two pages' plain list_products(company_id) + Python
-    # filtering, this stays fast regardless of how many products a company
-    # has, since at most one page of rows is ever loaded into Python or sent
-    # to the browser's grid.
-    REX_STATUS_FILTER_OPTIONS = {
-        "completed": T("product_list.filter_completed_only"),
-        "all_except_draft": T("product_list.filter_all_except_drafts"),
-        "all": T("product_list.filter_all_incl_drafts"),
-    }
+        REVIEW_STATUS_LABELS = {
+            "": T("common.all"),
+            "ready": T("product_list.status_ready"),
+            "edited": T("product_list.status_edited"),
+            "exported": T("product_list.status_exported"),
+            "failed": T("product_list.status_failed"),
+        }
+        CONDITION_OPTIONS = ["A", "B", "C", "D"]
+        TRIAGE_LABELS = {
+            "": T("common.all"),
+            "testing_pending": T("product_list.triage_testing_pending"),
+            "ready_for_sale": T("product_list.triage_ready_for_sale"),
+            "needs_repair": T("product_list.triage_needs_repair"),
+            "for_parts": T("product_list.triage_for_parts"),
+            "written_off": T("product_list.triage_written_off"),
+        }
+        BULK_STATUS_OPTIONS = ["draft", "in_progress", "completed"]
+        # Only fields that already exist on Product and make sense to overwrite
+        # in bulk (never SKU/barcode/photos/AI-generated/per-product text —
+        # those are always product-specific, never mass-edited).
+        BULK_EDIT_FIELDS = {
+            "price": T("common.price"),
+            "category": T("common.category"),
+            "brand": T("common.brand"),
+            "product_condition": T("product_list.grade_condition"),
+            "quantity": T("common.quantity"),
+            "location": T("product_list.warehouse_shelf"),
+        }
+        PRICE_ACTIONS = {
+            "set": T("product_list.set_price"), "inc_amount": T("product_list.increase_by_eur"),
+            "dec_amount": T("product_list.decrease_by_eur"),
+            "inc_pct": T("product_list.increase_by_pct"), "dec_pct": T("product_list.decrease_by_pct"),
+        }
+        QUANTITY_ACTIONS = {
+            "set": T("product_list.set_quantity"), "inc_amount": T("product_list.increase_by"),
+            "dec_amount": T("product_list.decrease_by"),
+        }
 
-    def _review_status_of(p: Product) -> str:
-        return p.review_status or "ready"
-
-    def _status_badge(p: Product) -> str:
-        return T("product_list.draft_badge") if p.status == "draft" else REVIEW_STATUS_LABELS[_review_status_of(p)]
-
-    def _rex_reset_page():
-        st.session_state.rex_page = 1
-
-    def _get_selected_products() -> list:
-        """rex_selected_ids can span multiple pages of the list, so each
-        selected id is looked up individually (fast, indexed by primary key)
-        rather than assumed to be present in whatever page is currently
-        loaded."""
-        out = []
-        for pid in st.session_state.rex_selected_ids:
-            prod = inventory_store.get_product(pid, st.session_state.company_id)
-            if prod is not None:
-                out.append(prod)
-        return out
-
-    @st.dialog(T("product_list.export_dialog_title"))
-    def _confirm_export_dialog(selected_products):
-        try:
-            auth.require_role(current_user, auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
-        except PermissionError:
-            st.error(T("common.admins_reviewers_only"))
-            st.stop()
-        # Destination is never hardcoded to BaseLinker — any connected
-        # marketplace integration is a valid target (IntegrationManager.get
-        # already accepts any integration_type). Same connected-integrations
-        # filter as _record_sync_field_changes() above.
-        connected = [
-            i for i in integration_store.list_integrations(current_user.company_id)
-            if i.integration_category == integration_store.CATEGORY_MARKETPLACE
-            and i.status == integration_store.STATUS_CONNECTED
-        ]
-        if not connected:
-            st.warning(T("product_list.no_connected_marketplaces"))
-            if st.button(T("common.close"), use_container_width=True, key="rex_export_none_close"):
-                st.rerun()
-            return
-
-        catalog_by_type = {c.integration_type: c for c in CATALOG}
-        dest_options = [i.integration_type for i in connected]
-        dest = st.selectbox(
-            T("product_list.export_to"), dest_options,
-            format_func=lambda t: catalog_by_type[t].display_name if t in catalog_by_type else t,
-            key="rex_export_destination",
-        )
-        dest_name = catalog_by_type[dest].display_name if dest in catalog_by_type else dest
-
-        st.write(T("product_list.export_confirm_text", count=len(selected_products), dest=dest_name))
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(T("common.cancel"), use_container_width=True, key="rex_export_cancel"):
-                st.rerun()
-        with col2:
-            confirmed = st.button(
-                T("product_list.export_button"), type="primary", use_container_width=True, key="rex_export_confirm"
-            )
-        if confirmed:
-            results_box = st.container()
-            progress = st.progress(0.0, text=T("product_list.starting"))
-            ok_count, fail_count = 0, 0
-            for i, p in enumerate(selected_products):
-                progress.progress(
-                    i / len(selected_products),
-                    text=T("product_list.exporting_progress", sku=p.sku, done=i + 1, total=len(selected_products)),
-                )
+        def _bulk_edit_compute(field: str, action: str, raw_value, current):
+            """Pure — no side effects. Returns (new_value, error_or_None). Both
+            the Preview table and the Apply loop call this exact function, so
+            they can never disagree with each other."""
+            if field == "price":
                 try:
-                    result = IntegrationManager.get(p.company_id, dest).export_product(p)
-                except (IntegrationNotConnectedError, IntegrationNotAvailableError) as e:
-                    result = ConnectorActionResult(success=False, message=str(e))
-                if result.success:
-                    p.review_status = "exported"
-                    p.exported_at = time.time()
-                    ok_count += 1
-                    results_box.success(f"✅ {p.sku}: {result.message}")
-                    audit_store.log_audit(
-                        p.company_id, current_user.id, "EXPORT_INTEGRATION", "product", p.id,
-                        f"integration={dest} external_id={result.external_id}",
+                    v = float(raw_value)
+                except (TypeError, ValueError):
+                    return None, T("product_list.invalid_number")
+                new = {
+                    "set": v, "inc_amount": current + v, "dec_amount": current - v,
+                    "inc_pct": current * (1 + v / 100), "dec_pct": current * (1 - v / 100),
+                }[action]
+                new = round(new, 2)
+                return (new, None) if new > 0 else (None, T("product_list.price_must_be_positive"))
+            if field == "quantity":
+                try:
+                    v = int(raw_value)
+                except (TypeError, ValueError):
+                    return None, T("product_list.invalid_number")
+                new = {"set": v, "inc_amount": current + v, "dec_amount": current - v}[action]
+                return (new, None) if new >= 1 else (None, T("product_list.quantity_must_be_positive"))
+            if field == "product_condition":
+                return raw_value, None
+            # category / brand / location: free-text "set" only
+            v = (raw_value or "").strip()
+            return (v, None) if v else (None, T("product_list.value_cannot_be_empty"))
+        REX_PAGE_SIZE = 50
+        # Server-side-paginated query (inventory_store.list_products_paginated) —
+        # unlike the old two pages' plain list_products(company_id) + Python
+        # filtering, this stays fast regardless of how many products a company
+        # has, since at most one page of rows is ever loaded into Python or sent
+        # to the browser's grid.
+        REX_STATUS_FILTER_OPTIONS = {
+            "completed": T("product_list.filter_completed_only"),
+            "all_except_draft": T("product_list.filter_all_except_drafts"),
+            "all": T("product_list.filter_all_incl_drafts"),
+        }
+
+        def _review_status_of(p: Product) -> str:
+            return p.review_status or "ready"
+
+        def _status_badge(p: Product) -> str:
+            return T("product_list.draft_badge") if p.status == "draft" else REVIEW_STATUS_LABELS[_review_status_of(p)]
+
+        def _rex_reset_page():
+            st.session_state.rex_page = 1
+
+        def _get_selected_products() -> list:
+            """rex_selected_ids can span multiple pages of the list, so each
+            selected id is looked up individually (fast, indexed by primary key)
+            rather than assumed to be present in whatever page is currently
+            loaded."""
+            out = []
+            for pid in st.session_state.rex_selected_ids:
+                prod = inventory_store.get_product(pid, st.session_state.company_id)
+                if prod is not None:
+                    out.append(prod)
+            return out
+
+        @st.dialog(T("product_list.export_dialog_title"))
+        def _confirm_export_dialog(selected_products):
+            try:
+                auth.require_role(current_user, auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
+            except PermissionError:
+                st.error(T("common.admins_reviewers_only"))
+                st.stop()
+            # Destination is never hardcoded to BaseLinker — any connected
+            # marketplace integration is a valid target (IntegrationManager.get
+            # already accepts any integration_type). Same connected-integrations
+            # filter as _record_sync_field_changes() above.
+            connected = [
+                i for i in integration_store.list_integrations(current_user.company_id)
+                if i.integration_category == integration_store.CATEGORY_MARKETPLACE
+                and i.status == integration_store.STATUS_CONNECTED
+            ]
+            if not connected:
+                st.warning(T("product_list.no_connected_marketplaces"))
+                if st.button(T("common.close"), use_container_width=True, key="rex_export_none_close"):
+                    st.rerun()
+                return
+
+            catalog_by_type = {c.integration_type: c for c in CATALOG}
+            dest_options = [i.integration_type for i in connected]
+            dest = st.selectbox(
+                T("product_list.export_to"), dest_options,
+                format_func=lambda t: catalog_by_type[t].display_name if t in catalog_by_type else t,
+                key="rex_export_destination",
+            )
+            dest_name = catalog_by_type[dest].display_name if dest in catalog_by_type else dest
+
+            st.write(T("product_list.export_confirm_text", count=len(selected_products), dest=dest_name))
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_export_cancel"):
+                    st.rerun()
+            with col2:
+                confirmed = st.button(
+                    T("product_list.export_button"), type="primary", use_container_width=True, key="rex_export_confirm"
+                )
+            if confirmed:
+                results_box = st.container()
+                progress = st.progress(0.0, text=T("product_list.starting"))
+                ok_count, fail_count = 0, 0
+                for i, p in enumerate(selected_products):
+                    progress.progress(
+                        i / len(selected_products),
+                        text=T("product_list.exporting_progress", sku=p.sku, done=i + 1, total=len(selected_products)),
                     )
-                else:
-                    p.review_status = "failed"
-                    fail_count += 1
-                    results_box.error(f"❌ {p.sku}: {result.message}")
-                inventory_store.save_product(p)
-                st.session_state.rex_selected_ids.discard(p.id)
-            progress.progress(1.0, text=T("product_list.done"))
-            integration_store.record_sync(
-                current_user.company_id, dest, "bulk_export_summary",
-                status=integration_store.SYNC_STATUS_SUCCESS if not fail_count else integration_store.SYNC_STATUS_ERROR,
-                error_message=f"{ok_count} successful, {fail_count} failed" if fail_count else "",
-            )
-            st.markdown(f"**{T('product_list.exported_successfully', count=ok_count)}**")
-            if fail_count:
-                st.markdown(f"**{T('product_list.products_failed', count=fail_count)}**")
-            if st.button(T("common.close"), use_container_width=True, key="rex_export_done"):
-                st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
-                st.rerun()
+                    try:
+                        result = IntegrationManager.get(p.company_id, dest).export_product(p)
+                    except (IntegrationNotConnectedError, IntegrationNotAvailableError) as e:
+                        result = ConnectorActionResult(success=False, message=str(e))
+                    if result.success:
+                        p.review_status = "exported"
+                        p.exported_at = time.time()
+                        ok_count += 1
+                        results_box.success(f"✅ {p.sku}: {result.message}")
+                        audit_store.log_audit(
+                            p.company_id, current_user.id, "EXPORT_INTEGRATION", "product", p.id,
+                            f"integration={dest} external_id={result.external_id}",
+                        )
+                    else:
+                        p.review_status = "failed"
+                        fail_count += 1
+                        results_box.error(f"❌ {p.sku}: {result.message}")
+                    inventory_store.save_product(p)
+                    st.session_state.rex_selected_ids.discard(p.id)
+                progress.progress(1.0, text=T("product_list.done"))
+                integration_store.record_sync(
+                    current_user.company_id, dest, "bulk_export_summary",
+                    status=integration_store.SYNC_STATUS_SUCCESS if not fail_count else integration_store.SYNC_STATUS_ERROR,
+                    error_message=f"{ok_count} successful, {fail_count} failed" if fail_count else "",
+                )
+                st.markdown(f"**{T('product_list.exported_successfully', count=ok_count)}**")
+                if fail_count:
+                    st.markdown(f"**{T('product_list.products_failed', count=fail_count)}**")
+                if st.button(T("common.close"), use_container_width=True, key="rex_export_done"):
+                    st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
+                    st.rerun()
 
-    @st.dialog(T("product_list.delete_dialog_title"))
-    def _confirm_delete_dialog(selected_products):
-        try:
-            auth.require_role(current_user, auth.ROLE_ADMIN)
-        except PermissionError:
-            st.error(T("common.admins_only"))
-            st.stop()
-        st.warning(T("product_list.delete_confirm_text", count=len(selected_products)))
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(T("common.cancel"), use_container_width=True, key="rex_delete_cancel"):
-                st.rerun()
-        with col2:
-            confirmed = st.button(
-                T("common.delete"), type="primary", use_container_width=True, key="rex_delete_confirm"
-            )
-        if confirmed:
-            for p in selected_products:
-                inventory_store.delete_product(p.id, p.company_id)
-                audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
-                st.session_state.rex_selected_ids.discard(p.id)
-            st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
-            st.success(T("product_list.deleted_success", count=len(selected_products)))
-            if st.button(T("common.close"), use_container_width=True, key="rex_delete_done"):
-                st.rerun()
-
-    @st.dialog(T("product_list.bulk_edit_title"))
-    def _confirm_bulk_edit_dialog(selected_products):
-        try:
-            auth.require_role(current_user, auth.ROLE_ADMIN)
-        except PermissionError:
-            st.error(T("common.admins_only"))
-            st.stop()
-        st.write(f"**{T('product_list.bulk_edit_heading', count=len(selected_products))}**")
-        field = st.selectbox(
-            T("product_list.field_to_edit"), list(BULK_EDIT_FIELDS), format_func=lambda k: BULK_EDIT_FIELDS[k],
-            key="rex_bulkedit_field",
-        )
-
-        # Each control is keyed by field, so switching the field dropdown
-        # always lands on a fresh widget (no stale value carried over from
-        # a previous field) without any manual reset code.
-        if field in ("price", "quantity"):
-            actions = PRICE_ACTIONS if field == "price" else QUANTITY_ACTIONS
-            action = st.selectbox(
-                T("product_list.action_label"), list(actions), format_func=lambda k: actions[k],
-                key=f"rex_bulkedit_action_{field}",
-            )
-            raw_value = st.number_input(
-                T("product_list.value_label"), step=0.5 if field == "price" else 1,
-                key=f"rex_bulkedit_value_{field}",
-            )
-        elif field == "product_condition":
-            action = "set"
-            raw_value = st.selectbox(T("product_list.new_grade"), CONDITION_OPTIONS, key=f"rex_bulkedit_value_{field}")
-        else:  # category / brand / location
-            action = "set"
-            raw_value = st.text_input(T("product_list.new_value"), key=f"rex_bulkedit_value_{field}")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(T("common.cancel"), use_container_width=True, key="rex_bulkedit_cancel"):
-                st.session_state.rex_bulkedit_preview = None
-                st.rerun()
-        with col2:
-            if st.button(T("product_list.preview_changes"), type="primary", use_container_width=True, key="rex_bulkedit_preview_btn"):
-                rows = []
+        @st.dialog(T("product_list.delete_dialog_title"))
+        def _confirm_delete_dialog(selected_products):
+            try:
+                auth.require_role(current_user, auth.ROLE_ADMIN)
+            except PermissionError:
+                st.error(T("common.admins_only"))
+                st.stop()
+            st.warning(T("product_list.delete_confirm_text", count=len(selected_products)))
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_delete_cancel"):
+                    st.rerun()
+            with col2:
+                confirmed = st.button(
+                    T("common.delete"), type="primary", use_container_width=True, key="rex_delete_confirm"
+                )
+            if confirmed:
                 for p in selected_products:
-                    current = getattr(p, field)
-                    new_value, error = _bulk_edit_compute(field, action, raw_value, current)
-                    rows.append({
-                        "product_id": p.id, "sku": p.sku, "name": p.name,
-                        "current": current, "new_value": new_value, "error": error,
-                    })
-                st.session_state.rex_bulkedit_preview = {
-                    "field": field, "action": action, "raw_value": raw_value, "rows": rows,
-                }
-                st.rerun()
+                    inventory_store.delete_product(p.id, p.company_id)
+                    audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
+                    st.session_state.rex_selected_ids.discard(p.id)
+                st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
+                st.success(T("product_list.deleted_success", count=len(selected_products)))
+                if st.button(T("common.close"), use_container_width=True, key="rex_delete_done"):
+                    st.rerun()
 
-        preview = st.session_state.get("rex_bulkedit_preview")
-        # Only trust a preview that matches exactly what's currently
-        # selected above — if the user tweaked the field/action/value after
-        # previewing, the stale preview is hidden until they preview again,
-        # so Apply can never run against an out-of-date computation.
-        if preview and preview["field"] == field and preview["action"] == action and preview["raw_value"] == raw_value:
-            n_errors = sum(1 for r in preview["rows"] if r["error"])
-            st.dataframe(
-                [
-                    {
-                        T("product_list.product_col"): r["sku"] or r["name"] or r["product_id"],
-                        T("product_list.current_col"): r["current"],
-                        T("product_list.new_col"): r["new_value"] if not r["error"] else f"⚠ {r['error']}",
-                    }
-                    for r in preview["rows"]
-                ],
-                hide_index=True, use_container_width=True,
+        @st.dialog(T("product_list.bulk_edit_title"))
+        def _confirm_bulk_edit_dialog(selected_products):
+            try:
+                auth.require_role(current_user, auth.ROLE_ADMIN)
+            except PermissionError:
+                st.error(T("common.admins_only"))
+                st.stop()
+            st.write(f"**{T('product_list.bulk_edit_heading', count=len(selected_products))}**")
+            field = st.selectbox(
+                T("product_list.field_to_edit"), list(BULK_EDIT_FIELDS), format_func=lambda k: BULK_EDIT_FIELDS[k],
+                key="rex_bulkedit_field",
             )
-            if n_errors:
-                st.caption(T("product_list.skipped_due_to_errors", count=n_errors))
 
-            acol1, acol2 = st.columns(2)
-            with acol1:
-                if st.button(T("common.cancel"), use_container_width=True, key="rex_bulkedit_preview_cancel"):
+            # Each control is keyed by field, so switching the field dropdown
+            # always lands on a fresh widget (no stale value carried over from
+            # a previous field) without any manual reset code.
+            if field in ("price", "quantity"):
+                actions = PRICE_ACTIONS if field == "price" else QUANTITY_ACTIONS
+                action = st.selectbox(
+                    T("product_list.action_label"), list(actions), format_func=lambda k: actions[k],
+                    key=f"rex_bulkedit_action_{field}",
+                )
+                raw_value = st.number_input(
+                    T("product_list.value_label"), step=0.5 if field == "price" else 1,
+                    key=f"rex_bulkedit_value_{field}",
+                )
+            elif field == "product_condition":
+                action = "set"
+                raw_value = st.selectbox(T("product_list.new_grade"), CONDITION_OPTIONS, key=f"rex_bulkedit_value_{field}")
+            else:  # category / brand / location
+                action = "set"
+                raw_value = st.text_input(T("product_list.new_value"), key=f"rex_bulkedit_value_{field}")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_bulkedit_cancel"):
                     st.session_state.rex_bulkedit_preview = None
                     st.rerun()
-            with acol2:
-                apply_clicked = st.button(
-                    T("product_list.apply_changes"), type="primary", use_container_width=True, key="rex_bulkedit_apply",
-                )
-            if apply_clicked:
-                by_id = {p.id: p for p in selected_products}
-                ok_count, fail_count = 0, 0
-                for r in preview["rows"]:
-                    if r["error"]:
-                        fail_count += 1
-                        continue
-                    p = by_id[r["product_id"]]
-                    old_value = getattr(p, field)
-                    setattr(p, field, r["new_value"])
-                    if field != "location":
-                        _record_sync_field_changes(p, {field: (old_value, r["new_value"])}, current_user.id)
-                    inventory_store.save_product(p)
-                    audit_store.log_audit(
-                        p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
-                        f"{field} -> {r['new_value']} (bulk edit)",
-                    )
-                    ok_count += 1
-                st.session_state.rex_bulkedit_preview = None
-                st.session_state.rex_clear_seq += 1
-                if fail_count:
-                    st.success(T("product_list.bulk_edit_partial_success", ok=ok_count, fail=fail_count))
-                else:
-                    st.success(T("product_list.bulk_edit_success", count=ok_count))
-                if st.button(T("common.close"), use_container_width=True, key="rex_bulkedit_done"):
-                    st.rerun()
-
-    _BULK_TRANSLATE_MAX_PRODUCTS = 300  # v1 runs synchronously in one request; see
-    # integrations/scheduler.py / sync_queue_store.py for the background-job
-    # pattern this should move to once real usage shows this cap is too low.
-
-    def _bulk_translate_classify(product, language: str, force: bool) -> str:
-        """create | update | skip_manual | skip_primary — computed from
-        existing DB state only, no provider call, so Preview never spends
-        API credits (mirrors _confirm_bulk_edit_dialog's preview/apply
-        split above)."""
-        if language == product.primary_language:
-            return "skip_primary"
-        existing = product_translation_store.get_translation(product.id, language)
-        if existing is None:
-            return "create"
-        if existing.translated_by == "manual" and not force:
-            return "skip_manual"
-        return "update"
-
-    @st.dialog(T("product_list.bulk_translate_title"))
-    def _confirm_bulk_translate_dialog(selected_products):
-        st.write(f"**{T('product_list.bulk_translate_heading', count=len(selected_products))}**")
-        if len(selected_products) > _BULK_TRANSLATE_MAX_PRODUCTS:
-            st.warning(T("product_list.bulk_translate_too_many", max=_BULK_TRANSLATE_MAX_PRODUCTS))
-            return
-
-        target_langs = st.multiselect(
-            T("product_list.translate_target_languages"),
-            options=list(company_store.CONTENT_LANGUAGES.keys()),
-            format_func=lambda code: company_store.CONTENT_LANGUAGES[code],
-            key="rex_bulktranslate_langs",
-        )
-        provider = st.radio(
-            T("settings.translation_provider"), options=["deepl", "openai"],
-            format_func=lambda p: {"deepl": "DeepL", "openai": "OpenAI"}[p],
-            index=["deepl", "openai"].index(current_company.translation_provider)
-            if current_company and current_company.translation_provider in ("deepl", "openai") else 0,
-            key="rex_bulktranslate_provider", horizontal=True,
-        )
-        force = st.checkbox(T("product_list.retranslate_force"), key="rex_bulktranslate_force")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(T("common.cancel"), use_container_width=True, key="rex_bulktranslate_cancel"):
-                st.session_state.rex_bulktranslate_preview = None
-                st.rerun()
-        with col2:
-            if st.button(
-                T("product_list.preview_changes"), type="primary", use_container_width=True,
-                key="rex_bulktranslate_preview_btn",
-            ):
-                rows = []
-                for p in selected_products:
-                    for lang in target_langs:
+            with col2:
+                if st.button(T("product_list.preview_changes"), type="primary", use_container_width=True, key="rex_bulkedit_preview_btn"):
+                    rows = []
+                    for p in selected_products:
+                        current = getattr(p, field)
+                        new_value, error = _bulk_edit_compute(field, action, raw_value, current)
                         rows.append({
                             "product_id": p.id, "sku": p.sku, "name": p.name,
-                            "language": lang, "action": _bulk_translate_classify(p, lang, force),
+                            "current": current, "new_value": new_value, "error": error,
                         })
-                st.session_state.rex_bulktranslate_preview = {
-                    "languages": target_langs, "provider": provider, "force": force, "rows": rows,
-                }
-                st.rerun()
+                    st.session_state.rex_bulkedit_preview = {
+                        "field": field, "action": action, "raw_value": raw_value, "rows": rows,
+                    }
+                    st.rerun()
 
-        preview = st.session_state.get("rex_bulktranslate_preview")
-        if preview and preview["languages"] == target_langs and preview["provider"] == provider and preview["force"] == force:
-            counts = {"create": 0, "update": 0, "skip_manual": 0, "skip_primary": 0}
-            for r in preview["rows"]:
-                counts[r["action"]] += 1
-            st.caption(T(
-                "product_list.bulk_translate_preview_summary",
-                create=counts["create"], update=counts["update"], skip=counts["skip_manual"],
-            ))
-            actionable = [r for r in preview["rows"] if r["action"] in ("create", "update")]
-            if not actionable:
-                st.info(T("product_list.bulk_translate_nothing_to_do"))
-            else:
+            preview = st.session_state.get("rex_bulkedit_preview")
+            # Only trust a preview that matches exactly what's currently
+            # selected above — if the user tweaked the field/action/value after
+            # previewing, the stale preview is hidden until they preview again,
+            # so Apply can never run against an out-of-date computation.
+            if preview and preview["field"] == field and preview["action"] == action and preview["raw_value"] == raw_value:
+                n_errors = sum(1 for r in preview["rows"] if r["error"])
                 st.dataframe(
                     [
                         {
                             T("product_list.product_col"): r["sku"] or r["name"] or r["product_id"],
-                            T("product_list.content_language"): company_store.CONTENT_LANGUAGES.get(r["language"], r["language"]),
-                            T("product_list.action_label"): r["action"],
+                            T("product_list.current_col"): r["current"],
+                            T("product_list.new_col"): r["new_value"] if not r["error"] else f"⚠ {r['error']}",
                         }
                         for r in preview["rows"]
                     ],
                     hide_index=True, use_container_width=True,
                 )
+                if n_errors:
+                    st.caption(T("product_list.skipped_due_to_errors", count=n_errors))
 
                 acol1, acol2 = st.columns(2)
                 with acol1:
-                    if st.button(T("common.cancel"), use_container_width=True, key="rex_bulktranslate_preview_cancel"):
-                        st.session_state.rex_bulktranslate_preview = None
+                    if st.button(T("common.cancel"), use_container_width=True, key="rex_bulkedit_preview_cancel"):
+                        st.session_state.rex_bulkedit_preview = None
                         st.rerun()
                 with acol2:
                     apply_clicked = st.button(
-                        T("product_list.apply_changes"), type="primary", use_container_width=True,
-                        key="rex_bulktranslate_apply",
+                        T("product_list.apply_changes"), type="primary", use_container_width=True, key="rex_bulkedit_apply",
                     )
                 if apply_clicked:
                     by_id = {p.id: p for p in selected_products}
-                    progress = st.progress(0.0)
                     ok_count, fail_count = 0, 0
-                    for i, r in enumerate(actionable):
-                        p = by_id[r["product_id"]]
-                        try:
-                            translation_service.translate_product(
-                                p, target_language=r["language"], provider_type=provider,
-                                company_id=p.company_id, translated_by=provider, force=force,
-                            )
-                            ok_count += 1
-                        except Exception:
+                    for r in preview["rows"]:
+                        if r["error"]:
                             fail_count += 1
-                        progress.progress((i + 1) / len(actionable))
-                    st.session_state.rex_bulktranslate_preview = None
+                            continue
+                        p = by_id[r["product_id"]]
+                        old_value = getattr(p, field)
+                        setattr(p, field, r["new_value"])
+                        if field != "location":
+                            _record_sync_field_changes(p, {field: (old_value, r["new_value"])}, current_user.id)
+                        inventory_store.save_product(p)
+                        audit_store.log_audit(
+                            p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
+                            f"{field} -> {r['new_value']} (bulk edit)",
+                        )
+                        ok_count += 1
+                    st.session_state.rex_bulkedit_preview = None
+                    st.session_state.rex_clear_seq += 1
                     if fail_count:
-                        st.success(T("product_list.bulk_translate_partial_success", ok=ok_count, fail=fail_count))
+                        st.success(T("product_list.bulk_edit_partial_success", ok=ok_count, fail=fail_count))
                     else:
-                        st.success(T("product_list.bulk_translate_success", count=ok_count))
-                    if st.button(T("common.close"), use_container_width=True, key="rex_bulktranslate_done"):
+                        st.success(T("product_list.bulk_edit_success", count=ok_count))
+                    if st.button(T("common.close"), use_container_width=True, key="rex_bulkedit_done"):
                         st.rerun()
 
-    @st.dialog(T("product_list.change_status_title"))
-    def _confirm_change_status_dialog(selected_products):
+        _BULK_TRANSLATE_MAX_PRODUCTS = 300  # v1 runs synchronously in one request; see
+        # integrations/scheduler.py / sync_queue_store.py for the background-job
+        # pattern this should move to once real usage shows this cap is too low.
+
+        def _bulk_translate_classify(product, language: str, force: bool) -> str:
+            """create | update | skip_manual | skip_primary — computed from
+            existing DB state only, no provider call, so Preview never spends
+            API credits (mirrors _confirm_bulk_edit_dialog's preview/apply
+            split above)."""
+            if language == product.primary_language:
+                return "skip_primary"
+            existing = product_translation_store.get_translation(product.id, language)
+            if existing is None:
+                return "create"
+            if existing.translated_by == "manual" and not force:
+                return "skip_manual"
+            return "update"
+
+        @st.dialog(T("product_list.bulk_translate_title"))
+        def _confirm_bulk_translate_dialog(selected_products):
+            st.write(f"**{T('product_list.bulk_translate_heading', count=len(selected_products))}**")
+            if len(selected_products) > _BULK_TRANSLATE_MAX_PRODUCTS:
+                st.warning(T("product_list.bulk_translate_too_many", max=_BULK_TRANSLATE_MAX_PRODUCTS))
+                return
+
+            target_langs = st.multiselect(
+                T("product_list.translate_target_languages"),
+                options=list(company_store.CONTENT_LANGUAGES.keys()),
+                format_func=lambda code: company_store.CONTENT_LANGUAGES[code],
+                key="rex_bulktranslate_langs",
+            )
+            provider = st.radio(
+                T("settings.translation_provider"), options=["deepl", "openai"],
+                format_func=lambda p: {"deepl": "DeepL", "openai": "OpenAI"}[p],
+                index=["deepl", "openai"].index(current_company.translation_provider)
+                if current_company and current_company.translation_provider in ("deepl", "openai") else 0,
+                key="rex_bulktranslate_provider", horizontal=True,
+            )
+            force = st.checkbox(T("product_list.retranslate_force"), key="rex_bulktranslate_force")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_bulktranslate_cancel"):
+                    st.session_state.rex_bulktranslate_preview = None
+                    st.rerun()
+            with col2:
+                if st.button(
+                    T("product_list.preview_changes"), type="primary", use_container_width=True,
+                    key="rex_bulktranslate_preview_btn",
+                ):
+                    rows = []
+                    for p in selected_products:
+                        for lang in target_langs:
+                            rows.append({
+                                "product_id": p.id, "sku": p.sku, "name": p.name,
+                                "language": lang, "action": _bulk_translate_classify(p, lang, force),
+                            })
+                    st.session_state.rex_bulktranslate_preview = {
+                        "languages": target_langs, "provider": provider, "force": force, "rows": rows,
+                    }
+                    st.rerun()
+
+            preview = st.session_state.get("rex_bulktranslate_preview")
+            if preview and preview["languages"] == target_langs and preview["provider"] == provider and preview["force"] == force:
+                counts = {"create": 0, "update": 0, "skip_manual": 0, "skip_primary": 0}
+                for r in preview["rows"]:
+                    counts[r["action"]] += 1
+                st.caption(T(
+                    "product_list.bulk_translate_preview_summary",
+                    create=counts["create"], update=counts["update"], skip=counts["skip_manual"],
+                ))
+                actionable = [r for r in preview["rows"] if r["action"] in ("create", "update")]
+                if not actionable:
+                    st.info(T("product_list.bulk_translate_nothing_to_do"))
+                else:
+                    st.dataframe(
+                        [
+                            {
+                                T("product_list.product_col"): r["sku"] or r["name"] or r["product_id"],
+                                T("product_list.content_language"): company_store.CONTENT_LANGUAGES.get(r["language"], r["language"]),
+                                T("product_list.action_label"): r["action"],
+                            }
+                            for r in preview["rows"]
+                        ],
+                        hide_index=True, use_container_width=True,
+                    )
+
+                    acol1, acol2 = st.columns(2)
+                    with acol1:
+                        if st.button(T("common.cancel"), use_container_width=True, key="rex_bulktranslate_preview_cancel"):
+                            st.session_state.rex_bulktranslate_preview = None
+                            st.rerun()
+                    with acol2:
+                        apply_clicked = st.button(
+                            T("product_list.apply_changes"), type="primary", use_container_width=True,
+                            key="rex_bulktranslate_apply",
+                        )
+                    if apply_clicked:
+                        by_id = {p.id: p for p in selected_products}
+                        progress = st.progress(0.0)
+                        ok_count, fail_count = 0, 0
+                        for i, r in enumerate(actionable):
+                            p = by_id[r["product_id"]]
+                            try:
+                                translation_service.translate_product(
+                                    p, target_language=r["language"], provider_type=provider,
+                                    company_id=p.company_id, translated_by=provider, force=force,
+                                )
+                                ok_count += 1
+                            except Exception:
+                                fail_count += 1
+                            progress.progress((i + 1) / len(actionable))
+                        st.session_state.rex_bulktranslate_preview = None
+                        if fail_count:
+                            st.success(T("product_list.bulk_translate_partial_success", ok=ok_count, fail=fail_count))
+                        else:
+                            st.success(T("product_list.bulk_translate_success", count=ok_count))
+                        if st.button(T("common.close"), use_container_width=True, key="rex_bulktranslate_done"):
+                            st.rerun()
+
+        @st.dialog(T("product_list.change_status_title"))
+        def _confirm_change_status_dialog(selected_products):
+            try:
+                auth.require_role(current_user, auth.ROLE_ADMIN)
+            except PermissionError:
+                st.error(T("common.admins_only"))
+                st.stop()
+            st.write(T("product_list.change_status_heading", count=len(selected_products)))
+            new_status = st.selectbox(T("product_list.new_status"), BULK_STATUS_OPTIONS, key="rex_status_value")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_status_cancel"):
+                    st.rerun()
+            with col2:
+                confirmed = st.button(
+                    T("product_list.apply_status_change"), type="primary", use_container_width=True, key="rex_status_confirm"
+                )
+            if confirmed:
+                for p in selected_products:
+                    p.status = new_status
+                    category_store.promote_from_manifest_on_completion(p)
+                    inventory_store.save_product(p)
+                    audit_store.log_audit(
+                        p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, f"status -> {new_status}",
+                    )
+                st.session_state.rex_clear_seq += 1
+                st.success(T("product_list.status_changed_success", count=len(selected_products)))
+                if st.button(T("common.close"), use_container_width=True, key="rex_status_done"):
+                    st.rerun()
+
+        @st.dialog(T("product_list.photo_dialog_title"), width="large")
+        def _photo_lightbox_dialog(image_paths, start_index: int):
+            idx = st.session_state.get("rex_lightbox_index", start_index)
+            idx = max(0, min(idx, len(image_paths) - 1))
+            img_path = image_paths[idx]
+            if os.path.exists(img_path):
+                st.image(img_path, use_container_width=True)
+            st.caption(T("product_list.photo_counter", current=idx + 1, total=len(image_paths)))
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button(T("product_list.prev_photo"), disabled=idx <= 0, use_container_width=True, key="rex_lb_prev"):
+                    st.session_state.rex_lightbox_index = idx - 1
+                    st.rerun()
+            with c2:
+                if st.button(T("common.close"), use_container_width=True, key="rex_lb_close"):
+                    st.rerun()
+            with c3:
+                if st.button(
+                    T("product_list.next_photo"), disabled=idx >= len(image_paths) - 1,
+                    use_container_width=True, key="rex_lb_next",
+                ):
+                    st.session_state.rex_lightbox_index = idx + 1
+                    st.rerun()
+
+        @st.dialog(T("product_list.translate_dialog_title"))
+        def _confirm_translate_dialog(product):
+            st.write(T("product_list.translate_heading", name=product.name or product.sku))
+            _existing_langs = {t.language for t in product_translation_store.list_translations(product.id)}
+            _lang_choices = [
+                code for code in company_store.CONTENT_LANGUAGES if code != product.primary_language
+            ]
+            target_langs = st.multiselect(
+                T("product_list.translate_target_languages"),
+                options=_lang_choices,
+                format_func=lambda code: (
+                    f"{company_store.CONTENT_LANGUAGES[code]}"
+                    + (f" ({T('product_list.retranslate_suffix')})" if code in _existing_langs else "")
+                ),
+                key="rex_translate_langs",
+            )
+            provider = st.radio(
+                T("settings.translation_provider"), options=["deepl", "openai"],
+                format_func=lambda p: {"deepl": "DeepL", "openai": "OpenAI"}[p],
+                index=["deepl", "openai"].index(current_company.translation_provider)
+                if current_company and current_company.translation_provider in ("deepl", "openai") else 0,
+                key="rex_translate_provider", horizontal=True,
+            )
+            force = st.checkbox(T("product_list.retranslate_force"), key="rex_translate_force")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(T("common.cancel"), use_container_width=True, key="rex_translate_cancel"):
+                    st.rerun()
+            with col2:
+                confirmed = st.button(
+                    T("product_list.translate_action"), type="primary", use_container_width=True, key="rex_translate_confirm",
+                )
+            if confirmed:
+                if not target_langs:
+                    st.warning(T("product_list.translate_select_language"))
+                elif not IntegrationManager.is_connected(product.company_id, provider):
+                    st.warning(T("product_list.translate_provider_not_connected"))
+                else:
+                    created, skipped = 0, 0
+                    for lang in target_langs:
+                        try:
+                            result = translation_service.translate_product(
+                                product, target_language=lang, provider_type=provider,
+                                company_id=product.company_id, translated_by=provider, force=force,
+                            )
+                        except Exception as e:
+                            st.error(T("product_list.translate_failed", language=company_store.CONTENT_LANGUAGES[lang], error=e))
+                            continue
+                        if result is None:
+                            skipped += 1
+                        else:
+                            created += 1
+                    if created:
+                        st.success(T("product_list.translate_success", count=created))
+                    if skipped:
+                        st.caption(T("product_list.translate_skipped_manual", count=skipped))
+                    if created:
+                        st.rerun()
+
+        def _render_product_card(p: Product, tier_label: str = ""):
+            """The single detail view for a product — used both when a row is
+            opened from the paginated list/card-view below, and inline (once
+            per match, no separate open step) from the exact-lookup search
+            further down. Combines the old Review & Export page's fully
+            editable form (still the only place these fields are edited) with
+            the old Inventory page's operational sections (quick actions,
+            manifest info, repair history, marketplace/BaseLinker actions,
+            financials) — Inventory used to re-display brand/model/category/
+            EAN/condition/description/defects/etc a second time, read-only;
+            that's dropped here since the editable form above already shows
+            the same data live."""
+            if tier_label:
+                st.caption(T("product_list.exact_match", tier=tier_label))
+            st.subheader(f"{p.sku} — {p.name or T('product_list.no_name')}")
+            st.caption(_status_badge(p))
+            st.divider()
+
+            # -- Quick actions: triage status / location are the two things
+            # someone changes constantly during daily inventory work, so they
+            # auto-save on change rather than waiting for the Save button below
+            # (which only covers the review/grading fields). Quantity is
+            # deliberately NOT here — it lives only in the Pricing section
+            # below now, to avoid two different Quantity controls on one card.
+            triage_keys = [k for k in TRIAGE_LABELS if k]
+            qa1, qa2, qa3 = st.columns([2, 2, 1])
+            with qa1:
+                new_triage = st.selectbox(
+                    T("product_list.triage_status"), options=triage_keys,
+                    index=triage_keys.index(p.triage_status) if p.triage_status in triage_keys else 0,
+                    format_func=lambda k: TRIAGE_LABELS[k],
+                    key=f"rex_triage_{p.id}",
+                )
+                if new_triage != p.triage_status:
+                    p.triage_status = new_triage
+                    inventory_store.save_product(p)
+                    audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "triage_status")
+                    st.rerun()
+            with qa2:
+                new_location = st.text_input(T("common.location"), value=p.location, key=f"rex_loc_{p.id}")
+                if new_location != p.location:
+                    p.location = new_location
+                    inventory_store.save_product(p)
+                    audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "location")
+                    st.rerun()
+            with qa3:
+                st.write("")
+                _can_delete_product = current_user.role == auth.ROLE_ADMIN
+                if st.button(
+                    T("common.delete"), key=f"rex_delete_{p.id}", use_container_width=True,
+                    disabled=not _can_delete_product,
+                ):
+                    if not _can_delete_product:
+                        st.error(T("common.admins_only"))
+                        st.stop()
+                    inventory_store.delete_product(p.id, p.company_id)
+                    audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
+                    st.session_state.rex_open_product_id = None
+                    st.rerun()
+
+            # Not wrapped in st.form: the Photos section below (per-photo
+            # "Enlarge" buttons, its own upload control) needs regular
+            # widgets, which st.form forbids — and it belongs right above
+            # Save, not above these fields. Every widget gets an explicit
+            # per-product key so Previous/Next don't leave a stale typed
+            # value behind when the label text is identical across products.
+            st.markdown(f"**{T('product_list.product_information')}**")
+            st.caption(T("product_list.name_moved_caption"))
+            pi1, pi2 = st.columns(2)
+            with pi1:
+                brand_in = st.text_input(T("common.brand"), value=p.brand, key=f"rex_brand_{p.id}")
+                barcode_in = st.text_input(
+                    T("common.barcode"), value=p.ean or p.manifest_barcode or p.scanned_barcode,
+                    key=f"rex_barcode_{p.id}",
+                )
+            with pi2:
+                model_in = st.text_input(T("common.model"), value=p.model, key=f"rex_model_{p.id}")
+
+                _rex_labels, _rex_label_to_id, _rex_id_to_label, _rex_id_to_name = _category_select_options(p.company_id)
+                _rex_placeholder = T("category.pick_placeholder")
+                _rex_options = [_rex_placeholder] + _rex_labels
+                _rex_default_label = None
+                if p.category_id and p.category_id in _rex_id_to_label:
+                    _rex_default_label = _rex_id_to_label[p.category_id]
+                elif p.category:
+                    # Backward compat for products saved before category_id
+                    # existed: resolve the old free-text display value against
+                    # the catalog by exact normalized name, never fuzzy.
+                    _rex_match = category_store.find_by_name(p.company_id, p.category)
+                    if _rex_match is not None and _rex_match.id in _rex_id_to_label:
+                        _rex_default_label = _rex_id_to_label[_rex_match.id]
+                _rex_default_index = _rex_options.index(_rex_default_label) if _rex_default_label in _rex_options else 0
+                category_choice_in = st.selectbox(
+                    T("common.category"), _rex_options, index=_rex_default_index, key=f"rex_category_{p.id}",
+                )
+                category_id_in = _rex_label_to_id.get(category_choice_in, "") if category_choice_in != _rex_placeholder else ""
+                category_name_in = _rex_id_to_name.get(category_id_in, "") if category_id_in else ""
+
+                power_in = st.text_input(T("common.power"), value=p.power, key=f"rex_power_{p.id}")
+            product_condition_in = st.selectbox(
+                T("common.product_condition"), CONDITION_OPTIONS,
+                index=CONDITION_OPTIONS.index(p.product_condition) if p.product_condition in CONDITION_OPTIONS else 1,
+                key=f"rex_condition_{p.id}",
+            )
+
+            st.markdown(f"**{T('product_list.pricing')}**")
+            pr1, pr2, pr3 = st.columns(3)
+            with pr1:
+                price_in = st.number_input(
+                    T("product_list.price_eur"), min_value=0.0, value=float(p.price), step=1.0, key=f"rex_price_{p.id}",
+                )
+            with pr2:
+                quantity_in = st.number_input(
+                    T("common.quantity"), min_value=1, value=int(p.quantity or 1), step=1, key=f"rex_qty_{p.id}",
+                )
+            with pr3:
+                # Seeds from manifest_weight_kg only when weight_kg itself is
+                # still blank (a product manifest-imported before this field
+                # existed, or without a weight column mapped) — never overrides
+                # a value a human already set/edited.
+                weight_kg_in = st.number_input(
+                    T("product_list.weight_kg"), min_value=0.0,
+                    value=float(p.weight_kg or p.manifest_weight_kg), step=0.1, key=f"rex_weight_{p.id}",
+                )
+
+            # -- Content language: name/product_description/condition_description/
+            # defects are the only fields that live per-language (see
+            # modules/product_translation_store.py) — everything else on this
+            # card (brand/model/price/quantity/etc.) is language-neutral and
+            # always saves straight to the product regardless of which tab is
+            # selected here.
+            _translations_by_lang = {t.language: t for t in product_translation_store.list_translations(p.id)}
+            _lang_tabs = [p.primary_language] + [l for l in _translations_by_lang if l != p.primary_language]
+            _lang_state_key = f"rex_content_lang_{p.id}"
+            _default_lang = (
+                current_company.default_product_language
+                if current_company and current_company.default_product_language in _lang_tabs
+                else p.primary_language
+            )
+            if st.session_state.get(_lang_state_key) not in _lang_tabs:
+                st.session_state[_lang_state_key] = _default_lang
+
+            lang_col, translate_col = st.columns([4, 1])
+            with lang_col:
+                selected_lang = st.radio(
+                    T("product_list.content_language"), options=_lang_tabs,
+                    format_func=lambda code: company_store.CONTENT_LANGUAGES.get(code, code.upper()),
+                    key=_lang_state_key, horizontal=True,
+                )
+            with translate_col:
+                st.write("")
+                if st.button(T("product_list.translate_action"), key=f"rex_translate_btn_{p.id}", use_container_width=True):
+                    _confirm_translate_dialog(p)
+
+            is_primary_tab = selected_lang == p.primary_language
+            if is_primary_tab:
+                name_val, desc_val, extra_val = p.name, p.product_description, p.condition_description
+                defects_val_list = p.defects
+                box_val_list = p.box_contents
+                missing_val_list = p.missing_components
+                checklist_val_list = p.functional_checklist
+                reasoning_val = p.product_condition_reasoning
+                match_notes_val = p.match_notes
+            else:
+                _t = _translations_by_lang.get(selected_lang)
+                name_val = _t.title if _t else ""
+                desc_val = _t.description if _t else ""
+                extra_val = _t.condition_description if _t else ""
+                defects_val_list = _t.defects if _t else []
+                box_val_list = _t.box_contents if _t else []
+                missing_val_list = _t.missing_components if _t else []
+                checklist_val_list = _t.functional_checklist if _t else []
+                reasoning_val = _t.product_condition_reasoning if _t else ""
+                match_notes_val = _t.match_notes if _t else ""
+                if _t is not None and _t.translated_by == "manual":
+                    st.caption(T("product_list.manually_edited_translation"))
+
+            name_in = st.text_input(
+                T("common.product_name"), value=name_val, key=f"rex_name_{p.id}_{selected_lang}",
+            )
+            st.markdown(f"**{T('common.product_description')}**")
+            desc_in = st.text_area(
+                T("common.product_description"), value=desc_val, height=120, key=f"rex_desc_{p.id}_{selected_lang}",
+            )
+
+            st.markdown(f"**{T('product_list.additional_description')}**")
+            extra_in = st.text_area(
+                T("new_item.condition_scratches_details"),
+                value=extra_val, height=100, key=f"rex_extra_{p.id}_{selected_lang}",
+            )
+
+            st.markdown(f"**{T('product_list.defects')}**")
+            defects_in = st.text_area(
+                T("new_item.defects_label"), value="\n".join(defects_val_list), height=80,
+                key=f"rex_defects_{p.id}_{selected_lang}",
+            )
+
+            st.markdown(f"**{T('product_list.missing_components')}**")
+            missing_in = st.text_area(
+                T("product_list.missing_components_label"), value="\n".join(missing_val_list), height=60,
+                key=f"rex_missing_{p.id}_{selected_lang}",
+            )
+
+            st.markdown(f"**{T('product_list.box_contents')}**")
+            box_in = st.text_area(
+                T("product_list.box_contents_label"), value="\n".join(box_val_list), height=60,
+                key=f"rex_box_{p.id}_{selected_lang}",
+            )
+
+            st.markdown(f"**{T('product_list.functional_checklist')}**")
+            checklist_in = st.text_area(
+                T("product_list.functional_checklist_label"), value="\n".join(checklist_val_list), height=80,
+                key=f"rex_checklist_{p.id}_{selected_lang}",
+            )
+
+            if reasoning_val:
+                st.caption(T("product_list.condition_reasoning", reasoning=reasoning_val))
+            if match_notes_val:
+                st.caption(T("new_item.match_notes") + f": {match_notes_val}")
+            if p.price_reasoning:
+                st.caption(T("product_list.price_reasoning", reasoning=p.price_reasoning))
+
+            st.divider()
+            st.markdown(f"**{T('product_list.photos')}** ({len(p.image_paths)}/{REVIEW_CARD_MAX_PHOTOS})")
+            if p.image_paths:
+                photo_cols = st.columns(4)
+                for i, img_path in enumerate(p.image_paths):
+                    if os.path.exists(img_path):
+                        with photo_cols[i % 4]:
+                            # Fixed square box + object-fit:cover (via a plain
+                            # <img>, not st.image — which just scales to the
+                            # column width and leaves each photo's own aspect
+                            # ratio intact) so every tile is the same size
+                            # regardless of the source photo's shape, instead
+                            # of a ragged grid of different-height images.
+                            card_thumb = _ensure_card_photo(img_path)
+                            thumb_url = _image_static_url(card_thumb) if card_thumb else None
+                            if thumb_url:
+                                st.markdown(
+                                    f'<img src="{thumb_url}" style="width:100%;aspect-ratio:1/1;'
+                                    f'object-fit:cover;border-radius:8px;display:block;" />',
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                st.image(img_path, use_container_width=True)
+                            if st.button(T("product_list.enlarge"), key=f"rex_enlarge_{p.id}_{i}", use_container_width=True):
+                                st.session_state.rex_lightbox_index = i
+                                _photo_lightbox_dialog(p.image_paths, i)
+            else:
+                st.caption(T("product_list.no_photos"))
+
+            remaining_slots = REVIEW_CARD_MAX_PHOTOS - len(p.image_paths)
+            if remaining_slots > 0:
+                with st.form(key=f"rex_photo_upload_{p.id}", clear_on_submit=True):
+                    new_photo_files = st.file_uploader(
+                        T("product_list.add_photos", remaining=remaining_slots),
+                        type=["jpg", "jpeg", "png"], accept_multiple_files=True,
+                    )
+                    if st.form_submit_button(T("product_list.add_photos_button")):
+                        if not new_photo_files:
+                            st.warning(T("product_list.no_photos_selected"))
+                        else:
+                            to_add = new_photo_files[:remaining_slots]
+                            if len(new_photo_files) > remaining_slots:
+                                st.warning(T("product_list.only_added_photos", remaining=remaining_slots, max=REVIEW_CARD_MAX_PHOTOS))
+                            item_dir = UPLOAD_DIR / p.company_id / sku_folder_name(p.sku, p.id)
+                            item_dir.mkdir(parents=True, exist_ok=True)
+                            next_index = _next_photo_index(item_dir)
+                            added_paths = []
+                            for j, uf in enumerate(to_add):
+                                norm = _normalize_captured_photo(uf.read())
+                                fp = item_dir / seo_photo_filename(p, next_index + j)
+                                fp.write_bytes(norm)
+                                added_paths.append(str(fp))
+                            p.image_paths = p.image_paths + added_paths
+                            inventory_store.save_product(p)
+                            audit_store.log_audit(
+                                p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
+                                f"added {len(to_add)} photo(s)",
+                            )
+                            st.success(T("product_list.added_photos_success", count=len(to_add)))
+                            st.rerun()
+            else:
+                st.caption(T("product_list.max_photos_reached", max=REVIEW_CARD_MAX_PHOTOS))
+
+            st.divider()
+            if st.button(T("product_list.save_button"), type="primary", use_container_width=True, key=f"rex_save_{p.id}"):
+                new_defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
+                new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
+                new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
+                new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
+
+                # name/desc/extra/defects/missing/box are compared against
+                # name_val/desc_val/extra_val/defects_val_list/missing_val_list/
+                # box_val_list (this tab's ORIGINAL values, whichever language
+                # that is) — never against p.name/p.product_description/etc.
+                # directly, which would spuriously read as "changed" whenever a
+                # non-primary-language tab is open (its text never equals the
+                # English p.* values).
+                current_barcode = p.ean or p.manifest_barcode or p.scanned_barcode
+                language_content_changed = (
+                    name_in.strip() != name_val
+                    or desc_in.strip() != desc_val
+                    or extra_in.strip() != extra_val
+                    or new_defects != defects_val_list
+                    or new_missing != missing_val_list
+                    or new_box != box_val_list
+                    or new_checklist != checklist_val_list
+                )
+                changed = (
+                    language_content_changed
+                    or brand_in.strip() != p.brand
+                    or model_in.strip() != p.model
+                    or category_name_in != p.category
+                    or barcode_in.strip() != current_barcode
+                    or product_condition_in != p.product_condition
+                    or float(price_in) != float(p.price)
+                    or int(quantity_in) != p.quantity
+                    or float(weight_kg_in) != float(p.weight_kg)
+                )
+
+                # Snapshot pre-change values for the fields the real
+                # two-way sync change-detector cares about (SYNC_OWNERSHIP_FIELDS'
+                # keys) — captured before reassignment below so the event
+                # layer can log/enqueue an accurate old -> new diff per field.
+                # name/product_description only reflect a real diff when the
+                # PRIMARY-language tab is the one being saved — the sync-ownership
+                # feature syncs primary/English content, never a translation.
+                _sync_field_diffs = {
+                    "name": (p.name, name_in.strip() if is_primary_tab else p.name),
+                    "brand": (p.brand, brand_in.strip()),
+                    "model": (p.model, model_in.strip()),
+                    "category": (p.category, category_name_in),
+                    "power": (p.power, power_in.strip()),
+                    "barcode": (current_barcode, barcode_in.strip()),
+                    "product_condition": (p.product_condition, product_condition_in),
+                    "price": (p.price, float(price_in)),
+                    "quantity": (p.quantity, int(quantity_in)),
+                    "weight_kg": (p.weight_kg, float(weight_kg_in)),
+                    "product_description": (p.product_description, desc_in.strip() if is_primary_tab else p.product_description),
+                }
+
+                p.brand = brand_in.strip()
+                p.model = model_in.strip()
+                p.category_id = category_id_in
+                p.category = category_name_in
+                p.power = power_in.strip()
+                if barcode_in.strip() != current_barcode:
+                    p.ean = barcode_in.strip()
+                    p.ean_source = "manual"
+                    p.ean_status = "Found" if barcode_in.strip() else ""
+                p.product_condition = product_condition_in
+                p.price = float(price_in)
+                p.quantity = int(quantity_in)
+                p.weight_kg = float(weight_kg_in)
+                if changed:
+                    p.review_status = "edited"
+
+                if is_primary_tab:
+                    p.name = name_in.strip()
+                    p.product_description = desc_in.strip()
+                    p.condition_description = extra_in.strip()
+                    p.defects = new_defects
+                    p.missing_components = new_missing
+                    p.box_contents = new_box
+                    p.functional_checklist = new_checklist
+                    inventory_store.save_product(p)  # upserts the primary-language row too
+                else:
+                    inventory_store.save_product(p)  # brand/price/etc. above; primary-language row re-saved unchanged
+                    if language_content_changed:
+                        # spec_summary/product_condition_reasoning/match_notes aren't
+                        # edited via any widget on this card — carried through
+                        # unchanged from the existing row so this upsert (a full
+                        # column replace) never silently wipes them.
+                        _existing_t = _translations_by_lang.get(selected_lang)
+                        product_translation_store.upsert_translation(product_translation_store.ProductTranslation(
+                            product_id=p.id, company_id=p.company_id, language=selected_lang,
+                            title=name_in.strip(), description=desc_in.strip(),
+                            condition_description=extra_in.strip(), defects=new_defects,
+                            box_contents=new_box, missing_components=new_missing,
+                            functional_checklist=new_checklist,
+                            spec_summary=_existing_t.spec_summary if _existing_t else "",
+                            product_condition_reasoning=_existing_t.product_condition_reasoning if _existing_t else "",
+                            match_notes=_existing_t.match_notes if _existing_t else "",
+                            translated_by="manual",
+                        ))
+                if changed:
+                    audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id)
+                    _record_sync_field_changes(p, _sync_field_diffs, current_user.id)
+                st.session_state.rex_open_product_id = None
+                st.session_state.rex_focus_id = p.id  # scroll/highlight this row back in the list
+                st.success(T("product_list.saved"))
+                st.rerun()
+
+            # -- Manifest info (from the old Inventory page, unchanged) --
+            with st.expander(T("product_list.manifest_info"), expanded=False):
+                if p.manifest_import_id:
+                    st.write(f"**{T('product_list.manifest_item_description')}:**", p.manifest_item_description or "—")
+                    st.write(
+                        f"**{T('product_list.manifest_target_no')}:** {p.manifest_target_no or '—'}  •  "
+                        f"**{T('product_list.subcategory')}:** {p.manifest_subcategory or '—'}"
+                    )
+                    st.write(f"**{T('product_list.manifest_asin')}:** {p.asin or '—'}  •  **{T('product_list.manifest_barcode')}:** {p.manifest_barcode or '—'}")
+                    st.write(f"**{T('new_item.qty')}:** {p.manifest_qty}  •  **{T('new_item.weight')}:** {p.manifest_weight_kg} kg")
+                    st.caption(T("product_list.batch_label", batch_id=p.manifest_import_id))
+                else:
+                    st.caption(T("product_list.manually_entered"))
+
+            # -- Repair History (from the old Inventory page, unchanged) --
+            events = repair_store.list_repair_events(p.id, p.company_id)
+            repair_total = repair_store.total_repair_cost(p.id, p.company_id)
+            with st.expander(T("product_list.repair_history_title", count=len(events), total=f"{repair_total:.2f}")):
+                for e in events:
+                    rc1, rc2 = st.columns([5, 1])
+                    with rc1:
+                        when = time.strftime("%Y-%m-%d", time.localtime(e.occurred_at))
+                        st.write(f"**{when}** — {e.description or T('product_list.no_description')} — €{e.cost:.2f}"
+                                 + (f" — {e.technician}" if e.technician else ""))
+                    with rc2:
+                        if st.button("🗑️", key=f"delrepair_{e.id}"):
+                            repair_store.delete_repair_event(e.id, p.company_id)
+                            st.rerun()
+                with st.form(key=f"addrepair_{p.id}", clear_on_submit=True):
+                    rf1, rf2, rf3 = st.columns([3, 1, 1])
+                    with rf1:
+                        r_desc = st.text_input(T("common.description"), key=f"rdesc_{p.id}")
+                    with rf2:
+                        r_cost = st.number_input(T("product_list.cost"), min_value=0.0, step=0.5, key=f"rcost_{p.id}")
+                    with rf3:
+                        r_tech = st.text_input(T("product_list.technician"), key=f"rtech_{p.id}")
+                    if st.form_submit_button(T("product_list.add_repair_entry")):
+                        if r_desc.strip():
+                            repair_store.add_repair_event(
+                                repair_store.RepairEvent(
+                                    product_id=p.id, company_id=p.company_id, description=r_desc.strip(),
+                                    cost=r_cost, technician=r_tech.strip(),
+                                )
+                            )
+                            st.rerun()
+                        else:
+                            st.warning(T("product_list.description_required"))
+
+            # -- Sales & Listings (from the old Inventory page — the
+            # read-only Price/Description/Condition re-display that used to
+            # sit at the top of this expander is dropped: the editable form
+            # above already covers those fields live) --
+            with st.expander(T("product_list.sales_listings"), expanded=False):
+                listings = marketplace_store.list_listings(p.id, p.company_id)
+                if listings:
+                    for listing in listings:
+                        st.write(
+                            f"**{listing.marketplace}:** {listing.status}"
+                            + (f" — #{listing.external_listing_id}" if listing.external_listing_id else "")
+                            + (f" — {listing.url}" if listing.url else "")
+                        )
+                else:
+                    st.caption(T("product_list.not_listed_yet"))
+
+                if IntegrationManager.is_connected(p.company_id, "baselinker"):
+                    # Same Admin-or-Reviewer boundary as the bulk Export/Sync
+                    # actions — Preview is deliberately left open to everyone
+                    # (read-only, exposes nothing beyond the product card
+                    # itself already shows).
+                    _can_marketplace_action = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
+                    bl_col1, bl_col2, bl_col3, bl_col4 = st.columns(4)
+                    with bl_col1:
+                        if st.button(T("product_list.preview_export"), key=f"preview_{p.id}", use_container_width=True):
+                            st.session_state[f"show_export_preview_{p.id}"] = True
+                    with bl_col2:
+                        if st.button(
+                            T("product_list.push_to_baselinker"), key=f"push_{p.id}", use_container_width=True,
+                            disabled=not _can_marketplace_action,
+                        ):
+                            if not _can_marketplace_action:
+                                st.error(T("common.admins_reviewers_only"))
+                                st.stop()
+                            result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
+                            if result.success:
+                                audit_store.log_audit(
+                                    p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
+                                    f"baselinker_product_id={result.external_id}",
+                                )
+                                st.success(T("product_list.pushed_success", external_id=result.external_id))
+                                st.rerun()
+                            else:
+                                st.error(result.message)
+                    with bl_col3:
+                        if st.button(
+                            T("product_list.sync_now"), key=f"sync_now_{p.id}", use_container_width=True,
+                            disabled=not _can_marketplace_action,
+                        ):
+                            if not _can_marketplace_action:
+                                st.error(T("common.admins_reviewers_only"))
+                                st.stop()
+                            st.session_state[f"sync_now_results_{p.id}"] = sync_service.run_manual_sync(
+                                p.company_id, p, "baselinker",
+                            )
+                    with bl_col4:
+                        if st.button(
+                            T("product_list.pull_now"), key=f"pull_now_{p.id}", use_container_width=True,
+                            disabled=not _can_marketplace_action,
+                        ):
+                            if not _can_marketplace_action:
+                                st.error(T("common.admins_reviewers_only"))
+                                st.stop()
+                            st.session_state[f"pull_now_results_{p.id}"] = sync_engine.pull_product(
+                                p.company_id, p, "baselinker",
+                            )
+                            st.rerun()
+                    if not _can_marketplace_action:
+                        st.caption(T("common.admins_reviewers_only"))
+
+                    if st.session_state.get(f"sync_now_results_{p.id}"):
+                        # export is real (delegates to the same export_product()
+                        # path as the Push button above); import honestly reports
+                        # "disabled" since no connector implements pulling data
+                        # FROM BaseLinker through this specific path yet — real
+                        # Pull is the dedicated "⬇️ Pull now" button below, which
+                        # goes through sync/engine.py's pull_product() +
+                        # Conflict Resolver instead of this generic sync() entry
+                        # point. Never fakes a result either way.
+                        with st.expander(T("product_list.sync_now_result"), expanded=True):
+                            for rec in st.session_state[f"sync_now_results_{p.id}"]:
+                                if rec.sync_status == STATUS_SUCCESS:
+                                    st.success(f"{rec.direction.capitalize()}: ✅ {T('product_list.success_word')}")
+                                elif rec.sync_status == STATUS_DISABLED:
+                                    st.info(f"{rec.direction.capitalize()}: ⏸️ {rec.error_message or T('product_list.disabled_word')}")
+                                else:
+                                    st.error(f"{rec.direction.capitalize()}: ❌ {rec.error_message}")
+                            if st.button(T("common.close"), key=f"close_sync_now_{p.id}"):
+                                st.session_state[f"sync_now_results_{p.id}"] = None
+                                st.rerun()
+
+                    if st.session_state.get(f"pull_now_results_{p.id}") is not None:
+                        with st.expander(T("product_list.pull_now_result"), expanded=True):
+                            resolutions = st.session_state[f"pull_now_results_{p.id}"]
+                            if not resolutions:
+                                st.caption(T("product_list.nothing_to_pull"))
+                            for res in resolutions:
+                                if res.resolution_action == "accepted":
+                                    st.success(T("product_list.field_accepted", field=res.field_name, value=res.applied_value))
+                                elif res.resolution_action == "overridden":
+                                    st.warning(T("product_list.field_conflict", field=res.field_name, value=res.applied_value))
+                                else:
+                                    st.info(T("product_list.field_pending_review", field=res.field_name))
+                            if st.button(T("common.close"), key=f"close_pull_now_{p.id}"):
+                                st.session_state[f"pull_now_results_{p.id}"] = None
+                                st.rerun()
+
+                    if st.session_state.get(f"show_export_preview_{p.id}"):
+                        # Built from the exact same connector.export_product() code
+                        # path (mapper.build_payload) — can never drift from what a
+                        # real push actually sends.
+                        payload = IntegrationManager.get(p.company_id, "baselinker").preview_payload(p)
+                        text_fields = payload.get("text_fields", {})
+                        prices = payload.get("prices") or {}
+                        stock = payload.get("stock") or {}
+                        with st.expander(T("product_list.export_preview_title"), expanded=True):
+                            st.caption(T("product_list.export_preview_caption"))
+                            _empty_label = T("product_list.empty_dash")
+                            _excluded_label = T("product_list.excluded_dash")
+                            st.write(f"**{T('product_list.title_label')}:**", text_fields["name"] or _empty_label if "name" in text_fields else _excluded_label)
+                            st.write(
+                                f"**{T('common.description')}:**",
+                                text_fields["description"] or _empty_label if "description" in text_fields else _excluded_label,
+                            )
+                            st.write(
+                                f"**{T('product_list.additional_description')}:**",
+                                text_fields["description_extra1"] if "description_extra1" in text_fields else _excluded_label,
+                            )
+                            st.write(f"**{T('common.sku')}:**", payload.get("sku", "—"))
+                            st.write(f"**{T('common.barcode')}:**", payload.get("ean") or _excluded_label)
+                            st.write(f"**{T('product_list.category_id')}:**", payload.get("category_id", "—"))
+                            st.write(f"**{T('common.price')}:**", next(iter(prices.values()), None) or T("product_list.excluded_or_no_price"))
+                            st.write(f"**{T('common.quantity')}:**", next(iter(stock.values()), _excluded_label))
+                            st.write(f"**{T('product_list.images_label')}:**", T("product_list.images_included", count=payload.get('_preview_image_count', 0)))
+                            if st.button(T("product_list.close_preview"), key=f"close_preview_{p.id}"):
+                                st.session_state[f"show_export_preview_{p.id}"] = False
+                                st.rerun()
+
+            # -- Financials (from the old Inventory page, unchanged) --
+            with st.expander(T("product_list.financials"), expanded=False):
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    new_purchase = st.number_input(
+                        T("product_list.purchase_price_allocated"), min_value=0.0, step=0.5,
+                        value=p.purchase_price_allocated, key=f"purchase_{p.id}",
+                    )
+                    if new_purchase != p.purchase_price_allocated:
+                        p.purchase_price_allocated = new_purchase
+                        inventory_store.save_product(p)
+                        audit_store.log_audit(
+                            p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "purchase_price_allocated",
+                        )
+                        st.rerun()
+                with fc2:
+                    st.metric(T("product_list.repair_cost"), f"€{repair_total:.2f}")
+                with fc3:
+                    profit = p.price - p.purchase_price_allocated - repair_total
+                    st.metric(T("product_list.profit_metric"), f"€{profit:.2f}")
+
+            st.divider()
+
+        # ---------------------------------------------------- FILTER + QUERY --
+        # A small toggle button replaces what used to be three separate,
+        # always-visible bars (Status+Search, a "More filters" expander, and a
+        # separate Exact-lookup box) — one filter entry point instead of three.
+        # Deliberately a plain st.button + st.container (not st.popover):
+        # st.popover ties the open panel's width to the trigger button's width
+        # and floats it *over* the table as an overlay. This instead renders
+        # inline in the normal page flow when open — full container width
+        # (matching the table) with no CSS needed, and the table is pushed
+        # down below it rather than covered, while the trigger stays a small
+        # button either way.
+        if st.button(T("product_list.filter_products") if not st.session_state.rex_filters_open else T("product_list.filter_products_open")):
+            st.session_state.rex_filters_open = not st.session_state.rex_filters_open
+            st.rerun()
+
+        # Streamlit drops a widget's session_state entry once that widget
+        # stops appearing in the script's element tree for a run — which is
+        # exactly what happens to every field below every time the panel
+        # collapses. So the *persistent* value for each field lives in the
+        # plain (non-widget) rex_search_sku/rex_status_filter/etc. keys
+        # (REX_FILTER_DEFAULTS' keys), while each widget below uses its own
+        # separate "_w"-suffixed key that only exists while the panel is
+        # open. These two small helpers read the persistent value in as the
+        # widget's starting value, and write the widget's return value back
+        # to the persistent key on every render — so the persistent key
+        # survives the widget disappearing when the panel closes, and
+        # "Clear filters" (further down) can safely overwrite the persistent
+        # keys directly since no widget is ever bound to them.
+        def _synced_text_input(label: str, state_key: str, **kwargs):
+            val = st.text_input(label, value=st.session_state[state_key], key=f"{state_key}_w", **kwargs)
+            if val != st.session_state[state_key]:
+                st.session_state[state_key] = val
+                st.session_state.rex_page = 1
+            return val
+
+        def _synced_selectbox(label: str, options: list, state_key: str, **kwargs):
+            cur = st.session_state[state_key]
+            idx = options.index(cur) if cur in options else 0
+            val = st.selectbox(label, options, index=idx, key=f"{state_key}_w", **kwargs)
+            if val != st.session_state[state_key]:
+                st.session_state[state_key] = val
+                st.session_state.rex_page = 1
+            return val
+
+        # Fetched unconditionally (cheap query) since batch_options is needed
+        # below for the "Active filters" caption even when the panel is closed,
+        # not just while the selectbox itself is on screen.
+        batches = manifest_store.list_batches(st.session_state.company_id)
+        batch_options = {"": T("product_list.all_batches")}
+        batch_options.update({b.id: f"{b.filename} ({b.id})" for b in batches})
+
+        if st.session_state.rex_filters_open:
+            with st.container(border=True):
+                st.markdown(f"**{T('product_list.search_by_field')}**")
+                sf1, sf2, sf3, sf4 = st.columns(4)
+                with sf1:
+                    _synced_text_input(T("common.sku"), "rex_search_sku")
+                    _synced_text_input(T("common.location"), "rex_search_location")
+                with sf2:
+                    _synced_text_input(T("common.name"), "rex_search_name")
+                    _synced_text_input("EAN", "rex_search_ean")
+                with sf3:
+                    _synced_text_input(T("common.brand"), "rex_search_brand")
+                    _synced_text_input("ASIN", "rex_search_asin")
+                with sf4:
+                    _synced_text_input(T("common.model"), "rex_search_model")
+
+                st.markdown(f"**{T('product_list.more_filters')}**")
+                mf1, mf2, mf3, mf4 = st.columns(4)
+                with mf1:
+                    _synced_selectbox(
+                        T("common.status"), list(REX_STATUS_FILTER_OPTIONS), "rex_status_filter",
+                        format_func=lambda k: REX_STATUS_FILTER_OPTIONS[k],
+                    )
+                with mf2:
+                    _synced_selectbox(
+                        T("product_list.triage_status"), [k for k in TRIAGE_LABELS], "rex_triage_filter",
+                        format_func=lambda k: TRIAGE_LABELS[k],
+                    )
+                with mf3:
+                    _synced_selectbox(
+                        T("common.product_condition"), [""] + CONDITION_OPTIONS, "rex_condition_filter",
+                        format_func=lambda k: k or T("common.all"),
+                    )
+                with mf4:
+                    _synced_selectbox(
+                        T("product_list.manifest_batch"), list(batch_options), "rex_batch_filter",
+                        format_func=lambda k: batch_options[k],
+                    )
+
+                st.divider()
+                # Fundamentally different from the per-field substring boxes
+                # above: this is the old Inventory page's tiered *exact*-match
+                # lookup (inventory_store.search_products — exact SKU, then
+                # EAN, then ASIN, then model, then brand/name substring)
+                # across the WHOLE inventory regardless of the filters above,
+                # not just the current page. Matches are inherently few
+                # (usually 0-3), so rendering them directly bypasses
+                # pagination entirely — no scale concern.
+                _synced_text_input(
+                    T("product_list.exact_lookup_label"),
+                    "rex_exact_search",
+                    placeholder="e.g. 2001, 0194252057338, B08ASIN123, iPhone 12, Apple, A2172",
+                    help=T("product_list.exact_lookup_help"),
+                )
+
+                st.divider()
+                fb1, fb2 = st.columns(2)
+                with fb1:
+                    if st.button(T("product_list.set_filters"), type="primary", use_container_width=True, key="rex_set_filters_btn"):
+                        st.session_state.rex_filters_open = False
+                        st.rerun()
+                with fb2:
+                    if st.button(T("product_list.clear_filters"), use_container_width=True, key="rex_clear_filters_btn"):
+                        # Safe to set these directly: no widget is bound to
+                        # these exact keys (widgets use the separate "_w"
+                        # keys above), so there's no "already instantiated
+                        # this run" conflict.
+                        for _k, _v in REX_FILTER_DEFAULTS.items():
+                            st.session_state[_k] = _v
+                        st.session_state.rex_filters_open = False
+                        st.session_state.rex_page = 1
+                        st.rerun()
+
+        # These persistent keys survive the panel closing (see the sync
+        # helpers above), so filters keep applying to the query below
+        # regardless of whether the panel is currently open or collapsed.
+        sku_in = st.session_state.rex_search_sku
+        name_in = st.session_state.rex_search_name
+        brand_in = st.session_state.rex_search_brand
+        model_in = st.session_state.rex_search_model
+        ean_in = st.session_state.rex_search_ean
+        asin_in = st.session_state.rex_search_asin
+        location_in = st.session_state.rex_search_location
+        status_filter = st.session_state.rex_status_filter
+        triage_filter = st.session_state.rex_triage_filter
+        condition_filter = st.session_state.rex_condition_filter
+        batch_filter = st.session_state.rex_batch_filter
+        exact_query = st.session_state.rex_exact_search
+
+        _status_kwargs = {}
+        if status_filter == "completed":
+            _status_kwargs["status"] = "completed"
+        elif status_filter == "all_except_draft":
+            _status_kwargs["exclude_status"] = "draft"
+        # "all": no status filter at all
+        if triage_filter:
+            _status_kwargs["triage_status"] = triage_filter
+        if condition_filter:
+            _status_kwargs["product_condition"] = condition_filter
+        if batch_filter:
+            _status_kwargs["manifest_import_id"] = batch_filter
+
+        # Fetched unconditionally (cheap, indexed, LIMIT-bounded query) right
+        # here — even in exact-lookup mode where it isn't displayed — so
+        # rex_current_page_ids and total_count are already available for the
+        # Operations/Download toolbar immediately below, without needing a
+        # deferred-container trick or an st.fragment boundary (a container
+        # written into from inside a fragment turned out not to reposition
+        # reliably in the real browser, even though it looked correct in
+        # headless tests).
+        products_page, total_count = inventory_store.list_products_paginated(
+            st.session_state.company_id,
+            sku=sku_in, name=name_in, brand=brand_in, model=model_in,
+            ean=ean_in, asin=asin_in, location=location_in,
+            page=st.session_state.rex_page,
+            page_size=REX_PAGE_SIZE,
+            **_status_kwargs,
+        )
+        st.session_state.rex_current_page_ids = [p.id for p in products_page]
+        total_pages = max(1, (total_count + REX_PAGE_SIZE - 1) // REX_PAGE_SIZE)
+
+        def _render_numbered_pagination(key_prefix: str = "rex_pg"):
+            # Centered "windowed" numbered pagination — 3 pages before and
+            # after the current one, plus page 1 and the last page always
+            # visible, with "…" filling any gap. Rendered both above and below
+            # the table; key_prefix keeps the two instances' widget keys apart.
+            cur = st.session_state.rex_page
+            window = 3
+            start_w = max(1, cur - window)
+            end_w = min(total_pages, cur + window)
+            pages = sorted(set([1, total_pages] + list(range(start_w, end_w + 1))))
+
+            cells = ["prev"]
+            prev_p = None
+            for p in pages:
+                if prev_p is not None and p - prev_p > 1:
+                    cells.append("ellipsis")
+                cells.append(p)
+                prev_p = p
+            cells.append("next")
+
+            # Flat, borderless look for the page-number/arrow buttons (no box
+            # around each digit), with nowrap + a min-width sized for up to
+            # 3-digit page numbers so "100" etc. never wraps onto two lines.
+            # Targets by key prefix (all these buttons use "rex_pg_*" keys, via
+            # Streamlit's "st-key-<key>" container class), not globally — other
+            # buttons on the page keep their normal look.
+            st.markdown(
+                """
+                <style>
+                div[class*="st-key-rex_pg_"] button {
+                    border: none !important;
+                    background: transparent !important;
+                    box-shadow: none !important;
+                    white-space: nowrap !important;
+                    min-width: 2.6em !important;
+                    padding: 2px 4px !important;
+                }
+                div[class*="st-key-rex_pg_"] button:hover:not(:disabled) {
+                    background: rgba(128, 128, 128, 0.15) !important;
+                    border-radius: 6px !important;
+                }
+                div[class*="st-key-rex_pg_"] button[kind="primary"] {
+                    background: rgba(56, 189, 248, 0.18) !important;
+                    border-radius: 6px !important;
+                    font-weight: 700 !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            _left, mid, _right = st.columns([2, 3, 2])
+            with mid:
+                cols = st.columns(len(cells))
+                for col, cell in zip(cols, cells):
+                    with col:
+                        if cell == "prev":
+                            if st.button("‹", disabled=cur <= 1, use_container_width=True, key=f"{key_prefix}_prev"):
+                                st.session_state.rex_page -= 1
+                                st.rerun()
+                        elif cell == "next":
+                            if st.button("›", disabled=cur >= total_pages, use_container_width=True, key=f"{key_prefix}_next"):
+                                st.session_state.rex_page += 1
+                                st.rerun()
+                        elif cell == "ellipsis":
+                            st.markdown(
+                                "<div style='text-align:center;padding-top:6px;'>…</div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            if cell == cur:
+                                st.button(
+                                    str(cell), type="primary", disabled=True,
+                                    use_container_width=True, key=f"{key_prefix}_{cell}",
+                                )
+                            elif st.button(str(cell), use_container_width=True, key=f"{key_prefix}_{cell}"):
+                                st.session_state.rex_page = cell
+                                st.rerun()
+
+        _show_list_toolbar = (
+            not exact_query.strip() and total_count > 0 and st.session_state.rex_open_product_id is None
+        )
+        if _show_list_toolbar:
+            # Fold the grid's most recently reported click into
+            # rex_selected_ids BEFORE computing n_selected / rendering
+            # Operations+Download, so their disabled state and the
+            # "Selected: N" count reflect *this* click immediately instead of
+            # lagging one click behind. Streamlit pre-populates
+            # session_state["rex_table"] before the script runs on the very
+            # rerun that value change triggered, so it's already fresh here.
+            # _rex_skip_table_merge guards against re-applying a now-stale
+            # report right after Clear Selection / bulk status change, which
+            # set rex_selected_ids directly and haven't heard back from the
+            # grid's frontend yet.
+            _prior_table_result = st.session_state.get("rex_table")
+            if _prior_table_result and not st.session_state.pop("_rex_skip_table_merge", False):
+                _page_ids = set(st.session_state.rex_current_page_ids)
+                _new_sel = set(_prior_table_result.get("selected_ids") or [])
+                st.session_state.rex_selected_ids = (
+                    (st.session_state.rex_selected_ids - _page_ids) | _new_sel
+                )
+                if (
+                    _prior_table_result.get("open_id")
+                    and _prior_table_result["open_id"] != st.session_state.rex_open_product_id
+                ):
+                    st.session_state.rex_open_product_id = _prior_table_result["open_id"]
+                    st.rerun()
+
+            n_selected = len(st.session_state.rex_selected_ids)
+            # Operations/Download sit at the LEFT, directly under the Filter
+            # Products button (which is also left-aligned) — the count caption
+            # takes the remaining space on the right instead of pushing these
+            # two to the far side of the (wide-layout) table.
+            top2, top3, top1 = st.columns([1, 1, 3])
+            with top2:
+                # key includes rex_ops_popover_seq: st.popover has no direct
+                # "close programmatically" API, but a popover keeps its open/
+                # closed UI state tied to its key across reruns — remounting it
+                # under a new key (bumped by every button below that opens a
+                # dialog) forces a fresh, closed popover instead of it staying
+                # open behind the dialog that was just triggered.
+                with st.popover(
+                    T("product_list.operations"), disabled=n_selected == 0, use_container_width=True,
+                    key=f"rex_ops_popover_{st.session_state.rex_ops_popover_seq}",
+                ):
+                    # Flat, borderless look for this list of actions (Export,
+                    # Delete Products, more to come) — no button box around
+                    # each one, just left-aligned text with a subtle hover
+                    # highlight. Same technique as the pagination digits
+                    # above, targeted by the "rex_op_*" key prefix so it
+                    # doesn't affect other buttons (Apply, Clear Selection).
+                    # aria-label selector below must match whatever T()
+                    # currently renders for the "⚙️ Operations" trigger label
+                    # (Streamlit sets aria-label from that same text) — built
+                    # with an f-string so it still targets the right popover
+                    # in Latvian, not just English.
+                    st.markdown(
+                        f"""
+                        <style>
+                        div[class*="st-key-rex_op_"] button {{
+                            border: none !important;
+                            background: transparent !important;
+                            box-shadow: none !important;
+                            text-align: left !important;
+                            justify-content: flex-start !important;
+                            padding: 6px 4px !important;
+                        }}
+                        /* text-align/justify-content on the <button> alone
+                        doesn't left-align its label — Streamlit wraps the
+                        label in its own centered flex div/p inside the
+                        button, which needs the same override or it keeps
+                        winning. */
+                        div[class*="st-key-rex_op_"] button > div,
+                        div[class*="st-key-rex_op_"] button p {{
+                            justify-content: flex-start !important;
+                            text-align: left !important;
+                            width: 100% !important;
+                        }}
+                        div[class*="st-key-rex_op_"] button:hover:not(:disabled) {{
+                            background: rgba(128, 128, 128, 0.15) !important;
+                            border-radius: 6px !important;
+                        }}
+                        /* The popover PANEL itself (not just the buttons in
+                        it) still has Streamlit's default bordered/shadowed
+                        box look. It renders through a React portal, so it's
+                        not a DOM descendant of anything keyed above — matched
+                        instead by its aria-label, which Streamlit sets to the
+                        same text as the "⚙️ Operations" trigger, so this only
+                        ever targets this one popover (not "⬇️ Download" or any
+                        other). Result: a plain floating list of words, no box. */
+                        div[data-testid="stPopoverBody"][aria-label="{T('product_list.operations')}"] {{
+                            border: none !important;
+                            box-shadow: none !important;
+                            border-radius: 0 !important;
+                        }}
+                        /* Uniform gap between every word in the list — the
+                        st.divider() lines previously used to separate groups
+                        added their own (larger, inconsistent) margin, making
+                        some pairs look closer together than others. */
+                        div[class*="st-key-rex_op_"] {{
+                            margin: 2px 0 !important;
+                        }}
+                        </style>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    # Admin-or-Reviewer (export/download) vs Admin-only
+                    # (delete/bulk edit/change status) — these disabled= hints
+                    # are the UI-visible half of the permission matrix; the
+                    # real boundary is the auth.require_role() check inside
+                    # each dialog function itself (and inside the single-
+                    # product equivalents in _render_product_card), since a
+                    # disabled attribute alone is only ever a hint, never
+                    # enforcement.
+                    can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
+                    can_delete_or_bulk_admin = current_user.role == auth.ROLE_ADMIN
+                    if st.button(
+                        T("product_list.bulk_edit"), disabled=not can_delete_or_bulk_admin,
+                        use_container_width=True, key="rex_op_bulk_edit",
+                    ):
+                        st.session_state.rex_bulk_edit_requested = True
+                        st.session_state.rex_ops_popover_seq += 1
+                        st.rerun()
+                    if st.button(
+                        T("product_list.change_status"), disabled=not can_delete_or_bulk_admin,
+                        use_container_width=True, key="rex_op_change_status",
+                    ):
+                        st.session_state.rex_status_requested = True
+                        st.session_state.rex_ops_popover_seq += 1
+                        st.rerun()
+                    if st.button(T("product_list.translate_action"), use_container_width=True, key="rex_op_translate"):
+                        st.session_state.rex_translate_requested = True
+                        st.session_state.rex_bulktranslate_preview = None  # start each open clean
+                        st.session_state.rex_ops_popover_seq += 1
+                        st.rerun()
+                    if st.button(
+                        T("product_list.export_button"), disabled=not can_export, use_container_width=True,
+                        key="rex_op_export",
+                    ):
+                        st.session_state.rex_export_requested = True
+                        st.session_state.rex_ops_popover_seq += 1
+                        st.rerun()
+                    if st.button(
+                        T("product_list.delete_products"), disabled=not can_delete_or_bulk_admin, use_container_width=True,
+                        key="rex_op_delete",
+                    ):
+                        st.session_state.rex_delete_requested = True
+                        st.session_state.rex_ops_popover_seq += 1
+                        st.rerun()
+                    if not can_delete_or_bulk_admin:
+                        st.caption(T("product_list.admins_reviewers_only"))
+                    if st.button(T("product_list.clear_selection"), use_container_width=True, key="rex_clear_selection"):
+                        st.session_state.rex_selected_ids = set()
+                        st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
+                        st.session_state["_rex_skip_table_merge"] = True
+                        st.rerun()
+            with top3:
+                with st.popover(
+                    T("product_list.download"), disabled=n_selected == 0 or not can_export, use_container_width=True,
+                ):
+                    # The popover's own disabled= above is only a UI hint (an
+                    # st.popover's body still runs on every rerun regardless of
+                    # whether it's open) — the real boundary is this branch:
+                    # export.to_*_bytes() is never even called, so the file
+                    # content is never computed or sent to the browser at all
+                    # for a role that isn't allowed to have it.
+                    if can_export:
+                        _dl_products = _get_selected_products() if n_selected else []
+                        st.download_button(
+                            T("product_list.download_excel"),
+                            data=export.to_excel_bytes(_dl_products) if _dl_products else b"",
+                            file_name="baselinker_export.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            disabled=n_selected == 0,
+                            use_container_width=True,
+                        )
+                        st.download_button(
+                            T("product_list.download_csv"),
+                            data=export.to_csv_bytes(_dl_products) if _dl_products else b"",
+                            file_name="baselinker_export.csv",
+                            mime="text/csv",
+                            disabled=n_selected == 0,
+                            use_container_width=True,
+                        )
+                        st.caption(T("product_list.image_links_note"))
+                    else:
+                        st.caption(T("common.admins_reviewers_only"))
+            with top1:
+                st.caption(T("product_list.total_count_selected", total=total_count, selected=n_selected))
+
+        _active_filters = []
+        if status_filter != "completed":
+            _active_filters.append(REX_STATUS_FILTER_OPTIONS[status_filter])
+        for _field_label, _field_val in (
+            (T("common.sku"), sku_in), (T("common.name"), name_in), (T("common.brand"), brand_in), (T("common.model"), model_in),
+            ("EAN", ean_in), ("ASIN", asin_in), (T("common.location"), location_in),
+        ):
+            if _field_val.strip():
+                _active_filters.append(f"{_field_label}~“{_field_val.strip()}”")
+        if triage_filter:
+            _active_filters.append(TRIAGE_LABELS[triage_filter])
+        if condition_filter:
+            _active_filters.append(T("product_list.condition_filter_label", condition=condition_filter))
+        if batch_filter:
+            _active_filters.append(batch_options[batch_filter])
+        if exact_query.strip():
+            _active_filters.append(T("product_list.exact_lookup_active", query=exact_query.strip()))
+        st.caption(T("product_list.active_filters", filters=" · ".join(_active_filters)) if _active_filters else T("product_list.no_filters_applied"))
+
+        if exact_query.strip():
+            exact_results = inventory_store.search_products(exact_query.strip(), st.session_state.company_id)
+            st.caption(T("product_list.match_count", count=len(exact_results), query=exact_query.strip()))
+            tier_labels = {
+                inventory_store.MATCH_TIER_SKU: "SKU",
+                inventory_store.MATCH_TIER_EAN: "EAN",
+                inventory_store.MATCH_TIER_ASIN: "ASIN",
+                inventory_store.MATCH_TIER_MODEL: T("common.model").lower(),
+                inventory_store.MATCH_TIER_BRAND_NAME: T("product_list.brand_name_tier"),
+            }
+            for p, tier in exact_results:
+                _render_product_card(p, tier_labels.get(tier, ""))
+
+        else:
+            if total_count == 0:
+                st.info(T("product_list.no_products_match_filter"))
+
+            elif st.session_state.rex_open_product_id is None:
+                # -------------------------------------------------------- LIST VIEW --
+                if not products_page:
+                    st.info(T("product_list.no_products_on_page"))
+                else:
+                    table_rows = []
+                    for p in products_page:
+                        photo_url = None
+                        if p.image_paths:
+                            thumb = _ensure_thumbnail(p.image_paths[0])
+                            if thumb:
+                                photo_url = _image_static_url(thumb)
+                        listing = marketplace_store.get_listing(p.id, "baselinker", p.company_id)
+                        table_rows.append({
+                            "id": p.id,
+                            "photo_url": photo_url,
+                            "sku": p.sku or "(none)",
+                            "name": p.name or p.manifest_item_description or p.model_number or p.id,
+                            "brand": p.brand or "—",
+                            "product_condition": p.product_condition or "—",
+                            "triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
+                            "location": p.location or "—",
+                            "quantity": p.quantity or 1,
+                            "price": p.price or 0,
+                            "weight_kg": p.weight_kg or p.manifest_weight_kg or 0,
+                            "baselinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
+                            "status": _status_badge(p),
+                            "date": (
+                                time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
+                                if p.exported_at else "—"
+                            ),
+                        })
+
+                    focus_id = st.session_state.rex_focus_id
+                    st.session_state.rex_focus_id = ""  # one-shot: only focus once
+
+                    _render_numbered_pagination()
+
+                    # The return value here isn't merged into rex_selected_ids
+                    # again — that already happened at the top of this run
+                    # (see _show_list_toolbar above), reading the exact same
+                    # underlying session_state["rex_table"] value. Merging
+                    # twice would be harmless (idempotent) but redundant.
+                    review_table(
+                        rows=table_rows,
+                        columns=_translated_columns(_PRODUCT_TABLE_COLUMNS),
+                        mobile_fields=_PRODUCT_TABLE_MOBILE_FIELDS,
+                        state_key="products",
+                        focus_id=focus_id,
+                        clear_seq=st.session_state.rex_clear_seq,
+                        key="rex_table",
+                    )
+                    st.caption(T("product_list.column_sort_note"))
+                    _render_numbered_pagination(key_prefix="rex_pg_b")
+
+                if st.session_state.rex_export_requested:
+                    st.session_state.rex_export_requested = False
+                    selected_products = _get_selected_products()
+                    if selected_products:
+                        _confirm_export_dialog(selected_products)
+
+                if st.session_state.rex_delete_requested:
+                    st.session_state.rex_delete_requested = False
+                    selected_products = _get_selected_products()
+                    if selected_products:
+                        _confirm_delete_dialog(selected_products)
+
+                if st.session_state.rex_bulk_edit_requested:
+                    st.session_state.rex_bulk_edit_requested = False
+                    st.session_state.rex_bulkedit_preview = None  # start each open clean
+                    selected_products = _get_selected_products()
+                    if selected_products:
+                        _confirm_bulk_edit_dialog(selected_products)
+
+                if st.session_state.rex_status_requested:
+                    st.session_state.rex_status_requested = False
+                    selected_products = _get_selected_products()
+                    if selected_products:
+                        _confirm_change_status_dialog(selected_products)
+
+                if st.session_state.rex_translate_requested:
+                    st.session_state.rex_translate_requested = False
+                    selected_products = _get_selected_products()
+                    if selected_products:
+                        _confirm_bulk_translate_dialog(selected_products)
+
+            else:
+                # -------------------------------------------------------- CARD VIEW --
+                esc_value = esc_listener(key="rex_esc")
+                if esc_value is not None and esc_value != st.session_state.rex_last_esc_value:
+                    st.session_state.rex_last_esc_value = esc_value
+                    st.session_state.rex_open_product_id = None
+                    st.rerun()
+
+                pid = st.session_state.rex_open_product_id
+                p = inventory_store.get_product(pid, st.session_state.company_id)
+                if p is None:
+                    st.warning(T("product_list.product_not_found"))
+                    if st.button(T("common.back_to_list")):
+                        st.session_state.rex_open_product_id = None
+                        st.rerun()
+                else:
+                    # Previous/Next only walks the currently-loaded page (~50 rows)
+                    # — jumping to another page's products isn't supported from the
+                    # card view in this iteration; go back to the list to change page.
+                    ordered_ids = st.session_state.rex_current_page_ids or [p.id]
+                    if pid not in ordered_ids:
+                        ordered_ids = [pid] + ordered_ids
+                    cur_idx = ordered_ids.index(pid)
+
+                    nav1, nav2, nav3, nav4 = st.columns([1.3, 1, 1, 1])
+                    with nav1:
+                        if st.button(T("common.back_to_list"), use_container_width=True):
+                            st.session_state.rex_open_product_id = None
+                            st.rerun()
+                    with nav2:
+                        if st.button(T("product_list.previous_product"), disabled=cur_idx <= 0, use_container_width=True):
+                            st.session_state.rex_open_product_id = ordered_ids[cur_idx - 1]
+                            st.rerun()
+                    with nav3:
+                        if st.button(T("product_list.next_product"), disabled=cur_idx >= len(ordered_ids) - 1, use_container_width=True):
+                            st.session_state.rex_open_product_id = ordered_ids[cur_idx + 1]
+                            st.rerun()
+                    with nav4:
+                        st.caption(f"{cur_idx + 1} / {len(ordered_ids)}")
+
+                    _render_product_card(p)
+
+    with tab_product_list_settings:
         try:
             auth.require_role(current_user, auth.ROLE_ADMIN)
         except PermissionError:
             st.error(T("common.admins_only"))
             st.stop()
-        st.write(T("product_list.change_status_heading", count=len(selected_products)))
-        new_status = st.selectbox(T("product_list.new_status"), BULK_STATUS_OPTIONS, key="rex_status_value")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(T("common.cancel"), use_container_width=True, key="rex_status_cancel"):
-                st.rerun()
-        with col2:
-            confirmed = st.button(
-                T("product_list.apply_status_change"), type="primary", use_container_width=True, key="rex_status_confirm"
+
+        st.subheader(T("product_list.settings_categories_heading"))
+        _cat_company_id = current_user.company_id
+        st.caption(T("settings.categories_tab_caption"))
+
+        with st.form("company_categories_settings_form"):
+            _auto_save_in = st.checkbox(
+                T("category.auto_save_setting_label"),
+                value=bool(current_company and current_company.auto_save_categories_from_completed),
+                help=T("category.auto_save_setting_help"),
             )
-        if confirmed:
-            for p in selected_products:
-                p.status = new_status
-                category_store.promote_from_manifest_on_completion(p)
-                inventory_store.save_product(p)
-                audit_store.log_audit(
-                    p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, f"status -> {new_status}",
-                )
-            st.session_state.rex_clear_seq += 1
-            st.success(T("product_list.status_changed_success", count=len(selected_products)))
-            if st.button(T("common.close"), use_container_width=True, key="rex_status_done"):
+            if st.form_submit_button(T("common.save"), type="primary") and current_company:
+                current_company.auto_save_categories_from_completed = _auto_save_in
+                company_store.update_company(current_company)
+                st.success(T("category.settings_saved"))
                 st.rerun()
 
-    @st.dialog(T("product_list.photo_dialog_title"), width="large")
-    def _photo_lightbox_dialog(image_paths, start_index: int):
-        idx = st.session_state.get("rex_lightbox_index", start_index)
-        idx = max(0, min(idx, len(image_paths) - 1))
-        img_path = image_paths[idx]
-        if os.path.exists(img_path):
-            st.image(img_path, use_container_width=True)
-        st.caption(T("product_list.photo_counter", current=idx + 1, total=len(image_paths)))
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            if st.button(T("product_list.prev_photo"), disabled=idx <= 0, use_container_width=True, key="rex_lb_prev"):
-                st.session_state.rex_lightbox_index = idx - 1
-                st.rerun()
-        with c2:
-            if st.button(T("common.close"), use_container_width=True, key="rex_lb_close"):
-                st.rerun()
-        with c3:
-            if st.button(
-                T("product_list.next_photo"), disabled=idx >= len(image_paths) - 1,
-                use_container_width=True, key="rex_lb_next",
-            ):
-                st.session_state.rex_lightbox_index = idx + 1
-                st.rerun()
-
-    @st.dialog(T("product_list.translate_dialog_title"))
-    def _confirm_translate_dialog(product):
-        st.write(T("product_list.translate_heading", name=product.name or product.sku))
-        _existing_langs = {t.language for t in product_translation_store.list_translations(product.id)}
-        _lang_choices = [
-            code for code in company_store.CONTENT_LANGUAGES if code != product.primary_language
-        ]
-        target_langs = st.multiselect(
-            T("product_list.translate_target_languages"),
-            options=_lang_choices,
-            format_func=lambda code: (
-                f"{company_store.CONTENT_LANGUAGES[code]}"
-                + (f" ({T('product_list.retranslate_suffix')})" if code in _existing_langs else "")
-            ),
-            key="rex_translate_langs",
-        )
-        provider = st.radio(
-            T("settings.translation_provider"), options=["deepl", "openai"],
-            format_func=lambda p: {"deepl": "DeepL", "openai": "OpenAI"}[p],
-            index=["deepl", "openai"].index(current_company.translation_provider)
-            if current_company and current_company.translation_provider in ("deepl", "openai") else 0,
-            key="rex_translate_provider", horizontal=True,
-        )
-        force = st.checkbox(T("product_list.retranslate_force"), key="rex_translate_force")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(T("common.cancel"), use_container_width=True, key="rex_translate_cancel"):
-                st.rerun()
-        with col2:
-            confirmed = st.button(
-                T("product_list.translate_action"), type="primary", use_container_width=True, key="rex_translate_confirm",
-            )
-        if confirmed:
-            if not target_langs:
-                st.warning(T("product_list.translate_select_language"))
-            elif not IntegrationManager.is_connected(product.company_id, provider):
-                st.warning(T("product_list.translate_provider_not_connected"))
-            else:
-                created, skipped = 0, 0
-                for lang in target_langs:
-                    try:
-                        result = translation_service.translate_product(
-                            product, target_language=lang, provider_type=provider,
-                            company_id=product.company_id, translated_by=provider, force=force,
-                        )
-                    except Exception as e:
-                        st.error(T("product_list.translate_failed", language=company_store.CONTENT_LANGUAGES[lang], error=e))
-                        continue
-                    if result is None:
-                        skipped += 1
-                    else:
-                        created += 1
-                if created:
-                    st.success(T("product_list.translate_success", count=created))
-                if skipped:
-                    st.caption(T("product_list.translate_skipped_manual", count=skipped))
-                if created:
-                    st.rerun()
-
-    def _render_product_card(p: Product, tier_label: str = ""):
-        """The single detail view for a product — used both when a row is
-        opened from the paginated list/card-view below, and inline (once
-        per match, no separate open step) from the exact-lookup search
-        further down. Combines the old Review & Export page's fully
-        editable form (still the only place these fields are edited) with
-        the old Inventory page's operational sections (quick actions,
-        manifest info, repair history, marketplace/BaseLinker actions,
-        financials) — Inventory used to re-display brand/model/category/
-        EAN/condition/description/defects/etc a second time, read-only;
-        that's dropped here since the editable form above already shows
-        the same data live."""
-        if tier_label:
-            st.caption(T("product_list.exact_match", tier=tier_label))
-        st.subheader(f"{p.sku} — {p.name or T('product_list.no_name')}")
-        st.caption(_status_badge(p))
         st.divider()
 
-        # -- Quick actions: triage status / location are the two things
-        # someone changes constantly during daily inventory work, so they
-        # auto-save on change rather than waiting for the Save button below
-        # (which only covers the review/grading fields). Quantity is
-        # deliberately NOT here — it lives only in the Pricing section
-        # below now, to avoid two different Quantity controls on one card.
-        triage_keys = [k for k in TRIAGE_LABELS if k]
-        qa1, qa2, qa3 = st.columns([2, 2, 1])
-        with qa1:
-            new_triage = st.selectbox(
-                T("product_list.triage_status"), options=triage_keys,
-                index=triage_keys.index(p.triage_status) if p.triage_status in triage_keys else 0,
-                format_func=lambda k: TRIAGE_LABELS[k],
-                key=f"rex_triage_{p.id}",
-            )
-            if new_triage != p.triage_status:
-                p.triage_status = new_triage
-                inventory_store.save_product(p)
-                audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "triage_status")
-                st.rerun()
-        with qa2:
-            new_location = st.text_input(T("common.location"), value=p.location, key=f"rex_loc_{p.id}")
-            if new_location != p.location:
-                p.location = new_location
-                inventory_store.save_product(p)
-                audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "location")
-                st.rerun()
-        with qa3:
-            st.write("")
-            _can_delete_product = current_user.role == auth.ROLE_ADMIN
-            if st.button(
-                T("common.delete"), key=f"rex_delete_{p.id}", use_container_width=True,
-                disabled=not _can_delete_product,
-            ):
-                if not _can_delete_product:
-                    st.error(T("common.admins_only"))
-                    st.stop()
-                inventory_store.delete_product(p.id, p.company_id)
-                audit_store.log_audit(p.company_id, current_user.id, "DELETE_PRODUCT", "product", p.id)
-                st.session_state.rex_open_product_id = None
-                st.rerun()
+        if st.session_state.get("cat_deleted_flash"):
+            st.success(st.session_state.pop("cat_deleted_flash"))
+        if st.session_state.get("cat_new_created_id"):
+            st.session_state.cat_new_created_id = None
+            st.success(T("category.created_success"))
 
-        # Not wrapped in st.form: the Photos section below (per-photo
-        # "Enlarge" buttons, its own upload control) needs regular
-        # widgets, which st.form forbids — and it belongs right above
-        # Save, not above these fields. Every widget gets an explicit
-        # per-product key so Previous/Next don't leave a stale typed
-        # value behind when the label text is identical across products.
-        st.markdown(f"**{T('product_list.product_information')}**")
-        st.caption(T("product_list.name_moved_caption"))
-        pi1, pi2 = st.columns(2)
-        with pi1:
-            brand_in = st.text_input(T("common.brand"), value=p.brand, key=f"rex_brand_{p.id}")
-            barcode_in = st.text_input(
-                T("common.barcode"), value=p.ean or p.manifest_barcode or p.scanned_barcode,
-                key=f"rex_barcode_{p.id}",
-            )
-        with pi2:
-            model_in = st.text_input(T("common.model"), value=p.model, key=f"rex_model_{p.id}")
+        if st.button(T("category.new_button"), key="cat_top_new_btn"):
+            _create_category_dialog(_cat_company_id, "cat_new_created_id")
 
-            _rex_labels, _rex_label_to_id, _rex_id_to_label, _rex_id_to_name = _category_select_options(p.company_id)
-            _rex_placeholder = T("category.pick_placeholder")
-            _rex_options = [_rex_placeholder] + _rex_labels
-            _rex_default_label = None
-            if p.category_id and p.category_id in _rex_id_to_label:
-                _rex_default_label = _rex_id_to_label[p.category_id]
-            elif p.category:
-                # Backward compat for products saved before category_id
-                # existed: resolve the old free-text display value against
-                # the catalog by exact normalized name, never fuzzy.
-                _rex_match = category_store.find_by_name(p.company_id, p.category)
-                if _rex_match is not None and _rex_match.id in _rex_id_to_label:
-                    _rex_default_label = _rex_id_to_label[_rex_match.id]
-            _rex_default_index = _rex_options.index(_rex_default_label) if _rex_default_label in _rex_options else 0
-            category_choice_in = st.selectbox(
-                T("common.category"), _rex_options, index=_rex_default_index, key=f"rex_category_{p.id}",
-            )
-            category_id_in = _rex_label_to_id.get(category_choice_in, "") if category_choice_in != _rex_placeholder else ""
-            category_name_in = _rex_id_to_name.get(category_id_in, "") if category_id_in else ""
-
-            power_in = st.text_input(T("common.power"), value=p.power, key=f"rex_power_{p.id}")
-        product_condition_in = st.selectbox(
-            T("common.product_condition"), CONDITION_OPTIONS,
-            index=CONDITION_OPTIONS.index(p.product_condition) if p.product_condition in CONDITION_OPTIONS else 1,
-            key=f"rex_condition_{p.id}",
+        cat_search = st.text_input(
+            T("common.search"), key="cat_search", placeholder=T("category.search_placeholder"),
         )
 
-        st.markdown(f"**{T('product_list.pricing')}**")
-        pr1, pr2, pr3 = st.columns(3)
-        with pr1:
-            price_in = st.number_input(
-                T("product_list.price_eur"), min_value=0.0, value=float(p.price), step=1.0, key=f"rex_price_{p.id}",
-            )
-        with pr2:
-            quantity_in = st.number_input(
-                T("common.quantity"), min_value=1, value=int(p.quantity or 1), step=1, key=f"rex_qty_{p.id}",
-            )
-        with pr3:
-            # Seeds from manifest_weight_kg only when weight_kg itself is
-            # still blank (a product manifest-imported before this field
-            # existed, or without a weight column mapped) — never overrides
-            # a value a human already set/edited.
-            weight_kg_in = st.number_input(
-                T("product_list.weight_kg"), min_value=0.0,
-                value=float(p.weight_kg or p.manifest_weight_kg), step=0.1, key=f"rex_weight_{p.id}",
-            )
+        _cat_flat = category_store.build_tree(category_store.list_categories(_cat_company_id))
+        if cat_search.strip():
+            _q = cat_search.strip().lower()
+            _cat_flat = [row for row in _cat_flat if _q in row["label"].lower()]
 
-        # -- Content language: name/product_description/condition_description/
-        # defects are the only fields that live per-language (see
-        # modules/product_translation_store.py) — everything else on this
-        # card (brand/model/price/quantity/etc.) is language-neutral and
-        # always saves straight to the product regardless of which tab is
-        # selected here.
-        _translations_by_lang = {t.language: t for t in product_translation_store.list_translations(p.id)}
-        _lang_tabs = [p.primary_language] + [l for l in _translations_by_lang if l != p.primary_language]
-        _lang_state_key = f"rex_content_lang_{p.id}"
-        _default_lang = (
-            current_company.default_product_language
-            if current_company and current_company.default_product_language in _lang_tabs
-            else p.primary_language
-        )
-        if st.session_state.get(_lang_state_key) not in _lang_tabs:
-            st.session_state[_lang_state_key] = _default_lang
+        if not _cat_flat:
+            st.info(T("category.empty_state"))
 
-        lang_col, translate_col = st.columns([4, 1])
-        with lang_col:
-            selected_lang = st.radio(
-                T("product_list.content_language"), options=_lang_tabs,
-                format_func=lambda code: company_store.CONTENT_LANGUAGES.get(code, code.upper()),
-                key=_lang_state_key, horizontal=True,
-            )
-        with translate_col:
-            st.write("")
-            if st.button(T("product_list.translate_action"), key=f"rex_translate_btn_{p.id}", use_container_width=True):
-                _confirm_translate_dialog(p)
+        _cat_labels_all, _cat_label_to_id_all, _cat_id_to_label_all, _cat_id_to_name_all = _category_select_options(_cat_company_id)
 
-        is_primary_tab = selected_lang == p.primary_language
-        if is_primary_tab:
-            name_val, desc_val, extra_val = p.name, p.product_description, p.condition_description
-            defects_val_list = p.defects
-            box_val_list = p.box_contents
-            missing_val_list = p.missing_components
-            checklist_val_list = p.functional_checklist
-            reasoning_val = p.product_condition_reasoning
-            match_notes_val = p.match_notes
-        else:
-            _t = _translations_by_lang.get(selected_lang)
-            name_val = _t.title if _t else ""
-            desc_val = _t.description if _t else ""
-            extra_val = _t.condition_description if _t else ""
-            defects_val_list = _t.defects if _t else []
-            box_val_list = _t.box_contents if _t else []
-            missing_val_list = _t.missing_components if _t else []
-            checklist_val_list = _t.functional_checklist if _t else []
-            reasoning_val = _t.product_condition_reasoning if _t else ""
-            match_notes_val = _t.match_notes if _t else ""
-            if _t is not None and _t.translated_by == "manual":
-                st.caption(T("product_list.manually_edited_translation"))
+        for _row in _cat_flat:
+            _cat_id = _row["id"]
+            _count = category_store.count_products_using(_cat_id, _cat_company_id)
+            _indent = "　" * _row["depth"]
 
-        name_in = st.text_input(
-            T("common.product_name"), value=name_val, key=f"rex_name_{p.id}_{selected_lang}",
-        )
-        st.markdown(f"**{T('common.product_description')}**")
-        desc_in = st.text_area(
-            T("common.product_description"), value=desc_val, height=120, key=f"rex_desc_{p.id}_{selected_lang}",
-        )
+            _c_name, _c_add, _c_rename, _c_move, _c_delete = st.columns([5, 1, 1, 1, 1])
+            with _c_name:
+                st.write(f"{_indent}{_row['name']} · {T('category.product_count', count=_count)}")
+            with _c_add:
+                if st.button("➕", key=f"cat_add_{_cat_id}", help=T("category.add_subcategory")):
+                    _create_category_dialog(_cat_company_id, "cat_new_created_id", default_parent_id=_cat_id)
+            with _c_rename:
+                if st.button("✏️", key=f"cat_rename_{_cat_id}", help=T("common.rename")):
+                    st.session_state["cat_renaming_id"] = (
+                        None if st.session_state.get("cat_renaming_id") == _cat_id else _cat_id
+                    )
+                    st.session_state["cat_moving_id"] = None
+                    st.session_state["cat_deleting_id"] = None
+            with _c_move:
+                if st.button("↔️", key=f"cat_move_{_cat_id}", help=T("common.move")):
+                    st.session_state["cat_moving_id"] = (
+                        None if st.session_state.get("cat_moving_id") == _cat_id else _cat_id
+                    )
+                    st.session_state["cat_renaming_id"] = None
+                    st.session_state["cat_deleting_id"] = None
+            with _c_delete:
+                if st.button("🗑️", key=f"cat_delete_{_cat_id}", help=T("common.delete")):
+                    st.session_state["cat_deleting_id"] = _cat_id
+                    st.session_state["cat_renaming_id"] = None
+                    st.session_state["cat_moving_id"] = None
 
-        st.markdown(f"**{T('product_list.additional_description')}**")
-        extra_in = st.text_area(
-            T("new_item.condition_scratches_details"),
-            value=extra_val, height=100, key=f"rex_extra_{p.id}_{selected_lang}",
-        )
-
-        st.markdown(f"**{T('product_list.defects')}**")
-        defects_in = st.text_area(
-            T("new_item.defects_label"), value="\n".join(defects_val_list), height=80,
-            key=f"rex_defects_{p.id}_{selected_lang}",
-        )
-
-        st.markdown(f"**{T('product_list.missing_components')}**")
-        missing_in = st.text_area(
-            T("product_list.missing_components_label"), value="\n".join(missing_val_list), height=60,
-            key=f"rex_missing_{p.id}_{selected_lang}",
-        )
-
-        st.markdown(f"**{T('product_list.box_contents')}**")
-        box_in = st.text_area(
-            T("product_list.box_contents_label"), value="\n".join(box_val_list), height=60,
-            key=f"rex_box_{p.id}_{selected_lang}",
-        )
-
-        st.markdown(f"**{T('product_list.functional_checklist')}**")
-        checklist_in = st.text_area(
-            T("product_list.functional_checklist_label"), value="\n".join(checklist_val_list), height=80,
-            key=f"rex_checklist_{p.id}_{selected_lang}",
-        )
-
-        if reasoning_val:
-            st.caption(T("product_list.condition_reasoning", reasoning=reasoning_val))
-        if match_notes_val:
-            st.caption(T("new_item.match_notes") + f": {match_notes_val}")
-        if p.price_reasoning:
-            st.caption(T("product_list.price_reasoning", reasoning=p.price_reasoning))
-
-        st.divider()
-        st.markdown(f"**{T('product_list.photos')}** ({len(p.image_paths)}/{REVIEW_CARD_MAX_PHOTOS})")
-        if p.image_paths:
-            photo_cols = st.columns(4)
-            for i, img_path in enumerate(p.image_paths):
-                if os.path.exists(img_path):
-                    with photo_cols[i % 4]:
-                        # Fixed square box + object-fit:cover (via a plain
-                        # <img>, not st.image — which just scales to the
-                        # column width and leaves each photo's own aspect
-                        # ratio intact) so every tile is the same size
-                        # regardless of the source photo's shape, instead
-                        # of a ragged grid of different-height images.
-                        card_thumb = _ensure_card_photo(img_path)
-                        thumb_url = _image_static_url(card_thumb) if card_thumb else None
-                        if thumb_url:
-                            st.markdown(
-                                f'<img src="{thumb_url}" style="width:100%;aspect-ratio:1/1;'
-                                f'object-fit:cover;border-radius:8px;display:block;" />',
-                                unsafe_allow_html=True,
-                            )
+            if st.session_state.get("cat_renaming_id") == _cat_id:
+                with st.form(f"cat_rename_form_{_cat_id}"):
+                    _new_name = st.text_input(T("category.name_label"), value=_row["name"])
+                    if st.form_submit_button(T("common.save"), type="primary"):
+                        try:
+                            category_store.rename_category(_cat_id, _cat_company_id, _new_name.strip())
+                        except ValueError as e:
+                            st.error(str(e))
                         else:
-                            st.image(img_path, use_container_width=True)
-                        if st.button(T("product_list.enlarge"), key=f"rex_enlarge_{p.id}_{i}", use_container_width=True):
-                            st.session_state.rex_lightbox_index = i
-                            _photo_lightbox_dialog(p.image_paths, i)
-        else:
-            st.caption(T("product_list.no_photos"))
-
-        remaining_slots = REVIEW_CARD_MAX_PHOTOS - len(p.image_paths)
-        if remaining_slots > 0:
-            with st.form(key=f"rex_photo_upload_{p.id}", clear_on_submit=True):
-                new_photo_files = st.file_uploader(
-                    T("product_list.add_photos", remaining=remaining_slots),
-                    type=["jpg", "jpeg", "png"], accept_multiple_files=True,
-                )
-                if st.form_submit_button(T("product_list.add_photos_button")):
-                    if not new_photo_files:
-                        st.warning(T("product_list.no_photos_selected"))
-                    else:
-                        to_add = new_photo_files[:remaining_slots]
-                        if len(new_photo_files) > remaining_slots:
-                            st.warning(T("product_list.only_added_photos", remaining=remaining_slots, max=REVIEW_CARD_MAX_PHOTOS))
-                        item_dir = UPLOAD_DIR / p.company_id / sku_folder_name(p.sku, p.id)
-                        item_dir.mkdir(parents=True, exist_ok=True)
-                        next_index = _next_photo_index(item_dir)
-                        added_paths = []
-                        for j, uf in enumerate(to_add):
-                            norm = _normalize_captured_photo(uf.read())
-                            fp = item_dir / seo_photo_filename(p, next_index + j)
-                            fp.write_bytes(norm)
-                            added_paths.append(str(fp))
-                        p.image_paths = p.image_paths + added_paths
-                        inventory_store.save_product(p)
-                        audit_store.log_audit(
-                            p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id,
-                            f"added {len(to_add)} photo(s)",
-                        )
-                        st.success(T("product_list.added_photos_success", count=len(to_add)))
-                        st.rerun()
-        else:
-            st.caption(T("product_list.max_photos_reached", max=REVIEW_CARD_MAX_PHOTOS))
-
-        st.divider()
-        if st.button(T("product_list.save_button"), type="primary", use_container_width=True, key=f"rex_save_{p.id}"):
-            new_defects = [l.strip() for l in defects_in.splitlines() if l.strip()]
-            new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
-            new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
-            new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
-
-            # name/desc/extra/defects/missing/box are compared against
-            # name_val/desc_val/extra_val/defects_val_list/missing_val_list/
-            # box_val_list (this tab's ORIGINAL values, whichever language
-            # that is) — never against p.name/p.product_description/etc.
-            # directly, which would spuriously read as "changed" whenever a
-            # non-primary-language tab is open (its text never equals the
-            # English p.* values).
-            current_barcode = p.ean or p.manifest_barcode or p.scanned_barcode
-            language_content_changed = (
-                name_in.strip() != name_val
-                or desc_in.strip() != desc_val
-                or extra_in.strip() != extra_val
-                or new_defects != defects_val_list
-                or new_missing != missing_val_list
-                or new_box != box_val_list
-                or new_checklist != checklist_val_list
-            )
-            changed = (
-                language_content_changed
-                or brand_in.strip() != p.brand
-                or model_in.strip() != p.model
-                or category_name_in != p.category
-                or barcode_in.strip() != current_barcode
-                or product_condition_in != p.product_condition
-                or float(price_in) != float(p.price)
-                or int(quantity_in) != p.quantity
-                or float(weight_kg_in) != float(p.weight_kg)
-            )
-
-            # Snapshot pre-change values for the fields the real
-            # two-way sync change-detector cares about (SYNC_OWNERSHIP_FIELDS'
-            # keys) — captured before reassignment below so the event
-            # layer can log/enqueue an accurate old -> new diff per field.
-            # name/product_description only reflect a real diff when the
-            # PRIMARY-language tab is the one being saved — the sync-ownership
-            # feature syncs primary/English content, never a translation.
-            _sync_field_diffs = {
-                "name": (p.name, name_in.strip() if is_primary_tab else p.name),
-                "brand": (p.brand, brand_in.strip()),
-                "model": (p.model, model_in.strip()),
-                "category": (p.category, category_name_in),
-                "power": (p.power, power_in.strip()),
-                "barcode": (current_barcode, barcode_in.strip()),
-                "product_condition": (p.product_condition, product_condition_in),
-                "price": (p.price, float(price_in)),
-                "quantity": (p.quantity, int(quantity_in)),
-                "weight_kg": (p.weight_kg, float(weight_kg_in)),
-                "product_description": (p.product_description, desc_in.strip() if is_primary_tab else p.product_description),
-            }
-
-            p.brand = brand_in.strip()
-            p.model = model_in.strip()
-            p.category_id = category_id_in
-            p.category = category_name_in
-            p.power = power_in.strip()
-            if barcode_in.strip() != current_barcode:
-                p.ean = barcode_in.strip()
-                p.ean_source = "manual"
-                p.ean_status = "Found" if barcode_in.strip() else ""
-            p.product_condition = product_condition_in
-            p.price = float(price_in)
-            p.quantity = int(quantity_in)
-            p.weight_kg = float(weight_kg_in)
-            if changed:
-                p.review_status = "edited"
-
-            if is_primary_tab:
-                p.name = name_in.strip()
-                p.product_description = desc_in.strip()
-                p.condition_description = extra_in.strip()
-                p.defects = new_defects
-                p.missing_components = new_missing
-                p.box_contents = new_box
-                p.functional_checklist = new_checklist
-                inventory_store.save_product(p)  # upserts the primary-language row too
-            else:
-                inventory_store.save_product(p)  # brand/price/etc. above; primary-language row re-saved unchanged
-                if language_content_changed:
-                    # spec_summary/product_condition_reasoning/match_notes aren't
-                    # edited via any widget on this card — carried through
-                    # unchanged from the existing row so this upsert (a full
-                    # column replace) never silently wipes them.
-                    _existing_t = _translations_by_lang.get(selected_lang)
-                    product_translation_store.upsert_translation(product_translation_store.ProductTranslation(
-                        product_id=p.id, company_id=p.company_id, language=selected_lang,
-                        title=name_in.strip(), description=desc_in.strip(),
-                        condition_description=extra_in.strip(), defects=new_defects,
-                        box_contents=new_box, missing_components=new_missing,
-                        functional_checklist=new_checklist,
-                        spec_summary=_existing_t.spec_summary if _existing_t else "",
-                        product_condition_reasoning=_existing_t.product_condition_reasoning if _existing_t else "",
-                        match_notes=_existing_t.match_notes if _existing_t else "",
-                        translated_by="manual",
-                    ))
-            if changed:
-                audit_store.log_audit(p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id)
-                _record_sync_field_changes(p, _sync_field_diffs, current_user.id)
-            st.session_state.rex_open_product_id = None
-            st.session_state.rex_focus_id = p.id  # scroll/highlight this row back in the list
-            st.success(T("product_list.saved"))
-            st.rerun()
-
-        # -- Manifest info (from the old Inventory page, unchanged) --
-        with st.expander(T("product_list.manifest_info"), expanded=False):
-            if p.manifest_import_id:
-                st.write(f"**{T('product_list.manifest_item_description')}:**", p.manifest_item_description or "—")
-                st.write(
-                    f"**{T('product_list.manifest_target_no')}:** {p.manifest_target_no or '—'}  •  "
-                    f"**{T('product_list.subcategory')}:** {p.manifest_subcategory or '—'}"
-                )
-                st.write(f"**{T('product_list.manifest_asin')}:** {p.asin or '—'}  •  **{T('product_list.manifest_barcode')}:** {p.manifest_barcode or '—'}")
-                st.write(f"**{T('new_item.qty')}:** {p.manifest_qty}  •  **{T('new_item.weight')}:** {p.manifest_weight_kg} kg")
-                st.caption(T("product_list.batch_label", batch_id=p.manifest_import_id))
-            else:
-                st.caption(T("product_list.manually_entered"))
-
-        # -- Repair History (from the old Inventory page, unchanged) --
-        events = repair_store.list_repair_events(p.id, p.company_id)
-        repair_total = repair_store.total_repair_cost(p.id, p.company_id)
-        with st.expander(T("product_list.repair_history_title", count=len(events), total=f"{repair_total:.2f}")):
-            for e in events:
-                rc1, rc2 = st.columns([5, 1])
-                with rc1:
-                    when = time.strftime("%Y-%m-%d", time.localtime(e.occurred_at))
-                    st.write(f"**{when}** — {e.description or T('product_list.no_description')} — €{e.cost:.2f}"
-                             + (f" — {e.technician}" if e.technician else ""))
-                with rc2:
-                    if st.button("🗑️", key=f"delrepair_{e.id}"):
-                        repair_store.delete_repair_event(e.id, p.company_id)
-                        st.rerun()
-            with st.form(key=f"addrepair_{p.id}", clear_on_submit=True):
-                rf1, rf2, rf3 = st.columns([3, 1, 1])
-                with rf1:
-                    r_desc = st.text_input(T("common.description"), key=f"rdesc_{p.id}")
-                with rf2:
-                    r_cost = st.number_input(T("product_list.cost"), min_value=0.0, step=0.5, key=f"rcost_{p.id}")
-                with rf3:
-                    r_tech = st.text_input(T("product_list.technician"), key=f"rtech_{p.id}")
-                if st.form_submit_button(T("product_list.add_repair_entry")):
-                    if r_desc.strip():
-                        repair_store.add_repair_event(
-                            repair_store.RepairEvent(
-                                product_id=p.id, company_id=p.company_id, description=r_desc.strip(),
-                                cost=r_cost, technician=r_tech.strip(),
-                            )
-                        )
-                        st.rerun()
-                    else:
-                        st.warning(T("product_list.description_required"))
-
-        # -- Sales & Listings (from the old Inventory page — the
-        # read-only Price/Description/Condition re-display that used to
-        # sit at the top of this expander is dropped: the editable form
-        # above already covers those fields live) --
-        with st.expander(T("product_list.sales_listings"), expanded=False):
-            listings = marketplace_store.list_listings(p.id, p.company_id)
-            if listings:
-                for listing in listings:
-                    st.write(
-                        f"**{listing.marketplace}:** {listing.status}"
-                        + (f" — #{listing.external_listing_id}" if listing.external_listing_id else "")
-                        + (f" — {listing.url}" if listing.url else "")
-                    )
-            else:
-                st.caption(T("product_list.not_listed_yet"))
-
-            if IntegrationManager.is_connected(p.company_id, "baselinker"):
-                # Same Admin-or-Reviewer boundary as the bulk Export/Sync
-                # actions — Preview is deliberately left open to everyone
-                # (read-only, exposes nothing beyond the product card
-                # itself already shows).
-                _can_marketplace_action = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
-                bl_col1, bl_col2, bl_col3, bl_col4 = st.columns(4)
-                with bl_col1:
-                    if st.button(T("product_list.preview_export"), key=f"preview_{p.id}", use_container_width=True):
-                        st.session_state[f"show_export_preview_{p.id}"] = True
-                with bl_col2:
-                    if st.button(
-                        T("product_list.push_to_baselinker"), key=f"push_{p.id}", use_container_width=True,
-                        disabled=not _can_marketplace_action,
-                    ):
-                        if not _can_marketplace_action:
-                            st.error(T("common.admins_reviewers_only"))
-                            st.stop()
-                        result = IntegrationManager.get(p.company_id, "baselinker").export_product(p)
-                        if result.success:
-                            audit_store.log_audit(
-                                p.company_id, current_user.id, "EXPORT_BASELINKER", "product", p.id,
-                                f"baselinker_product_id={result.external_id}",
-                            )
-                            st.success(T("product_list.pushed_success", external_id=result.external_id))
+                            st.session_state["cat_renaming_id"] = None
                             st.rerun()
+
+            if st.session_state.get("cat_moving_id") == _cat_id:
+                with st.form(f"cat_move_form_{_cat_id}"):
+                    _move_options = [T("category.no_parent")] + [
+                        l for l in _cat_labels_all if _cat_label_to_id_all[l] != _cat_id
+                    ]
+                    _dest_choice = st.selectbox(T("category.new_parent_label"), _move_options)
+                    if st.form_submit_button(T("common.save"), type="primary"):
+                        _dest_id = "" if _dest_choice == T("category.no_parent") else _cat_label_to_id_all.get(_dest_choice, "")
+                        try:
+                            category_store.move_category(_cat_id, _cat_company_id, _dest_id)
+                        except ValueError as e:
+                            st.error(str(e))
                         else:
-                            st.error(result.message)
-                with bl_col3:
-                    if st.button(
-                        T("product_list.sync_now"), key=f"sync_now_{p.id}", use_container_width=True,
-                        disabled=not _can_marketplace_action,
-                    ):
-                        if not _can_marketplace_action:
-                            st.error(T("common.admins_reviewers_only"))
-                            st.stop()
-                        st.session_state[f"sync_now_results_{p.id}"] = sync_service.run_manual_sync(
-                            p.company_id, p, "baselinker",
-                        )
-                with bl_col4:
-                    if st.button(
-                        T("product_list.pull_now"), key=f"pull_now_{p.id}", use_container_width=True,
-                        disabled=not _can_marketplace_action,
-                    ):
-                        if not _can_marketplace_action:
-                            st.error(T("common.admins_reviewers_only"))
-                            st.stop()
-                        st.session_state[f"pull_now_results_{p.id}"] = sync_engine.pull_product(
-                            p.company_id, p, "baselinker",
-                        )
-                        st.rerun()
-                if not _can_marketplace_action:
-                    st.caption(T("common.admins_reviewers_only"))
+                            st.session_state["cat_moving_id"] = None
+                            st.rerun()
 
-                if st.session_state.get(f"sync_now_results_{p.id}"):
-                    # export is real (delegates to the same export_product()
-                    # path as the Push button above); import honestly reports
-                    # "disabled" since no connector implements pulling data
-                    # FROM BaseLinker through this specific path yet — real
-                    # Pull is the dedicated "⬇️ Pull now" button below, which
-                    # goes through sync/engine.py's pull_product() +
-                    # Conflict Resolver instead of this generic sync() entry
-                    # point. Never fakes a result either way.
-                    with st.expander(T("product_list.sync_now_result"), expanded=True):
-                        for rec in st.session_state[f"sync_now_results_{p.id}"]:
-                            if rec.sync_status == STATUS_SUCCESS:
-                                st.success(f"{rec.direction.capitalize()}: ✅ {T('product_list.success_word')}")
-                            elif rec.sync_status == STATUS_DISABLED:
-                                st.info(f"{rec.direction.capitalize()}: ⏸️ {rec.error_message or T('product_list.disabled_word')}")
+            if st.session_state.get("cat_deleting_id") == _cat_id:
+                if _count == 0:
+                    st.warning(T("category.confirm_delete_empty", name=_row["name"]))
+                    _dcol1, _dcol2 = st.columns(2)
+                    with _dcol1:
+                        if st.button(T("common.cancel"), key=f"cat_delete_cancel_{_cat_id}"):
+                            st.session_state["cat_deleting_id"] = None
+                            st.rerun()
+                    with _dcol2:
+                        if st.button(T("common.delete"), key=f"cat_delete_confirm_{_cat_id}", type="primary"):
+                            try:
+                                category_store.delete_category(_cat_id, _cat_company_id)
+                            except ValueError as e:
+                                st.error(str(e))
                             else:
-                                st.error(f"{rec.direction.capitalize()}: ❌ {rec.error_message}")
-                        if st.button(T("common.close"), key=f"close_sync_now_{p.id}"):
-                            st.session_state[f"sync_now_results_{p.id}"] = None
-                            st.rerun()
-
-                if st.session_state.get(f"pull_now_results_{p.id}") is not None:
-                    with st.expander(T("product_list.pull_now_result"), expanded=True):
-                        resolutions = st.session_state[f"pull_now_results_{p.id}"]
-                        if not resolutions:
-                            st.caption(T("product_list.nothing_to_pull"))
-                        for res in resolutions:
-                            if res.resolution_action == "accepted":
-                                st.success(T("product_list.field_accepted", field=res.field_name, value=res.applied_value))
-                            elif res.resolution_action == "overridden":
-                                st.warning(T("product_list.field_conflict", field=res.field_name, value=res.applied_value))
-                            else:
-                                st.info(T("product_list.field_pending_review", field=res.field_name))
-                        if st.button(T("common.close"), key=f"close_pull_now_{p.id}"):
-                            st.session_state[f"pull_now_results_{p.id}"] = None
-                            st.rerun()
-
-                if st.session_state.get(f"show_export_preview_{p.id}"):
-                    # Built from the exact same connector.export_product() code
-                    # path (mapper.build_payload) — can never drift from what a
-                    # real push actually sends.
-                    payload = IntegrationManager.get(p.company_id, "baselinker").preview_payload(p)
-                    text_fields = payload.get("text_fields", {})
-                    prices = payload.get("prices") or {}
-                    stock = payload.get("stock") or {}
-                    with st.expander(T("product_list.export_preview_title"), expanded=True):
-                        st.caption(T("product_list.export_preview_caption"))
-                        _empty_label = T("product_list.empty_dash")
-                        _excluded_label = T("product_list.excluded_dash")
-                        st.write(f"**{T('product_list.title_label')}:**", text_fields["name"] or _empty_label if "name" in text_fields else _excluded_label)
-                        st.write(
-                            f"**{T('common.description')}:**",
-                            text_fields["description"] or _empty_label if "description" in text_fields else _excluded_label,
-                        )
-                        st.write(
-                            f"**{T('product_list.additional_description')}:**",
-                            text_fields["description_extra1"] if "description_extra1" in text_fields else _excluded_label,
-                        )
-                        st.write(f"**{T('common.sku')}:**", payload.get("sku", "—"))
-                        st.write(f"**{T('common.barcode')}:**", payload.get("ean") or _excluded_label)
-                        st.write(f"**{T('product_list.category_id')}:**", payload.get("category_id", "—"))
-                        st.write(f"**{T('common.price')}:**", next(iter(prices.values()), None) or T("product_list.excluded_or_no_price"))
-                        st.write(f"**{T('common.quantity')}:**", next(iter(stock.values()), _excluded_label))
-                        st.write(f"**{T('product_list.images_label')}:**", T("product_list.images_included", count=payload.get('_preview_image_count', 0)))
-                        if st.button(T("product_list.close_preview"), key=f"close_preview_{p.id}"):
-                            st.session_state[f"show_export_preview_{p.id}"] = False
-                            st.rerun()
-
-        # -- Financials (from the old Inventory page, unchanged) --
-        with st.expander(T("product_list.financials"), expanded=False):
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                new_purchase = st.number_input(
-                    T("product_list.purchase_price_allocated"), min_value=0.0, step=0.5,
-                    value=p.purchase_price_allocated, key=f"purchase_{p.id}",
-                )
-                if new_purchase != p.purchase_price_allocated:
-                    p.purchase_price_allocated = new_purchase
-                    inventory_store.save_product(p)
-                    audit_store.log_audit(
-                        p.company_id, current_user.id, "UPDATE_PRODUCT", "product", p.id, "purchase_price_allocated",
-                    )
-                    st.rerun()
-            with fc2:
-                st.metric(T("product_list.repair_cost"), f"€{repair_total:.2f}")
-            with fc3:
-                profit = p.price - p.purchase_price_allocated - repair_total
-                st.metric(T("product_list.profit_metric"), f"€{profit:.2f}")
-
-        st.divider()
-
-    # ---------------------------------------------------- FILTER + QUERY --
-    # A small toggle button replaces what used to be three separate,
-    # always-visible bars (Status+Search, a "More filters" expander, and a
-    # separate Exact-lookup box) — one filter entry point instead of three.
-    # Deliberately a plain st.button + st.container (not st.popover):
-    # st.popover ties the open panel's width to the trigger button's width
-    # and floats it *over* the table as an overlay. This instead renders
-    # inline in the normal page flow when open — full container width
-    # (matching the table) with no CSS needed, and the table is pushed
-    # down below it rather than covered, while the trigger stays a small
-    # button either way.
-    if st.button(T("product_list.filter_products") if not st.session_state.rex_filters_open else T("product_list.filter_products_open")):
-        st.session_state.rex_filters_open = not st.session_state.rex_filters_open
-        st.rerun()
-
-    # Streamlit drops a widget's session_state entry once that widget
-    # stops appearing in the script's element tree for a run — which is
-    # exactly what happens to every field below every time the panel
-    # collapses. So the *persistent* value for each field lives in the
-    # plain (non-widget) rex_search_sku/rex_status_filter/etc. keys
-    # (REX_FILTER_DEFAULTS' keys), while each widget below uses its own
-    # separate "_w"-suffixed key that only exists while the panel is
-    # open. These two small helpers read the persistent value in as the
-    # widget's starting value, and write the widget's return value back
-    # to the persistent key on every render — so the persistent key
-    # survives the widget disappearing when the panel closes, and
-    # "Clear filters" (further down) can safely overwrite the persistent
-    # keys directly since no widget is ever bound to them.
-    def _synced_text_input(label: str, state_key: str, **kwargs):
-        val = st.text_input(label, value=st.session_state[state_key], key=f"{state_key}_w", **kwargs)
-        if val != st.session_state[state_key]:
-            st.session_state[state_key] = val
-            st.session_state.rex_page = 1
-        return val
-
-    def _synced_selectbox(label: str, options: list, state_key: str, **kwargs):
-        cur = st.session_state[state_key]
-        idx = options.index(cur) if cur in options else 0
-        val = st.selectbox(label, options, index=idx, key=f"{state_key}_w", **kwargs)
-        if val != st.session_state[state_key]:
-            st.session_state[state_key] = val
-            st.session_state.rex_page = 1
-        return val
-
-    # Fetched unconditionally (cheap query) since batch_options is needed
-    # below for the "Active filters" caption even when the panel is closed,
-    # not just while the selectbox itself is on screen.
-    batches = manifest_store.list_batches(st.session_state.company_id)
-    batch_options = {"": T("product_list.all_batches")}
-    batch_options.update({b.id: f"{b.filename} ({b.id})" for b in batches})
-
-    if st.session_state.rex_filters_open:
-        with st.container(border=True):
-            st.markdown(f"**{T('product_list.search_by_field')}**")
-            sf1, sf2, sf3, sf4 = st.columns(4)
-            with sf1:
-                _synced_text_input(T("common.sku"), "rex_search_sku")
-                _synced_text_input(T("common.location"), "rex_search_location")
-            with sf2:
-                _synced_text_input(T("common.name"), "rex_search_name")
-                _synced_text_input("EAN", "rex_search_ean")
-            with sf3:
-                _synced_text_input(T("common.brand"), "rex_search_brand")
-                _synced_text_input("ASIN", "rex_search_asin")
-            with sf4:
-                _synced_text_input(T("common.model"), "rex_search_model")
-
-            st.markdown(f"**{T('product_list.more_filters')}**")
-            mf1, mf2, mf3, mf4 = st.columns(4)
-            with mf1:
-                _synced_selectbox(
-                    T("common.status"), list(REX_STATUS_FILTER_OPTIONS), "rex_status_filter",
-                    format_func=lambda k: REX_STATUS_FILTER_OPTIONS[k],
-                )
-            with mf2:
-                _synced_selectbox(
-                    T("product_list.triage_status"), [k for k in TRIAGE_LABELS], "rex_triage_filter",
-                    format_func=lambda k: TRIAGE_LABELS[k],
-                )
-            with mf3:
-                _synced_selectbox(
-                    T("common.product_condition"), [""] + CONDITION_OPTIONS, "rex_condition_filter",
-                    format_func=lambda k: k or T("common.all"),
-                )
-            with mf4:
-                _synced_selectbox(
-                    T("product_list.manifest_batch"), list(batch_options), "rex_batch_filter",
-                    format_func=lambda k: batch_options[k],
-                )
-
-            st.divider()
-            # Fundamentally different from the per-field substring boxes
-            # above: this is the old Inventory page's tiered *exact*-match
-            # lookup (inventory_store.search_products — exact SKU, then
-            # EAN, then ASIN, then model, then brand/name substring)
-            # across the WHOLE inventory regardless of the filters above,
-            # not just the current page. Matches are inherently few
-            # (usually 0-3), so rendering them directly bypasses
-            # pagination entirely — no scale concern.
-            _synced_text_input(
-                T("product_list.exact_lookup_label"),
-                "rex_exact_search",
-                placeholder="e.g. 2001, 0194252057338, B08ASIN123, iPhone 12, Apple, A2172",
-                help=T("product_list.exact_lookup_help"),
-            )
-
-            st.divider()
-            fb1, fb2 = st.columns(2)
-            with fb1:
-                if st.button(T("product_list.set_filters"), type="primary", use_container_width=True, key="rex_set_filters_btn"):
-                    st.session_state.rex_filters_open = False
-                    st.rerun()
-            with fb2:
-                if st.button(T("product_list.clear_filters"), use_container_width=True, key="rex_clear_filters_btn"):
-                    # Safe to set these directly: no widget is bound to
-                    # these exact keys (widgets use the separate "_w"
-                    # keys above), so there's no "already instantiated
-                    # this run" conflict.
-                    for _k, _v in REX_FILTER_DEFAULTS.items():
-                        st.session_state[_k] = _v
-                    st.session_state.rex_filters_open = False
-                    st.session_state.rex_page = 1
-                    st.rerun()
-
-    # These persistent keys survive the panel closing (see the sync
-    # helpers above), so filters keep applying to the query below
-    # regardless of whether the panel is currently open or collapsed.
-    sku_in = st.session_state.rex_search_sku
-    name_in = st.session_state.rex_search_name
-    brand_in = st.session_state.rex_search_brand
-    model_in = st.session_state.rex_search_model
-    ean_in = st.session_state.rex_search_ean
-    asin_in = st.session_state.rex_search_asin
-    location_in = st.session_state.rex_search_location
-    status_filter = st.session_state.rex_status_filter
-    triage_filter = st.session_state.rex_triage_filter
-    condition_filter = st.session_state.rex_condition_filter
-    batch_filter = st.session_state.rex_batch_filter
-    exact_query = st.session_state.rex_exact_search
-
-    _status_kwargs = {}
-    if status_filter == "completed":
-        _status_kwargs["status"] = "completed"
-    elif status_filter == "all_except_draft":
-        _status_kwargs["exclude_status"] = "draft"
-    # "all": no status filter at all
-    if triage_filter:
-        _status_kwargs["triage_status"] = triage_filter
-    if condition_filter:
-        _status_kwargs["product_condition"] = condition_filter
-    if batch_filter:
-        _status_kwargs["manifest_import_id"] = batch_filter
-
-    # Fetched unconditionally (cheap, indexed, LIMIT-bounded query) right
-    # here — even in exact-lookup mode where it isn't displayed — so
-    # rex_current_page_ids and total_count are already available for the
-    # Operations/Download toolbar immediately below, without needing a
-    # deferred-container trick or an st.fragment boundary (a container
-    # written into from inside a fragment turned out not to reposition
-    # reliably in the real browser, even though it looked correct in
-    # headless tests).
-    products_page, total_count = inventory_store.list_products_paginated(
-        st.session_state.company_id,
-        sku=sku_in, name=name_in, brand=brand_in, model=model_in,
-        ean=ean_in, asin=asin_in, location=location_in,
-        page=st.session_state.rex_page,
-        page_size=REX_PAGE_SIZE,
-        **_status_kwargs,
-    )
-    st.session_state.rex_current_page_ids = [p.id for p in products_page]
-    total_pages = max(1, (total_count + REX_PAGE_SIZE - 1) // REX_PAGE_SIZE)
-
-    def _render_numbered_pagination(key_prefix: str = "rex_pg"):
-        # Centered "windowed" numbered pagination — 3 pages before and
-        # after the current one, plus page 1 and the last page always
-        # visible, with "…" filling any gap. Rendered both above and below
-        # the table; key_prefix keeps the two instances' widget keys apart.
-        cur = st.session_state.rex_page
-        window = 3
-        start_w = max(1, cur - window)
-        end_w = min(total_pages, cur + window)
-        pages = sorted(set([1, total_pages] + list(range(start_w, end_w + 1))))
-
-        cells = ["prev"]
-        prev_p = None
-        for p in pages:
-            if prev_p is not None and p - prev_p > 1:
-                cells.append("ellipsis")
-            cells.append(p)
-            prev_p = p
-        cells.append("next")
-
-        # Flat, borderless look for the page-number/arrow buttons (no box
-        # around each digit), with nowrap + a min-width sized for up to
-        # 3-digit page numbers so "100" etc. never wraps onto two lines.
-        # Targets by key prefix (all these buttons use "rex_pg_*" keys, via
-        # Streamlit's "st-key-<key>" container class), not globally — other
-        # buttons on the page keep their normal look.
-        st.markdown(
-            """
-            <style>
-            div[class*="st-key-rex_pg_"] button {
-                border: none !important;
-                background: transparent !important;
-                box-shadow: none !important;
-                white-space: nowrap !important;
-                min-width: 2.6em !important;
-                padding: 2px 4px !important;
-            }
-            div[class*="st-key-rex_pg_"] button:hover:not(:disabled) {
-                background: rgba(128, 128, 128, 0.15) !important;
-                border-radius: 6px !important;
-            }
-            div[class*="st-key-rex_pg_"] button[kind="primary"] {
-                background: rgba(56, 189, 248, 0.18) !important;
-                border-radius: 6px !important;
-                font-weight: 700 !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        _left, mid, _right = st.columns([2, 3, 2])
-        with mid:
-            cols = st.columns(len(cells))
-            for col, cell in zip(cols, cells):
-                with col:
-                    if cell == "prev":
-                        if st.button("‹", disabled=cur <= 1, use_container_width=True, key=f"{key_prefix}_prev"):
-                            st.session_state.rex_page -= 1
-                            st.rerun()
-                    elif cell == "next":
-                        if st.button("›", disabled=cur >= total_pages, use_container_width=True, key=f"{key_prefix}_next"):
-                            st.session_state.rex_page += 1
-                            st.rerun()
-                    elif cell == "ellipsis":
-                        st.markdown(
-                            "<div style='text-align:center;padding-top:6px;'>…</div>",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        if cell == cur:
-                            st.button(
-                                str(cell), type="primary", disabled=True,
-                                use_container_width=True, key=f"{key_prefix}_{cell}",
-                            )
-                        elif st.button(str(cell), use_container_width=True, key=f"{key_prefix}_{cell}"):
-                            st.session_state.rex_page = cell
-                            st.rerun()
-
-    _show_list_toolbar = (
-        not exact_query.strip() and total_count > 0 and st.session_state.rex_open_product_id is None
-    )
-    if _show_list_toolbar:
-        # Fold the grid's most recently reported click into
-        # rex_selected_ids BEFORE computing n_selected / rendering
-        # Operations+Download, so their disabled state and the
-        # "Selected: N" count reflect *this* click immediately instead of
-        # lagging one click behind. Streamlit pre-populates
-        # session_state["rex_table"] before the script runs on the very
-        # rerun that value change triggered, so it's already fresh here.
-        # _rex_skip_table_merge guards against re-applying a now-stale
-        # report right after Clear Selection / bulk status change, which
-        # set rex_selected_ids directly and haven't heard back from the
-        # grid's frontend yet.
-        _prior_table_result = st.session_state.get("rex_table")
-        if _prior_table_result and not st.session_state.pop("_rex_skip_table_merge", False):
-            _page_ids = set(st.session_state.rex_current_page_ids)
-            _new_sel = set(_prior_table_result.get("selected_ids") or [])
-            st.session_state.rex_selected_ids = (
-                (st.session_state.rex_selected_ids - _page_ids) | _new_sel
-            )
-            if (
-                _prior_table_result.get("open_id")
-                and _prior_table_result["open_id"] != st.session_state.rex_open_product_id
-            ):
-                st.session_state.rex_open_product_id = _prior_table_result["open_id"]
-                st.rerun()
-
-        n_selected = len(st.session_state.rex_selected_ids)
-        # Operations/Download sit at the LEFT, directly under the Filter
-        # Products button (which is also left-aligned) — the count caption
-        # takes the remaining space on the right instead of pushing these
-        # two to the far side of the (wide-layout) table.
-        top2, top3, top1 = st.columns([1, 1, 3])
-        with top2:
-            # key includes rex_ops_popover_seq: st.popover has no direct
-            # "close programmatically" API, but a popover keeps its open/
-            # closed UI state tied to its key across reruns — remounting it
-            # under a new key (bumped by every button below that opens a
-            # dialog) forces a fresh, closed popover instead of it staying
-            # open behind the dialog that was just triggered.
-            with st.popover(
-                T("product_list.operations"), disabled=n_selected == 0, use_container_width=True,
-                key=f"rex_ops_popover_{st.session_state.rex_ops_popover_seq}",
-            ):
-                # Flat, borderless look for this list of actions (Export,
-                # Delete Products, more to come) — no button box around
-                # each one, just left-aligned text with a subtle hover
-                # highlight. Same technique as the pagination digits
-                # above, targeted by the "rex_op_*" key prefix so it
-                # doesn't affect other buttons (Apply, Clear Selection).
-                # aria-label selector below must match whatever T()
-                # currently renders for the "⚙️ Operations" trigger label
-                # (Streamlit sets aria-label from that same text) — built
-                # with an f-string so it still targets the right popover
-                # in Latvian, not just English.
-                st.markdown(
-                    f"""
-                    <style>
-                    div[class*="st-key-rex_op_"] button {{
-                        border: none !important;
-                        background: transparent !important;
-                        box-shadow: none !important;
-                        text-align: left !important;
-                        justify-content: flex-start !important;
-                        padding: 6px 4px !important;
-                    }}
-                    /* text-align/justify-content on the <button> alone
-                    doesn't left-align its label — Streamlit wraps the
-                    label in its own centered flex div/p inside the
-                    button, which needs the same override or it keeps
-                    winning. */
-                    div[class*="st-key-rex_op_"] button > div,
-                    div[class*="st-key-rex_op_"] button p {{
-                        justify-content: flex-start !important;
-                        text-align: left !important;
-                        width: 100% !important;
-                    }}
-                    div[class*="st-key-rex_op_"] button:hover:not(:disabled) {{
-                        background: rgba(128, 128, 128, 0.15) !important;
-                        border-radius: 6px !important;
-                    }}
-                    /* The popover PANEL itself (not just the buttons in
-                    it) still has Streamlit's default bordered/shadowed
-                    box look. It renders through a React portal, so it's
-                    not a DOM descendant of anything keyed above — matched
-                    instead by its aria-label, which Streamlit sets to the
-                    same text as the "⚙️ Operations" trigger, so this only
-                    ever targets this one popover (not "⬇️ Download" or any
-                    other). Result: a plain floating list of words, no box. */
-                    div[data-testid="stPopoverBody"][aria-label="{T('product_list.operations')}"] {{
-                        border: none !important;
-                        box-shadow: none !important;
-                        border-radius: 0 !important;
-                    }}
-                    /* Uniform gap between every word in the list — the
-                    st.divider() lines previously used to separate groups
-                    added their own (larger, inconsistent) margin, making
-                    some pairs look closer together than others. */
-                    div[class*="st-key-rex_op_"] {{
-                        margin: 2px 0 !important;
-                    }}
-                    </style>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                # Admin-or-Reviewer (export/download) vs Admin-only
-                # (delete/bulk edit/change status) — these disabled= hints
-                # are the UI-visible half of the permission matrix; the
-                # real boundary is the auth.require_role() check inside
-                # each dialog function itself (and inside the single-
-                # product equivalents in _render_product_card), since a
-                # disabled attribute alone is only ever a hint, never
-                # enforcement.
-                can_export = current_user.role in (auth.ROLE_ADMIN, auth.ROLE_REVIEWER)
-                can_delete_or_bulk_admin = current_user.role == auth.ROLE_ADMIN
-                if st.button(
-                    T("product_list.bulk_edit"), disabled=not can_delete_or_bulk_admin,
-                    use_container_width=True, key="rex_op_bulk_edit",
-                ):
-                    st.session_state.rex_bulk_edit_requested = True
-                    st.session_state.rex_ops_popover_seq += 1
-                    st.rerun()
-                if st.button(
-                    T("product_list.change_status"), disabled=not can_delete_or_bulk_admin,
-                    use_container_width=True, key="rex_op_change_status",
-                ):
-                    st.session_state.rex_status_requested = True
-                    st.session_state.rex_ops_popover_seq += 1
-                    st.rerun()
-                if st.button(T("product_list.translate_action"), use_container_width=True, key="rex_op_translate"):
-                    st.session_state.rex_translate_requested = True
-                    st.session_state.rex_bulktranslate_preview = None  # start each open clean
-                    st.session_state.rex_ops_popover_seq += 1
-                    st.rerun()
-                if st.button(
-                    T("product_list.export_button"), disabled=not can_export, use_container_width=True,
-                    key="rex_op_export",
-                ):
-                    st.session_state.rex_export_requested = True
-                    st.session_state.rex_ops_popover_seq += 1
-                    st.rerun()
-                if st.button(
-                    T("product_list.delete_products"), disabled=not can_delete_or_bulk_admin, use_container_width=True,
-                    key="rex_op_delete",
-                ):
-                    st.session_state.rex_delete_requested = True
-                    st.session_state.rex_ops_popover_seq += 1
-                    st.rerun()
-                if not can_delete_or_bulk_admin:
-                    st.caption(T("product_list.admins_reviewers_only"))
-                if st.button(T("product_list.clear_selection"), use_container_width=True, key="rex_clear_selection"):
-                    st.session_state.rex_selected_ids = set()
-                    st.session_state.rex_clear_seq += 1  # tell the grid to deselect all rows
-                    st.session_state["_rex_skip_table_merge"] = True
-                    st.rerun()
-        with top3:
-            with st.popover(
-                T("product_list.download"), disabled=n_selected == 0 or not can_export, use_container_width=True,
-            ):
-                # The popover's own disabled= above is only a UI hint (an
-                # st.popover's body still runs on every rerun regardless of
-                # whether it's open) — the real boundary is this branch:
-                # export.to_*_bytes() is never even called, so the file
-                # content is never computed or sent to the browser at all
-                # for a role that isn't allowed to have it.
-                if can_export:
-                    _dl_products = _get_selected_products() if n_selected else []
-                    st.download_button(
-                        T("product_list.download_excel"),
-                        data=export.to_excel_bytes(_dl_products) if _dl_products else b"",
-                        file_name="baselinker_export.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        disabled=n_selected == 0,
-                        use_container_width=True,
-                    )
-                    st.download_button(
-                        T("product_list.download_csv"),
-                        data=export.to_csv_bytes(_dl_products) if _dl_products else b"",
-                        file_name="baselinker_export.csv",
-                        mime="text/csv",
-                        disabled=n_selected == 0,
-                        use_container_width=True,
-                    )
-                    st.caption(T("product_list.image_links_note"))
+                                st.session_state["cat_deleting_id"] = None
+                                st.success(T("category.deleted_success", name=_row["name"]))
+                                st.rerun()
                 else:
-                    st.caption(T("common.admins_reviewers_only"))
-        with top1:
-            st.caption(T("product_list.total_count_selected", total=total_count, selected=n_selected))
-
-    _active_filters = []
-    if status_filter != "completed":
-        _active_filters.append(REX_STATUS_FILTER_OPTIONS[status_filter])
-    for _field_label, _field_val in (
-        (T("common.sku"), sku_in), (T("common.name"), name_in), (T("common.brand"), brand_in), (T("common.model"), model_in),
-        ("EAN", ean_in), ("ASIN", asin_in), (T("common.location"), location_in),
-    ):
-        if _field_val.strip():
-            _active_filters.append(f"{_field_label}~“{_field_val.strip()}”")
-    if triage_filter:
-        _active_filters.append(TRIAGE_LABELS[triage_filter])
-    if condition_filter:
-        _active_filters.append(T("product_list.condition_filter_label", condition=condition_filter))
-    if batch_filter:
-        _active_filters.append(batch_options[batch_filter])
-    if exact_query.strip():
-        _active_filters.append(T("product_list.exact_lookup_active", query=exact_query.strip()))
-    st.caption(T("product_list.active_filters", filters=" · ".join(_active_filters)) if _active_filters else T("product_list.no_filters_applied"))
-
-    if exact_query.strip():
-        exact_results = inventory_store.search_products(exact_query.strip(), st.session_state.company_id)
-        st.caption(T("product_list.match_count", count=len(exact_results), query=exact_query.strip()))
-        tier_labels = {
-            inventory_store.MATCH_TIER_SKU: "SKU",
-            inventory_store.MATCH_TIER_EAN: "EAN",
-            inventory_store.MATCH_TIER_ASIN: "ASIN",
-            inventory_store.MATCH_TIER_MODEL: T("common.model").lower(),
-            inventory_store.MATCH_TIER_BRAND_NAME: T("product_list.brand_name_tier"),
-        }
-        for p, tier in exact_results:
-            _render_product_card(p, tier_labels.get(tier, ""))
-
-    else:
-        if total_count == 0:
-            st.info(T("product_list.no_products_match_filter"))
-
-        elif st.session_state.rex_open_product_id is None:
-            # -------------------------------------------------------- LIST VIEW --
-            if not products_page:
-                st.info(T("product_list.no_products_on_page"))
-            else:
-                table_rows = []
-                for p in products_page:
-                    photo_url = None
-                    if p.image_paths:
-                        thumb = _ensure_thumbnail(p.image_paths[0])
-                        if thumb:
-                            photo_url = _image_static_url(thumb)
-                    listing = marketplace_store.get_listing(p.id, "baselinker", p.company_id)
-                    table_rows.append({
-                        "id": p.id,
-                        "photo_url": photo_url,
-                        "sku": p.sku or "(none)",
-                        "name": p.name or p.manifest_item_description or p.model_number or p.id,
-                        "brand": p.brand or "—",
-                        "product_condition": p.product_condition or "—",
-                        "triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
-                        "location": p.location or "—",
-                        "quantity": p.quantity or 1,
-                        "price": p.price or 0,
-                        "weight_kg": p.weight_kg or p.manifest_weight_kg or 0,
-                        "baselinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
-                        "status": _status_badge(p),
-                        "date": (
-                            time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
-                            if p.exported_at else "—"
-                        ),
-                    })
-
-                focus_id = st.session_state.rex_focus_id
-                st.session_state.rex_focus_id = ""  # one-shot: only focus once
-
-                _render_numbered_pagination()
-
-                # The return value here isn't merged into rex_selected_ids
-                # again — that already happened at the top of this run
-                # (see _show_list_toolbar above), reading the exact same
-                # underlying session_state["rex_table"] value. Merging
-                # twice would be harmless (idempotent) but redundant.
-                review_table(
-                    rows=table_rows,
-                    columns=_translated_columns(_PRODUCT_TABLE_COLUMNS),
-                    mobile_fields=_PRODUCT_TABLE_MOBILE_FIELDS,
-                    state_key="products",
-                    focus_id=focus_id,
-                    clear_seq=st.session_state.rex_clear_seq,
-                    key="rex_table",
-                )
-                st.caption(T("product_list.column_sort_note"))
-                _render_numbered_pagination(key_prefix="rex_pg_b")
-
-            if st.session_state.rex_export_requested:
-                st.session_state.rex_export_requested = False
-                selected_products = _get_selected_products()
-                if selected_products:
-                    _confirm_export_dialog(selected_products)
-
-            if st.session_state.rex_delete_requested:
-                st.session_state.rex_delete_requested = False
-                selected_products = _get_selected_products()
-                if selected_products:
-                    _confirm_delete_dialog(selected_products)
-
-            if st.session_state.rex_bulk_edit_requested:
-                st.session_state.rex_bulk_edit_requested = False
-                st.session_state.rex_bulkedit_preview = None  # start each open clean
-                selected_products = _get_selected_products()
-                if selected_products:
-                    _confirm_bulk_edit_dialog(selected_products)
-
-            if st.session_state.rex_status_requested:
-                st.session_state.rex_status_requested = False
-                selected_products = _get_selected_products()
-                if selected_products:
-                    _confirm_change_status_dialog(selected_products)
-
-            if st.session_state.rex_translate_requested:
-                st.session_state.rex_translate_requested = False
-                selected_products = _get_selected_products()
-                if selected_products:
-                    _confirm_bulk_translate_dialog(selected_products)
-
-        else:
-            # -------------------------------------------------------- CARD VIEW --
-            esc_value = esc_listener(key="rex_esc")
-            if esc_value is not None and esc_value != st.session_state.rex_last_esc_value:
-                st.session_state.rex_last_esc_value = esc_value
-                st.session_state.rex_open_product_id = None
-                st.rerun()
-
-            pid = st.session_state.rex_open_product_id
-            p = inventory_store.get_product(pid, st.session_state.company_id)
-            if p is None:
-                st.warning(T("product_list.product_not_found"))
-                if st.button(T("common.back_to_list")):
-                    st.session_state.rex_open_product_id = None
-                    st.rerun()
-            else:
-                # Previous/Next only walks the currently-loaded page (~50 rows)
-                # — jumping to another page's products isn't supported from the
-                # card view in this iteration; go back to the list to change page.
-                ordered_ids = st.session_state.rex_current_page_ids or [p.id]
-                if pid not in ordered_ids:
-                    ordered_ids = [pid] + ordered_ids
-                cur_idx = ordered_ids.index(pid)
-
-                nav1, nav2, nav3, nav4 = st.columns([1.3, 1, 1, 1])
-                with nav1:
-                    if st.button(T("common.back_to_list"), use_container_width=True):
-                        st.session_state.rex_open_product_id = None
-                        st.rerun()
-                with nav2:
-                    if st.button(T("product_list.previous_product"), disabled=cur_idx <= 0, use_container_width=True):
-                        st.session_state.rex_open_product_id = ordered_ids[cur_idx - 1]
-                        st.rerun()
-                with nav3:
-                    if st.button(T("product_list.next_product"), disabled=cur_idx >= len(ordered_ids) - 1, use_container_width=True):
-                        st.session_state.rex_open_product_id = ordered_ids[cur_idx + 1]
-                        st.rerun()
-                with nav4:
-                    st.caption(f"{cur_idx + 1} / {len(ordered_ids)}")
-
-                _render_product_card(p)
+                    _delete_category_with_products_dialog(_cat_company_id, _cat_id, _row["name"], _count)
 
 # =========================================================== MANAGE USERS =
 # ================================================================ ORDERS ==
@@ -5658,8 +5792,8 @@ elif page == PAGE_SETTINGS:
         st.error(T("common.admins_only"))
         st.stop()
 
-    tab_integrations, tab_translation, tab_categories = st.tabs(
-        [T("settings.integrations_tab"), T("settings.translation_tab"), T("settings.categories_tab")]
+    tab_integrations, tab_translation = st.tabs(
+        [T("settings.integrations_tab"), T("settings.translation_tab")]
     )
 
     with tab_integrations:
@@ -6319,6 +6453,75 @@ elif page == PAGE_SETTINGS:
                 st.success(T("product_list.saved"))
                 st.rerun()
 
+        def _render_category_mapping_tab(entry, mapping: category_mapping_store.CategoryMapping) -> None:
+            # ElectroGrader's own Category Catalog (Product List -> Product
+            # List Settings -> Categories) is the master list; this tab only
+            # ever maps FROM it onto one external category id per entry —
+            # never the reverse, and never by name/text comparison (see
+            # modules/category_mapping_store.py's docstring). The external
+            # list itself is fetched live on every render, never cached in
+            # ElectroGrader's own DB — a category created on the connected
+            # platform's side shows up here the moment this tab is reopened.
+            external_categories = IntegrationManager.get_external_categories(entry.integration_type, current_user.company_id)
+            if not external_categories:
+                st.info(T("settings.no_external_categories", name=entry.display_name))
+                return
+
+            electrograder_categories = category_store.list_categories(current_user.company_id)
+            if not electrograder_categories:
+                st.info(T("settings.no_electrograder_categories"))
+                return
+
+            st.caption(T("settings.category_mapping_caption", name=entry.display_name))
+
+            external_label_by_id = {c["id"]: c["label"] for c in external_categories}
+            external_id_by_label = {c["label"]: c["id"] for c in external_categories}
+            cat_tree = category_store.build_tree(electrograder_categories)
+            rule_by_category_id = {r.electrograder_category_id: r for r in mapping.rules}
+
+            external_col = f"{entry.display_name} Category"
+            unmapped_placeholder = T("category.pick_placeholder")
+            rows = []
+            for row in cat_tree:
+                rule = rule_by_category_id.get(row["id"])
+                current_label = unmapped_placeholder
+                if rule and rule.external_category_id:
+                    # Prefer the live label (the external category may have
+                    # been renamed since this rule was saved); fall back to
+                    # the label cached at save time, then the raw id, so a
+                    # since-deleted external category still shows AS
+                    # something rather than silently reverting to blank.
+                    current_label = external_label_by_id.get(
+                        rule.external_category_id, rule.external_category_label or rule.external_category_id,
+                    )
+                rows.append({"ElectroGrader Category": row["label"], external_col: current_label})
+
+            df = pd.DataFrame(rows, columns=["ElectroGrader Category", external_col])
+            edited = st.data_editor(
+                df, use_container_width=True, hide_index=True, num_rows="fixed",
+                key=f"category_mapping_editor_{entry.integration_type}",
+                disabled=["ElectroGrader Category"],
+                column_config={
+                    external_col: st.column_config.SelectboxColumn(
+                        options=[unmapped_placeholder] + list(external_label_by_id.values()),
+                    ),
+                },
+            )
+            if st.button(T("settings.save_category_mapping"), key=f"category_mapping_save_{entry.integration_type}", type="primary"):
+                new_rules = []
+                for row, (_, edited_row) in zip(cat_tree, edited.iterrows()):
+                    label = edited_row[external_col]
+                    ext_id = external_id_by_label.get(label, "")
+                    if not ext_id:
+                        continue
+                    new_rules.append(category_mapping_store.CategoryMappingRule(
+                        electrograder_category_id=row["id"], external_category_id=ext_id, external_category_label=label,
+                    ))
+                mapping.rules = new_rules
+                category_mapping_store.upsert_mapping(mapping)
+                st.success(T("settings.category_mapping_saved"))
+                st.rerun()
+
         def _render_sync_ownership_tab(entry) -> None:
             st.caption(T("settings.ownership_caption"))
             source_options = ["electrograder", entry.integration_type, "manual"]
@@ -6567,6 +6770,8 @@ elif page == PAGE_SETTINGS:
                 sync_rules_store.SyncRule(company_id=current_user.company_id, integration_type=open_entry.integration_type)
             mapping = field_mapping_store.get_mapping(current_user.company_id, open_entry.integration_type) or \
                 field_mapping_store.FieldMapping(company_id=current_user.company_id, integration_type=open_entry.integration_type)
+            category_mapping = category_mapping_store.get_mapping(current_user.company_id, open_entry.integration_type) or \
+                category_mapping_store.CategoryMapping(company_id=current_user.company_id, integration_type=open_entry.integration_type)
 
             head1, head2 = st.columns([1, 6])
             with head1:
@@ -6580,8 +6785,9 @@ elif page == PAGE_SETTINGS:
                     st.caption(T("settings.not_connected_yet"))
             st.divider()
 
-            tab_general, tab_sync, tab_mapping, tab_ownership, tab_automation, tab_logs = st.tabs(
+            tab_general, tab_sync, tab_mapping, tab_category_mapping, tab_ownership, tab_automation, tab_logs = st.tabs(
                 [T("settings.tab_general"), T("settings.tab_synchronization"), T("settings.tab_field_mapping"),
+                 T("settings.tab_category_mapping"),
                  T("settings.tab_sync_ownership"), T("settings.tab_automation"), T("settings.tab_logs")]
             )
             with tab_general:
@@ -6593,6 +6799,8 @@ elif page == PAGE_SETTINGS:
                 _render_synchronization_tab(open_entry, rule)
             with tab_mapping:
                 _render_field_mapping_tab(open_entry, mapping)
+            with tab_category_mapping:
+                _render_category_mapping_tab(open_entry, category_mapping)
             with tab_ownership:
                 _render_sync_ownership_tab(open_entry)
             with tab_automation:
@@ -6697,127 +6905,6 @@ elif page == PAGE_SETTINGS:
                 ))
             else:
                 st.caption(T("settings.translation_provider_connected"))
-
-    with tab_categories:
-        _cat_company_id = current_user.company_id
-        st.caption(T("settings.categories_tab_caption"))
-
-        with st.form("company_categories_settings_form"):
-            _auto_save_in = st.checkbox(
-                T("category.auto_save_setting_label"),
-                value=bool(current_company and current_company.auto_save_categories_from_completed),
-                help=T("category.auto_save_setting_help"),
-            )
-            if st.form_submit_button(T("common.save"), type="primary") and current_company:
-                current_company.auto_save_categories_from_completed = _auto_save_in
-                company_store.update_company(current_company)
-                st.success(T("category.settings_saved"))
-                st.rerun()
-
-        st.divider()
-
-        if st.session_state.get("cat_deleted_flash"):
-            st.success(st.session_state.pop("cat_deleted_flash"))
-        if st.session_state.get("cat_new_created_id"):
-            st.session_state.cat_new_created_id = None
-            st.success(T("category.created_success"))
-
-        if st.button(T("category.new_button"), key="cat_top_new_btn"):
-            _create_category_dialog(_cat_company_id, "cat_new_created_id")
-
-        cat_search = st.text_input(
-            T("common.search"), key="cat_search", placeholder=T("category.search_placeholder"),
-        )
-
-        _cat_flat = category_store.build_tree(category_store.list_categories(_cat_company_id))
-        if cat_search.strip():
-            _q = cat_search.strip().lower()
-            _cat_flat = [row for row in _cat_flat if _q in row["label"].lower()]
-
-        if not _cat_flat:
-            st.info(T("category.empty_state"))
-
-        _cat_labels_all, _cat_label_to_id_all, _cat_id_to_label_all, _cat_id_to_name_all = _category_select_options(_cat_company_id)
-
-        for _row in _cat_flat:
-            _cat_id = _row["id"]
-            _count = category_store.count_products_using(_cat_id, _cat_company_id)
-            _indent = "　" * _row["depth"]
-
-            _c_name, _c_add, _c_rename, _c_move, _c_delete = st.columns([5, 1, 1, 1, 1])
-            with _c_name:
-                st.write(f"{_indent}{_row['name']} · {T('category.product_count', count=_count)}")
-            with _c_add:
-                if st.button("➕", key=f"cat_add_{_cat_id}", help=T("category.add_subcategory")):
-                    _create_category_dialog(_cat_company_id, "cat_new_created_id", default_parent_id=_cat_id)
-            with _c_rename:
-                if st.button("✏️", key=f"cat_rename_{_cat_id}", help=T("common.rename")):
-                    st.session_state["cat_renaming_id"] = (
-                        None if st.session_state.get("cat_renaming_id") == _cat_id else _cat_id
-                    )
-                    st.session_state["cat_moving_id"] = None
-                    st.session_state["cat_deleting_id"] = None
-            with _c_move:
-                if st.button("↔️", key=f"cat_move_{_cat_id}", help=T("common.move")):
-                    st.session_state["cat_moving_id"] = (
-                        None if st.session_state.get("cat_moving_id") == _cat_id else _cat_id
-                    )
-                    st.session_state["cat_renaming_id"] = None
-                    st.session_state["cat_deleting_id"] = None
-            with _c_delete:
-                if st.button("🗑️", key=f"cat_delete_{_cat_id}", help=T("common.delete")):
-                    st.session_state["cat_deleting_id"] = _cat_id
-                    st.session_state["cat_renaming_id"] = None
-                    st.session_state["cat_moving_id"] = None
-
-            if st.session_state.get("cat_renaming_id") == _cat_id:
-                with st.form(f"cat_rename_form_{_cat_id}"):
-                    _new_name = st.text_input(T("category.name_label"), value=_row["name"])
-                    if st.form_submit_button(T("common.save"), type="primary"):
-                        try:
-                            category_store.rename_category(_cat_id, _cat_company_id, _new_name.strip())
-                        except ValueError as e:
-                            st.error(str(e))
-                        else:
-                            st.session_state["cat_renaming_id"] = None
-                            st.rerun()
-
-            if st.session_state.get("cat_moving_id") == _cat_id:
-                with st.form(f"cat_move_form_{_cat_id}"):
-                    _move_options = [T("category.no_parent")] + [
-                        l for l in _cat_labels_all if _cat_label_to_id_all[l] != _cat_id
-                    ]
-                    _dest_choice = st.selectbox(T("category.new_parent_label"), _move_options)
-                    if st.form_submit_button(T("common.save"), type="primary"):
-                        _dest_id = "" if _dest_choice == T("category.no_parent") else _cat_label_to_id_all.get(_dest_choice, "")
-                        try:
-                            category_store.move_category(_cat_id, _cat_company_id, _dest_id)
-                        except ValueError as e:
-                            st.error(str(e))
-                        else:
-                            st.session_state["cat_moving_id"] = None
-                            st.rerun()
-
-            if st.session_state.get("cat_deleting_id") == _cat_id:
-                if _count == 0:
-                    st.warning(T("category.confirm_delete_empty", name=_row["name"]))
-                    _dcol1, _dcol2 = st.columns(2)
-                    with _dcol1:
-                        if st.button(T("common.cancel"), key=f"cat_delete_cancel_{_cat_id}"):
-                            st.session_state["cat_deleting_id"] = None
-                            st.rerun()
-                    with _dcol2:
-                        if st.button(T("common.delete"), key=f"cat_delete_confirm_{_cat_id}", type="primary"):
-                            try:
-                                category_store.delete_category(_cat_id, _cat_company_id)
-                            except ValueError as e:
-                                st.error(str(e))
-                            else:
-                                st.session_state["cat_deleting_id"] = None
-                                st.success(T("category.deleted_success", name=_row["name"]))
-                                st.rerun()
-                else:
-                    _delete_category_with_products_dialog(_cat_company_id, _cat_id, _row["name"], _count)
 
 # =========================================================== COMPANIES ===
 elif page == PAGE_COMPANIES:

@@ -131,6 +131,18 @@ class MarketplaceConnector(IntegrationConnector):
         must still render something usable if the live call fails."""
         return dict(self.SUPPORTED_TARGET_FIELDS)
 
+    def get_external_categories(self) -> list:
+        """This platform's own category list, live — [{"id": str,
+        "label": str}, ...] — for the Category Mapping tab's dropdown
+        (see modules/category_mapping_store.py). ALWAYS a fresh call, no
+        caching in ElectroGrader's own database: a category created on
+        the external platform's side must show up here the next time this
+        tab is opened, with no separate sync step. [] (the default) means
+        "this connector doesn't support category mapping yet" — the UI
+        treats that as "nothing to map for this integration", same honest-
+        empty convention as fetch_catalog()/fetch_orders() below."""
+        return []
+
     # Which integrations/field_registry.SYNCABLE_FIELDS keys this
     # connector's payload-building ACTUALLY gates on today — i.e. whose
     # checkbox state in the Synchronization tab has a real effect. Empty in
