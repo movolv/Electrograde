@@ -169,15 +169,21 @@ def get_default_structural_mapping(integration_type: str) -> dict:
 
 
 def get_mappable_source_fields(integration_type: str) -> set:
-    """Field Mapping tab's 'Source field' dropdown source — see
-    MarketplaceConnector.MAPPABLE_SOURCE_FIELDS. Fields NOT in this set have
-    a fixed, hardcoded destination and are deliberately excluded: offering
-    them as a pickable source would be a dead end (see that attribute's
-    docstring)."""
+    """Field Mapping tab's 'Source field' dropdown source — every
+    integrations/field_registry.SYNCABLE_FIELDS key with mappable=True,
+    minus this connector class's own CORE_FIELDS (see
+    MarketplaceConnector.get_mappable_source_fields()'s docstring — same
+    computation, done here at the class level since CORE_FIELDS never
+    depends on a live connection/company, so no connector instance is
+    needed). Fields excluded either way have a fixed, hardcoded
+    destination: offering them as a pickable source would be a dead end."""
+    from integrations import field_registry
+
     connector_cls = CONNECTORS.get(integration_type)
     if connector_cls is None:
         return set()
-    return set(getattr(connector_cls, "MAPPABLE_SOURCE_FIELDS", set()))
+    registry_mappable = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if v.get("mappable")}
+    return registry_mappable - getattr(connector_cls, "CORE_FIELDS", set())
 
 
 def get_implemented_sync_fields(integration_type: str) -> set:

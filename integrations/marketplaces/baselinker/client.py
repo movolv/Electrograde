@@ -197,59 +197,76 @@ def list_extra_fields(token: str) -> list:
 class BaselinkerConnector(MarketplaceConnector):
     integration_type = "baselinker"
 
-    # Static fallback for get_target_fields() below — the two real
-    # top-level BaseLinker fields this module has no default placement
-    # for (unlike name/price/etc. below, nothing sends these unless a
-    # rule targets them). Used when there's no live token to call with
-    # (offline preview, disconnected state) or the API call itself fails.
+    # Static fallback for get_target_fields() below — real top-level
+    # BaseLinker fields this module has a DEFAULT placement for (ean,
+    # weight) or no default placement for at all (condition_id — nothing
+    # sends this unless a rule targets it). Used when there's no live
+    # token to call with (offline preview, disconnected state) or the API
+    # call itself fails. Deliberately does NOT include "category_id" —
+    # that's owned exclusively by the separate Category Mapping feature
+    # (see modules/category_mapping_store.py's _resolve_category_id());
+    # letting a Field Mapping rule also target category_id would let it
+    # silently overwrite what Category Mapping already resolved.
     SUPPORTED_TARGET_FIELDS = {
         "condition_id": "Condition",
-        "category_id": "Category",
+        "ean": "EAN",
+        "weight": "Weight (kg)",
     }
 
-    # The five fields that land in BaseLinker's shared "Information ->
-    # Parameters" block (text_fields["features|<lang>"]) by default — the
-    # ONLY fields made redirectable (see mapper.py's REDIRECTABLE_FIELDS
-    # for exactly why scoped to just these five: everything else — name,
-    # description, price, quantity, weight, box dimensions, sku, EAN's own
-    # top-level placement — keeps its single hardcoded destination
-    # unchanged, same as before this feature existed). Each key here is
-    # one of _apply_field_mapping_rules()'s "features:<field>" targets:
-    # redirecting e.g. "brand" onto its OWN features:brand target is a
-    # deliberate no-op (put it back where it already was), while
-    # redirecting it onto an extra_field_<id> instead moves it out of the
-    # shared Parameters block entirely.
+    # Named per-language text_fields slots ("text:<slot>" — see mapper.py's
+    # _apply_field_mapping_rules) and the shared "Information -> Parameters"
+    # block ("features:<field>", text_fields["features|<lang>"]) — every
+    # SYNCABLE_FIELDS key with a DEFAULT placement inside one of these two
+    # shared blocks. Redirecting a field e.g. onto its OWN
+    # "features:brand"/"text:description" target is a deliberate no-op
+    # (put it back where it already was); redirecting onto an
+    # extra_field_<id> instead moves it out of the shared block entirely.
     STRUCTURAL_TARGET_FIELDS = {
         "features:brand": "Parameters → Brand",
         "features:model": "Parameters → Model",
         "features:product_condition": "Parameters → Condition",
         "features:color": "Parameters → Color",
         "features:power": "Parameters → Power",
+        "text:description": "Description",
+        "text:description_extra1": "Additional Description",
     }
 
-    # integrations/field_registry.SYNCABLE_FIELDS key -> the
-    # STRUCTURAL_TARGET_FIELDS key it lands at TODAY with no rule saved —
-    # used ONLY to pre-fill the Field Mapping tab's editable table with
-    # "what's already happening" as ordinary, changeable rows the first
-    # time a company opens it (see app.py's _render_field_mapping_tab),
-    # not to drive mapper.py itself (that still has its own hardcoded
-    # defaults, unconditionally correct with zero saved rules — see that
-    # module's docstring on why: a company who never opens this tab must
-    # see ZERO behavior change).
+    # integrations/field_registry.SYNCABLE_FIELDS key -> the target-field
+    # key (STRUCTURAL_TARGET_FIELDS or SUPPORTED_TARGET_FIELDS) it lands
+    # at TODAY with no rule saved — used ONLY to pre-fill the Field
+    # Mapping tab's editable table with "what's already happening" as
+    # ordinary, changeable rows the first time a company opens it (see
+    # app.py's _render_field_mapping_tab), not to drive mapper.py itself
+    # (that still has its own hardcoded defaults, unconditionally correct
+    # with zero saved rules — see that module's docstring on why: a
+    # company who never opens this tab must see ZERO behavior change).
+    # "defects" has no entry: it has no default placement at all today
+    # (nothing sends it unless a rule explicitly maps it) — see mapper.py.
     DEFAULT_STRUCTURAL_MAPPING = {
         "brand": "features:brand",
         "model": "features:model",
         "product_condition": "features:product_condition",
         "color": "features:color",
         "power": "features:power",
+        "product_description": "text:description",
+        "condition_description": "text:description_extra1",
+        "barcode": "ean",
+        "weight_kg": "weight",
     }
 
-    # The same set as mapper.REDIRECTABLE_FIELDS, referenced directly
-    # rather than duplicated — see that module for why exactly these five
-    # and not, say, price/quantity/name. Filters the Field Mapping tab's
-    # "Source field" dropdown down to fields that actually go somewhere
-    # reconfigurable (see MarketplaceConnector.MAPPABLE_SOURCE_FIELDS).
-    MAPPABLE_SOURCE_FIELDS = mapper.REDIRECTABLE_FIELDS
+    # "name" is the one field_registry.SYNCABLE_FIELDS entry (mappable=True
+    # at the registry level) that THIS connector still keeps core: BaseLinker
+    # rejects the whole addInventoryProduct call if the account's default
+    # catalog language has no name, and build_payload() duplicates it under
+    # `primary_language` specifically to guarantee that — a mandatory-field
+    # + dual-language-fallback coupling no other field carries, and specific
+    # to BaseLinker's own validation behavior, not a universal ElectroGrader
+    # rule (see MarketplaceConnector.CORE_FIELDS' docstring). See
+    # get_mappable_source_fields() (inherited, unchanged) for how this
+    # combines with field_registry's own registry-level exclusions
+    # (sku/price/quantity/image_paths/category) to produce the Field
+    # Mapping tab's actual "Source field" list.
+    CORE_FIELDS = {"name"}
 
     def get_target_fields(self) -> dict:
         """STRUCTURAL_TARGET_FIELDS + SUPPORTED_TARGET_FIELDS, extended
@@ -329,6 +346,7 @@ class BaselinkerConnector(MarketplaceConnector):
             language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
             primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
+                redirectable_fields=self.get_mappable_source_fields(),
         )
         wants_images = fields_send is None or "image_paths" in fields_send
         payload["_preview_image_count"] = len(product.image_paths) if wants_images and product.image_paths else 0
@@ -519,6 +537,7 @@ class BaselinkerConnector(MarketplaceConnector):
                 language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
                 primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
+                redirectable_fields=self.get_mappable_source_fields(),
             )
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
@@ -540,6 +559,7 @@ class BaselinkerConnector(MarketplaceConnector):
                 language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
                 primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
+                redirectable_fields=self.get_mappable_source_fields(),
             )
             if "text_fields" in payload:
                 payload["text_fields"] = self._merge_text_fields(external_id, payload["text_fields"], config)

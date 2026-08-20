@@ -107,18 +107,31 @@ class MarketplaceConnector(IntegrationConnector):
     # SUPPORTED_TARGET_FIELDS above.
     DEFAULT_STRUCTURAL_MAPPING: dict = {}
 
-    # integrations/field_registry.SYNCABLE_FIELDS keys allowed as a Field
-    # Mapping rule's "Source field" — i.e. fields that actually GO
-    # somewhere reconfigurable (see DEFAULT_STRUCTURAL_MAPPING above).
-    # Every SYNCABLE_FIELDS key NOT in this set has a fixed, hardcoded
-    # destination on both sides of the mapping (this connector's own
-    # payload-building AND — since a hardcoded ElectroGrader field has
-    # nowhere reconfigurable to be redirected TO either — the "Target
-    # field" dropdown), so offering it as a pickable source would be a
-    # dead end: picking it and choosing any target would either do
-    # nothing or silently duplicate what's already sent. Empty in the
-    # base class, same reasoning as SUPPORTED_TARGET_FIELDS above.
-    MAPPABLE_SOURCE_FIELDS: set = set()
+    # Additional SYNCABLE_FIELDS keys THIS connector's own payload-building
+    # has special/mandatory coupling for, on top of the registry-level
+    # exclusions already baked into field_registry.SYNCABLE_FIELDS's
+    # `mappable=False` (sku/price/quantity/image_paths/category — those
+    # are universal across any marketplace connector, never overridden
+    # here). Empty in the base class: a field only belongs here when THIS
+    # SPECIFIC platform's API has a real technical reason a rule can't
+    # safely redirect it (see BaselinkerConnector.CORE_FIELDS for the one
+    # concrete example — "name" — and why). Every excluded field must be
+    # documented with its specific reason at the point it's added; this
+    # set must never be used just to avoid exposing something in the UI.
+    CORE_FIELDS: set = set()
+
+    def get_mappable_source_fields(self) -> set:
+        """Field Mapping tab's "Source field" dropdown source — every
+        field_registry.SYNCABLE_FIELDS key with mappable=True, minus this
+        connector's own CORE_FIELDS. Dynamic by construction: a new
+        SYNCABLE_FIELDS entry with mappable=True appears here (and so in
+        the UI) automatically, with zero code change required anywhere in
+        this file or a concrete connector — see the approved dynamic
+        Field Mapping redesign."""
+        from integrations import field_registry
+
+        registry_mappable = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if v.get("mappable")}
+        return registry_mappable - self.CORE_FIELDS
 
     def get_target_fields(self) -> dict:
         """Instance-level counterpart to SUPPORTED_TARGET_FIELDS, for

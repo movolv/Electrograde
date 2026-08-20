@@ -14,22 +14,37 @@ IMPLEMENTED_SYNC_FIELDS / DEFAULT_SYNC_FIELDS in integrations/base.py.
 """
 
 SYNCABLE_FIELDS = {
-    "name": {"label": "Product title", "type": "text"},
-    "brand": {"label": "Brand", "type": "text"},
-    "model": {"label": "Model", "type": "text"},
-    "product_description": {"label": "Description", "type": "text"},
-    "condition_description": {"label": "Additional description", "type": "text"},
-    "defects": {"label": "Defects", "type": "list"},
-    "product_condition": {"label": "Product Condition", "type": "text"},
-    "color": {"label": "Color", "type": "text"},
-    "power": {"label": "Power", "type": "text"},
-    "image_paths": {"label": "Images", "type": "images"},
-    "price": {"label": "Price", "type": "number"},
-    "quantity": {"label": "Quantity", "type": "number"},
-    "weight_kg": {"label": "Weight (kg)", "type": "number"},
-    "sku": {"label": "SKU", "type": "identifier"},
-    "category": {"label": "Category", "type": "text"},
-    "barcode": {"label": "Barcode", "type": "identifier"},
+    # `mappable` (added for the dynamic Field Mapping redesign — see
+    # integrations/base.py's MarketplaceConnector.get_mappable_source_fields()
+    # and integrations/marketplaces/baselinker/mapper.py's docstring):
+    # whether this field COULD ever be a Field Mapping "Source field", at
+    # the registry (cross-connector) level. False here means every
+    # marketplace integration needs special structural handling for this
+    # field (an identity key, a media pipeline, a keyed sub-structure tied
+    # to per-account config, or — for "category" — an entirely separate,
+    # dedicated mapping feature, see modules/category_mapping_store.py) —
+    # never a plain "redirect this to another named field" candidate. A
+    # concrete connector MAY further narrow True down (see
+    # BaselinkerConnector.CORE_FIELDS for e.g. "name", a BaseLinker-
+    # specific mandatory-field/primary-language-fallback coupling that
+    # doesn't apply to every platform), but never widen a False here back
+    # to mappable — this registry's False is a floor, not a suggestion.
+    "name": {"label": "Product title", "type": "text", "mappable": True},
+    "brand": {"label": "Brand", "type": "text", "mappable": True},
+    "model": {"label": "Model", "type": "text", "mappable": True},
+    "product_description": {"label": "Description", "type": "text", "mappable": True},
+    "condition_description": {"label": "Additional description", "type": "text", "mappable": True},
+    "defects": {"label": "Defects", "type": "list", "mappable": True},
+    "product_condition": {"label": "Product Condition", "type": "text", "mappable": True},
+    "color": {"label": "Color", "type": "text", "mappable": True},
+    "power": {"label": "Power", "type": "text", "mappable": True},
+    "image_paths": {"label": "Images", "type": "images", "mappable": False},  # media pipeline, not a field placement
+    "price": {"label": "Price", "type": "number", "mappable": False},  # tied to a per-account price_group_id, not a named field
+    "quantity": {"label": "Quantity", "type": "number", "mappable": False},  # tied to a per-account warehouse_id, not a named field
+    "weight_kg": {"label": "Weight (kg)", "type": "number", "mappable": True},
+    "sku": {"label": "SKU", "type": "identifier", "mappable": False},  # identity/dedup key, never redirectable
+    "category": {"label": "Category", "type": "text", "mappable": False},  # owned by Category Mapping, not Field Mapping
+    "barcode": {"label": "Barcode", "type": "identifier", "mappable": True},
 }
 
 RECEIVABLE_FIELDS = {

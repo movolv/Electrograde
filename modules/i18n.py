@@ -971,10 +971,15 @@ TRANSLATIONS: dict = {
         "en": "Map ElectroGrader data onto this integration's technical fields. One active configuration per integration.",
         "lv": "Sasaisti ElectroGrader datus ar šīs integrācijas tehniskajiem laukiem. Viena aktīva konfigurācija katrai integrācijai.",
     },
-    "settings.search_mapping_rules": {"en": "🔍 Search mapping rules...", "lv": "🔍 Meklēt sasaistes noteikumus..."},
-
-    "settings.clear_search_to_edit": {"en": "Clear the search box to edit and save mappings.", "lv": "Notīri meklēšanas lauku, lai rediģētu un saglabātu sasaistes."},
     "settings.save_field_mapping": {"en": "💾 Save field mapping", "lv": "💾 Saglabāt lauku sasaisti"},
+    "settings.not_mapped_placeholder": {"en": "— Not mapped —", "lv": "— Nav sasaistīts —"},
+    "settings.mapping_conflict": {
+        "en": "Mapping conflict: {sources} all target \"{target}\" — a field can only receive one value. Pick a different target for all but one.",
+        "lv": "Sasaistes konflikts: {sources} visi mērķē uz \"{target}\" — viens lauks var saņemt tikai vienu vērtību. Izvēlies citu mērķi visiem, izņemot vienu.",
+    },
+    "category.unknown_field": {"en": "⚠ Unknown ({key})", "lv": "⚠ Nezināms ({key})"},
+    "category.status_mapped": {"en": "Mapped", "lv": "Sasaistīts"},
+    "category.status_not_mapped": {"en": "Not mapped", "lv": "Nav sasaistīts"},
     "settings.tab_category_mapping": {"en": "🔗 Category Mapping", "lv": "🔗 Kategoriju sasaiste"},
     "settings.no_external_categories": {
         "en": "No categories found on {name}'s side yet — check the connection, or create one there first.",

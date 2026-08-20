@@ -28,23 +28,16 @@ MAX_IMAGE_BASE64_BYTES = 2 * 1024 * 1024  # BaseLinker's documented cap
 # row BEFORE calling build_payload(); this module never translates or
 # looks anything up itself, only places already-resolved strings.
 
-# The only fields a saved Settings -> Field Mapping rule is allowed to
-# redirect away from their default spot — the five that land in
-# BaseLinker's shared "Information -> Parameters" block
-# (text_fields["features|<lang>"]) by default, see
-# BaselinkerConnector.STRUCTURAL_TARGET_FIELDS. Deliberately scoped to
-# just these five: name/description/price/quantity/weight/box dimensions/
-# sku/EAN's own top-level placement all keep their one hardcoded
-# destination unchanged, exactly as before this feature existed.
-#
-# Public (no leading underscore) so BaselinkerConnector.MAPPABLE_SOURCE_FIELDS
-# (client.py) can reference this SAME set directly rather than keeping a
-# second, easily-drifting copy — it's also what the Field Mapping tab's
-# "Source field" dropdown is filtered down to (see app.py's
-# _render_field_mapping_tab), on the same reasoning as the target side:
-# a hardcoded field has nowhere else to go, so offering it as a pickable
-# source is a dead end regardless of which side of the mapping it's on.
-REDIRECTABLE_FIELDS = {"brand", "model", "product_condition", "color", "power"}
+# Which SYNCABLE_FIELDS keys a saved Settings -> Field Mapping rule is
+# allowed to redirect away from their default spot is no longer a
+# hardcoded constant here — it's passed in per-call as
+# `redirectable_fields` (see build_payload() below), computed by the
+# CALLER from BaselinkerConnector.get_mappable_source_fields() (itself
+# derived from integrations/field_registry.SYNCABLE_FIELDS's `mappable`
+# flag, minus this connector's own CORE_FIELDS) — see the approved
+# dynamic Field Mapping redesign. mapper.py stays fully DB-free/pure:
+# it never imports field_registry or reaches for a connector itself,
+# only ever acts on whatever set the caller hands it.
 
 
 def encode_image(path: str, max_base64_bytes: int = MAX_IMAGE_BASE64_BYTES) -> str:
@@ -75,6 +68,7 @@ def build_payload(
     primary_language: str = "", primary_title: str = "", primary_description: str = "",
     primary_condition_description: str = "", color: str = "",
     field_mapping_rules: Optional[list] = None,
+    redirectable_fields: Optional[Set[str]] = None,
 ) -> dict:
     """Builds the addInventoryProduct parameters for one Product.
 
@@ -95,11 +89,10 @@ def build_payload(
     here. `sku` is deliberately never gated — it's a structural product
     identifier (used for BaseLinker's own SKU-fallback matching and our
     de-dup logic), not optional content, so it's always sent regardless of
-    `fields_send`. brand/model/product_condition/color/power all land in
-    `text_fields["features|{language}"]` (BaseLinker's "Information ->
-    Parameters" section) — see the `features` dict built below.
-    category/defects still have no destination here — nothing to gate for
-    those yet, see BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS.
+    `fields_send`. "category" has no destination here at all — it's owned
+    exclusively by the separate Category Mapping feature, resolved into
+    `config["category_id"]` before this function is ever called (see
+    BaselinkerConnector._resolve_category_id()).
 
     `field_mapping_rules` (default None -> no-op, unchanged behavior) is a
     plain list of modules.field_mapping_store.FieldMappingRule — this stays
@@ -107,33 +100,49 @@ def build_payload(
     resolves the company's saved Settings -> Field Mapping rules and passes
     them in as data, same pattern as `title`/`description`/etc.
 
+    `redirectable_fields` (default None -> treated as empty, nothing
+    redirectable) is the set of SYNCABLE_FIELDS keys THIS connector
+    currently allows a rule to fully redirect — computed by the caller via
+    BaselinkerConnector.get_mappable_source_fields() (itself derived from
+    integrations/field_registry.SYNCABLE_FIELDS's `mappable` flag; see the
+    approved dynamic Field Mapping redesign). This function never
+    hardcodes which fields those are — it only ever asks "is this
+    field_key IN the set the caller gave me", so it stays correct as that
+    set grows without needing its own changes.
+
     A rule with an empty `source_value` (a "redirect", not a value
-    translation) on one of REDIRECTABLE_FIELDS SKIPS that field's default
-    Parameters-block placement below entirely — the rule fully owns where
+    translation) on a field_key IN `redirectable_fields` SKIPS that
+    field's default placement below entirely — the rule fully owns where
     it goes instead, applied at the very end by
-    _apply_field_mapping_rules(). Without this, "remapping" brand/model/
-    condition/color/power in Settings -> Field Mapping would just add a
-    second copy at the new location while the old Parameters entry kept
-    showing it too, which is not what a user asking to move a field
-    expects. A value-specific rule (non-empty source_value) never
-    suppresses the default — it only adds an extra placement for that one
-    matching value, leaving every other value exactly where it already
-    was. Every OTHER field (name, description, price, quantity, weight,
-    box dimensions, sku, barcode) ignores field_mapping_rules entirely for
-    its own default placement — only a rule's presence in the "additive,
-    same spot as always" sense (value-specific) can add a second copy
-    elsewhere for those.
+    _apply_field_mapping_rules(). Without this, "remapping" a field in
+    Settings -> Field Mapping would just add a second copy at the new
+    location while the old default entry kept showing it too, which is
+    not what a user asking to move a field expects. A value-specific rule
+    (non-empty source_value) never suppresses the default — it only adds
+    an extra placement for that one matching value, leaving every other
+    value exactly where it already was. Every field NOT in
+    `redirectable_fields` (name, price, quantity, box dimensions, sku,
+    image_paths, category) ignores redirects entirely for its own default
+    placement — only a rule's presence in the "additive, same spot as
+    always" sense (value-specific) can add a second copy elsewhere for
+    those, and "sku" additionally refuses ANY rule outright (see
+    _apply_field_mapping_rules).
     """
     redirects = {r.source_field for r in (field_mapping_rules or []) if r.source_field and not r.source_value}
+    redirectable = redirectable_fields or set()
 
     def _wanted(field_key: str) -> bool:
         return fields_send is None or field_key in fields_send
 
-    def _feature_wanted(field_key: str) -> bool:
-        """Gate for the five Parameters-block fields specifically: both the
+    def _default_wanted(field_key: str) -> bool:
+        """Gate for a redirectable field's OWN default placement: both the
         existing Synchronization on/off check AND "no rule has fully
-        redirected this field elsewhere"."""
-        return _wanted(field_key) and field_key not in redirects
+        redirected this field elsewhere". A field outside
+        `redirectable_fields` can never appear in `redirects` in a way
+        that matters here (nothing in the UI lets a rule target one), so
+        this is a safe no-op gate for those — equivalent to plain
+        `_wanted`."""
+        return _wanted(field_key) and not (field_key in redirectable and field_key in redirects)
 
     payload = {
         "inventory_id": config["inventory_id"],
@@ -143,11 +152,11 @@ def build_payload(
     }
 
     text_fields = {}
-    if _wanted("name"):
+    if _wanted("name"):  # never redirectable — see CORE_FIELDS
         text_fields[f"name|{language}"] = title or product.model_number or product.sku
-    if _wanted("product_description"):
+    if _default_wanted("product_description"):
         text_fields[f"description|{language}"] = description or ""
-    if _wanted("condition_description") and condition_description:
+    if _default_wanted("condition_description") and condition_description:
         label = field_labels_i18n.label("condition_scratches_details", language)
         text_fields[f"description_extra1|{language}"] = f"{label}: {condition_description}"
 
@@ -164,9 +173,9 @@ def build_payload(
     if primary_language and primary_language != language:
         if _wanted("name"):
             text_fields[f"name|{primary_language}"] = primary_title or product.model_number or product.sku
-        if _wanted("product_description"):
+        if _default_wanted("product_description"):
             text_fields[f"description|{primary_language}"] = primary_description or ""
-        if _wanted("condition_description") and primary_condition_description:
+        if _default_wanted("condition_description") and primary_condition_description:
             primary_label = field_labels_i18n.label("condition_scratches_details", primary_language)
             text_fields[f"description_extra1|{primary_language}"] = (
                 f"{primary_label}: {primary_condition_description}"
@@ -188,26 +197,27 @@ def build_payload(
     # field_labels_i18n dict — the VALUES below (product.brand, product.power,
     # etc.) are read straight off Product, exactly as always, never
     # translated by anything. brand/model/product_condition/color/power use
-    # `_feature_wanted` (not plain `_wanted`) since these five specifically
-    # can be redirected out of this block entirely — see
-    # REDIRECTABLE_FIELDS above. barcode's Parameters entry stays
-    # unconditional (`_wanted`, not `_feature_wanted`): only its own
-    # top-level `ean` placement below is the "real" barcode field, this is
-    # just a convenience copy, and was never in scope to redirect.
+    # `_default_wanted` (not plain `_wanted`) since these are redirectable
+    # out of this block entirely — see `redirectable_fields`/`redirects`
+    # above. barcode's Parameters entry stays unconditional (`_wanted`, not
+    # `_default_wanted`): only its own top-level `ean` placement below is
+    # the "real" barcode field a rule can redirect; this Parameters copy is
+    # just a convenience duplicate BaseLinker also shows there, unaffected
+    # by where the "real" placement goes.
     features = {}
-    if _feature_wanted("brand") and product.brand:
+    if _default_wanted("brand") and product.brand:
         features[field_labels_i18n.label("brand", language)] = product.brand
-    if _feature_wanted("model") and product.model:
+    if _default_wanted("model") and product.model:
         features[field_labels_i18n.label("model", language)] = product.model
-    if _feature_wanted("product_condition") and product.product_condition:
+    if _default_wanted("product_condition") and product.product_condition:
         features[field_labels_i18n.label("product_condition", language)] = product.product_condition
-    if _feature_wanted("color") and color:
+    if _default_wanted("color") and color:
         # Deliberate exception to "parameter values are never translated"
         # (see the docstring above and modules/translation_service.py) —
         # `color` is resolved by the caller (client.py's
         # _resolve_export_content()), already in the export `language`.
         features[field_labels_i18n.label("color", language)] = color
-    if _feature_wanted("power") and product.power:
+    if _default_wanted("power") and product.power:
         features[field_labels_i18n.label("power", language)] = product.power
     if _wanted("barcode") and ean:
         features[field_labels_i18n.label("barcode", language)] = ean
@@ -217,7 +227,7 @@ def build_payload(
     if text_fields:
         payload["text_fields"] = text_fields
 
-    if _wanted("barcode") and ean:
+    if _default_wanted("barcode") and ean:
         payload["ean"] = ean
 
     if _wanted("price") and config.get("price_group_id") and product.price:
@@ -239,7 +249,7 @@ def build_payload(
     # editable afterward regardless of origin — see modules/models.py).
     # manifest_weight_kg itself is deliberately never sent: it's an
     # unverified manifest claim, same reasoning as quantity vs. manifest_qty.
-    if _wanted("weight_kg") and product.weight_kg:
+    if _default_wanted("weight_kg") and product.weight_kg:
         payload["weight"] = product.weight_kg
 
     if _wanted("image_paths") and include_images and product.image_paths:
@@ -259,28 +269,36 @@ def _apply_field_mapping_rules(
     payload: dict, text_fields: dict, product, rules: list, language: str,
 ) -> None:
     """Overlays a company's saved Settings -> Field Mapping rules on top of
-    the default payload already built above — lets a company redirect
-    brand/model/product_condition/color/power onto ITS OWN BaseLinker
-    target (a specific extra_field_<id>, confirmed via
+    the default payload already built above — lets a company redirect any
+    field_registry.SYNCABLE_FIELDS entry with mappable=True (minus this
+    connector's own CORE_FIELDS — see get_mappable_source_fields()) onto
+    ITS OWN BaseLinker target (a specific extra_field_<id>, confirmed via
     BaselinkerConnector.get_target_fields() against a real account's
-    getInventoryExtraFields, or one of the two static top-level fields
-    this module has no default placement for: condition_id/category_id)
-    and/or translate a specific value (e.g. product_condition "B" ->
-    "Ļoti labs"). Deliberately applied LAST: a matching rule always wins
-    over whatever this module already placed by default.
+    getInventoryExtraFields; a named per-language text slot; the shared
+    Parameters block; or one of the remaining static top-level fields this
+    module has no default placement for, e.g. condition_id) and/or
+    translate a specific value (e.g. product_condition "B" -> "Ļoti
+    labs"). Deliberately applied LAST: a matching rule always wins over
+    whatever this module already placed by default. Fully generic over
+    `rule.source_field` — this function itself never hardcodes which
+    fields are allowed; that's enforced upstream by what the Field Mapping
+    UI ever lets a company save a rule for in the first place (see
+    app.py's _render_field_mapping_tab).
 
     A rule with source_value == "" matches the field regardless of its
-    current value — a pure redirect (its default Parameters-block
-    placement was already skipped above via `redirects`, see
-    build_payload() — only applies to brand/model/product_condition/
-    color/power; every other field ignores redirects entirely, see
-    REDIRECTABLE_FIELDS). A non-empty source_value only applies when the
+    current value — a pure redirect (its default placement, if it had
+    one, was already skipped above via `redirects`/`_default_wanted`, see
+    build_payload() — only matters for fields in `redirectable_fields`;
+    a field with no default placement at all, e.g. "defects", has nothing
+    to skip either way). A non-empty source_value only applies when the
     field's actual current value equals it exactly — a value translation
     for that one specific value, leaving every other value on that field
     to whatever a DIFFERENT rule (or the default placement) already gave
     it. "sku" redirects are always refused (BaseLinker's own de-dup/SKU-
     fallback matching depends on it always landing at the top-level "sku"
-    key — see BaselinkerConnector._find_existing_by_sku()).
+    key — see BaselinkerConnector._find_existing_by_sku()) — this is the
+    one field-specific exception left in this function, since it's a
+    structural identity guarantee, not a mapping preference.
 
     List-valued fields (e.g. defects) are joined with "; " — BaseLinker's
     text fields are plain strings, there's no native list type to hand
@@ -293,9 +311,14 @@ def _apply_field_mapping_rules(
     product_condition/color/power point at, e.g. "features:brand", so
     saving them unchanged is a genuine no-op back to the same spot they
     already occupy) writes into the SAME shared Parameters block as the
-    default placement above, under that field's own i18n label; any other
-    target_field (condition_id, category_id, or any future top-level key)
-    is written directly onto the top-level payload dict."""
+    default placement above, under that field's own i18n label; one
+    starting with "text:" (e.g. "text:description",
+    "text:description_extra1" — product_description's/
+    condition_description's own default slots) writes into `text_fields`
+    under that exact BaseLinker text_fields key, same "no rule = no
+    change" no-op reasoning as "features:"; any other target_field
+    (condition_id, ean, weight, or any future plain top-level key) is
+    written directly onto the top-level payload dict."""
     for rule in rules:
         if not rule.source_field or not rule.target_field or rule.source_field == "sku":
             continue
@@ -316,5 +339,8 @@ def _apply_field_mapping_rules(
             label_field = target.split(":", 1)[1]
             label = field_labels_i18n.label(label_field, language)
             text_fields.setdefault(f"features|{language}", {})[label] = value
+        elif target.startswith("text:"):
+            slot = target.split(":", 1)[1]
+            text_fields[f"{slot}|{language}"] = value
         else:
             payload[target] = value

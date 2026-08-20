@@ -6340,118 +6340,145 @@ elif page == PAGE_SETTINGS:
                 st.rerun()
 
         def _render_field_mapping_tab(entry, mapping: field_mapping_store.FieldMapping) -> None:
-            # company_id lets this pull the connector's LIVE target fields
-            # (e.g. BaseLinker's own custom "extra fields" for this specific
-            # account) instead of only the static condition_id/category_id
-            # pair every company used to be limited to — see
-            # IntegrationManager.get_supported_target_fields()'s docstring.
+            # Both sides are discovered dynamically every render — never a
+            # hardcoded field list (see the approved dynamic Field Mapping
+            # redesign):
+            #  - source_fields: every integrations/field_registry.
+            #    SYNCABLE_FIELDS key with mappable=True, minus this
+            #    connector's own CORE_FIELDS (IntegrationManager.
+            #    get_mappable_source_fields()) — add a new mappable
+            #    ElectroGrader field to the registry and it appears here
+            #    with zero changes to this function.
+            #  - target_fields: this connector's LIVE target-field list
+            #    (IntegrationManager.get_supported_target_fields(),
+            #    company_id-scoped — e.g. BaseLinker's own custom "extra
+            #    fields" for this specific account, fetched fresh) — a new
+            #    field appearing on the external platform's side shows up
+            #    here the next time this tab opens, same live-no-caching
+            #    principle as Category Mapping.
+            mappable_source_keys = IntegrationManager.get_mappable_source_fields(entry.integration_type)
             target_fields = IntegrationManager.get_supported_target_fields(
                 entry.integration_type, company_id=current_user.company_id,
             )
-            if not target_fields:
+            if not mappable_source_keys or not target_fields:
                 st.info(T("settings.no_mappable_fields", name=entry.display_name))
                 return
 
-            # Every rule shown here IS applied to every real payload this
+            # Every mapping shown here IS applied to every real payload this
             # connector builds (create/update/preview/single-field Sync
             # Queue push) — see BaselinkerConnector._field_mapping_rules()
             # and mapper._apply_field_mapping_rules(), applied last so a
-            # matching rule always wins over anything else.
+            # saved mapping always wins over the connector's own default
+            # placement. An unmapped field is simply never redirected — it
+            # keeps whatever default placement it already had (most fields)
+            # or, for a field with no default at all (e.g. "defects"), it
+            # is not sent through this mechanism at all.
             st.caption(T("settings.field_mapping_caption"))
-            search = st.text_input(T("settings.search_mapping_rules"), key=f"mapping_search_{entry.integration_type}")
 
-            # The table shows/edits human labels ("Brand" / "Marka"), never
-            # the raw technical keys ("brand" / "extra_field_23311") saved
-            # underneath — a raw extra_field_<id> key told the user nothing
-            # about which of THEIR OWN fields a row actually pointed at,
-            # which is the exact "kas ar ko ir samapots" (what's mapped to
-            # what) legibility this table exists for. Both label sets are
-            # already unique (checked: no two SYNCABLE_FIELDS or
-            # get_target_fields() entries share a label), so label<->key is
-            # safe to round-trip through unambiguously.
-            #
-            # "Source field" is further filtered down to
-            # get_mappable_source_fields() — fields with a fixed, hardcoded
-            # destination (name, price, quantity, weight, sku, etc.) have
-            # nowhere reconfigurable to be picked as a source FOR either,
-            # so offering them here would be a dead end, same reasoning as
-            # the target side already had.
-            mappable_source_keys = IntegrationManager.get_mappable_source_fields(entry.integration_type)
             source_label_by_key = {k: v for k, v in _SYNC_FIELDS_SENT if k in mappable_source_keys}
-            source_key_by_label = {v: k for k, v in source_label_by_key.items()}
-            target_key_by_label = {v: k for k, v in target_fields.items()}
+            unmapped_placeholder = T("settings.not_mapped_placeholder")
 
-            if mapping.rules:
-                rule_rows = [
-                    {
-                        "Source field": source_label_by_key.get(r.source_field, r.source_field),
-                        "Source value": r.source_value,
-                        "Target field": target_fields.get(r.target_field, r.target_field),
-                        "Target value": r.target_value,
-                        "Target label": r.target_label,
-                    }
-                    for r in mapping.rules
-                ]
-            else:
-                # Nothing saved yet for this company — rather than an empty
-                # table (which hid, in code only, that most fields were
-                # already being sent somewhere) or a separate read-only
-                # section, pre-fill with what mapper.py's own hardcoded
-                # defaults do TODAY as ordinary, EDITABLE rows. Purely a
-                # live preview: nothing is written to field_mapping_store
-                # until the user presses Save below — a company that never
-                # touches this tab keeps relying on mapper.py's own
-                # defaults, unaffected by anything here (see
-                # DEFAULT_STRUCTURAL_MAPPING's docstring). The moment Save
-                # is pressed, these become real, individually re-mappable
-                # rules like any other.
-                default_mapping = IntegrationManager.get_default_structural_mapping(entry.integration_type)
-                rule_rows = [
-                    {
-                        "Source field": source_label_by_key.get(source_key, source_key),
-                        "Source value": "",
-                        "Target field": target_fields.get(target_key, target_key),
-                        "Target value": "",
-                        "Target label": "",
-                    }
-                    for source_key, target_key in default_mapping.items()
-                ]
+            # Exactly one PURE redirect rule (source_value == "") per
+            # source field is what this table manages — value-specific
+            # overrides (a rule with a non-empty source_value, e.g.
+            # translating one specific product_condition value) are a
+            # separate, older mechanism this simplified table doesn't
+            # expose an editor for, but preserves untouched on Save (see
+            # below) so nothing a company already configured is silently
+            # destroyed.
+            pure_rule_by_source = {r.source_field: r for r in mapping.rules if r.source_field and not r.source_value}
+            value_specific_rules = [r for r in mapping.rules if r.source_value]
+            default_mapping = IntegrationManager.get_default_structural_mapping(entry.integration_type)
 
-            df = pd.DataFrame(
-                rule_rows,
-                columns=["Source field", "Source value", "Target field", "Target value", "Target label"],
-            )
+            def _target_label(target_key: str) -> str:
+                if not target_key:
+                    return unmapped_placeholder
+                if target_key in target_fields:
+                    return target_fields[target_key]
+                return T("category.unknown_field", key=target_key)
 
-            q = search.strip().lower()
-            if q:
-                mask = df.apply(lambda row: q in " ".join(str(v) for v in row).lower(), axis=1)
-                st.dataframe(df[mask], use_container_width=True, hide_index=True)
-                st.caption(T("settings.clear_search_to_edit"))
-                return
+            rows = []
+            row_source_keys = []
+            for source_key, label in source_label_by_key.items():
+                rule = pure_rule_by_source.get(source_key)
+                if rule is not None:
+                    target_key = rule.target_field
+                else:
+                    target_key = default_mapping.get(source_key, "")
+                rows.append({
+                    "ElectroGrader field": label,
+                    "BaseLinker field": _target_label(target_key),
+                    "Status": T("category.status_mapped") if target_key else T("category.status_not_mapped"),
+                })
+                row_source_keys.append(source_key)
 
+            # Orphaned rows: a rule saved for a source field that's no
+            # longer mappable today (e.g. it became core, or was renamed —
+            # see the approved redesign's backward-compat requirement).
+            # Never silently dropped — shown as its own flagged row so an
+            # admin can see and clear it explicitly; simply omitting it
+            # from the edited table on Save (see below) removes it for
+            # real, same as clearing any other row.
+            for source_key, rule in pure_rule_by_source.items():
+                if source_key in mappable_source_keys:
+                    continue
+                rows.append({
+                    "ElectroGrader field": T("category.unknown_field", key=source_key),
+                    "BaseLinker field": _target_label(rule.target_field),
+                    "Status": T("category.status_not_mapped") if not rule.target_field else T("category.status_mapped"),
+                })
+                row_source_keys.append(source_key)
+
+            target_options = [unmapped_placeholder] + list(target_fields.values())
+            # Preserve a stale/unknown target label as a selectable option
+            # too (rather than a value the SelectboxColumn would silently
+            # reject) — so an unavailable target round-trips through Save
+            # unchanged unless the admin explicitly picks something else.
+            for row in rows:
+                if row["BaseLinker field"] not in target_options:
+                    target_options.append(row["BaseLinker field"])
+
+            df = pd.DataFrame(rows, columns=["ElectroGrader field", "BaseLinker field", "Status"])
             edited = st.data_editor(
-                df, num_rows="dynamic", use_container_width=True, hide_index=True,
+                df, use_container_width=True, hide_index=True, num_rows="fixed",
                 key=f"mapping_editor_{entry.integration_type}",
+                disabled=["ElectroGrader field", "Status"],
                 column_config={
-                    "Source field": st.column_config.SelectboxColumn(options=list(source_label_by_key.values()), required=True),
-                    "Target field": st.column_config.SelectboxColumn(options=list(target_fields.values()), required=True),
+                    "BaseLinker field": st.column_config.SelectboxColumn(options=target_options),
                 },
             )
+
             if st.button(T("settings.save_field_mapping"), key=f"mapping_save_{entry.integration_type}", type="primary"):
-                mapping.rules = [
-                    field_mapping_store.FieldMappingRule(
-                        source_field=source_key_by_label.get(row.get("Source field"), row.get("Source field") or ""),
-                        source_value=row.get("Source value") or "",
-                        target_field=target_key_by_label.get(row.get("Target field"), row.get("Target field") or ""),
-                        target_value=row.get("Target value") or "",
-                        target_label=row.get("Target label") or "",
-                    )
-                    for _, row in edited.iterrows()
-                    if row.get("Source field") and row.get("Target field")
-                ]
-                field_mapping_store.upsert_mapping(mapping)
-                st.success(T("product_list.saved"))
-                st.rerun()
+                target_key_by_label = {v: k for k, v in target_fields.items()}
+                new_pure_rules = []
+                chosen_targets: dict = {}  # target_key -> [source labels] claiming it, for conflict detection
+                for source_key, (_, row) in zip(row_source_keys, edited.iterrows()):
+                    chosen_label = row["BaseLinker field"]
+                    if chosen_label == unmapped_placeholder:
+                        continue
+                    target_key = target_key_by_label.get(chosen_label, chosen_label)
+                    new_pure_rules.append(field_mapping_store.FieldMappingRule(source_field=source_key, target_field=target_key))
+                    chosen_targets.setdefault(target_key, []).append(source_label_by_key.get(source_key, source_key))
+
+                # Conflict validation: one BaseLinker target field can hold
+                # exactly one value — two DIFFERENT ElectroGrader fields
+                # both redirecting there would have the second silently
+                # overwrite the first in the built payload (see
+                # mapper._apply_field_mapping_rules — a plain dict
+                # assignment per target key). Block Save and name the
+                # collision instead of letting that happen quietly.
+                conflicts = {t: srcs for t, srcs in chosen_targets.items() if len(srcs) > 1}
+                if conflicts:
+                    for target_key, srcs in conflicts.items():
+                        st.error(T(
+                            "settings.mapping_conflict",
+                            target=target_fields.get(target_key, target_key), sources=", ".join(srcs),
+                        ))
+                else:
+                    mapping.rules = new_pure_rules + value_specific_rules
+                    field_mapping_store.upsert_mapping(mapping)
+                    st.success(T("product_list.saved"))
+                    st.rerun()
 
         def _render_category_mapping_tab(entry, mapping: category_mapping_store.CategoryMapping) -> None:
             # ElectroGrader's own Category Catalog (Product List -> Product
