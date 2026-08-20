@@ -34,6 +34,7 @@ from modules import (
     category_mapping_store,
     category_store,
     company_store,
+    custom_field_store,
     description_gen,
     export,
     field_mapping_store,
@@ -3218,6 +3219,15 @@ if page == PAGE_NEW_ITEM:
             step=1.0,
         )
 
+        _cf_definitions = custom_field_store.list_fields(product.company_id)
+        _cf_wizard_inputs = {}
+        if _cf_definitions:
+            st.caption(T("custom_field.section_heading"))
+            for _cf in _cf_definitions:
+                _cf_wizard_inputs[_cf.key] = st.text_input(
+                    _cf.label, value=product.custom_fields.get(_cf.key, ""), key=f"wizard_cf_{_cf.key}",
+                )
+
         st.divider()
         st.subheader(T("new_item.finalize_save"))
         st.write(f"**{T('common.sku')}:** {product.sku}")
@@ -3262,6 +3272,7 @@ if page == PAGE_NEW_ITEM:
                 product.weight_kg = float(weight_kg_in)
                 product.price = float(price_override_in)
                 product.quantity = int(quantity_in)
+                product.custom_fields = {k: v.strip() for k, v in _cf_wizard_inputs.items() if v.strip()}
                 product.status = "completed"
                 product.review_status = "ready"
                 product.wizard_step = 0
@@ -4369,6 +4380,17 @@ elif page == PAGE_PRODUCT_LIST:
                 if _t is not None and _t.translated_by == "manual":
                     st.caption(T("product_list.manually_edited_translation"))
 
+            # Self-service custom fields (Product List -> Product List
+            # Settings -> Custom Fields) are per-language content too, same
+            # as name/description above — each company's own field list,
+            # read fresh every render so a deleted field disappears from
+            # the card immediately and a newly-added one shows up without
+            # any other change.
+            _cf_definitions = custom_field_store.list_fields(p.company_id)
+            _cf_values = p.custom_fields if is_primary_tab else (
+                _translations_by_lang[selected_lang].custom_fields if selected_lang in _translations_by_lang else {}
+            )
+
             name_in = st.text_input(
                 T("common.product_name"), value=name_val, key=f"rex_name_{p.id}_{selected_lang}",
             )
@@ -4406,6 +4428,15 @@ elif page == PAGE_PRODUCT_LIST:
                 T("product_list.functional_checklist_label"), value="\n".join(checklist_val_list), height=80,
                 key=f"rex_checklist_{p.id}_{selected_lang}",
             )
+
+            _cf_inputs = {}
+            if _cf_definitions:
+                st.markdown(f"**{T('custom_field.section_heading')}**")
+                for _cf in _cf_definitions:
+                    _cf_inputs[_cf.key] = st.text_input(
+                        _cf.label, value=_cf_values.get(_cf.key, ""),
+                        key=f"rex_cf_{p.id}_{selected_lang}_{_cf.key}",
+                    )
 
             if reasoning_val:
                 st.caption(T("product_list.condition_reasoning", reasoning=reasoning_val))
@@ -4483,6 +4514,7 @@ elif page == PAGE_PRODUCT_LIST:
                 new_missing = [l.strip() for l in missing_in.splitlines() if l.strip()]
                 new_box = [l.strip() for l in box_in.splitlines() if l.strip()]
                 new_checklist = [l.strip() for l in checklist_in.splitlines() if l.strip()]
+                new_custom_fields = {k: v.strip() for k, v in _cf_inputs.items() if v.strip()}
 
                 # name/desc/extra/defects/missing/box are compared against
                 # name_val/desc_val/extra_val/defects_val_list/missing_val_list/
@@ -4500,6 +4532,7 @@ elif page == PAGE_PRODUCT_LIST:
                     or new_missing != missing_val_list
                     or new_box != box_val_list
                     or new_checklist != checklist_val_list
+                    or new_custom_fields != _cf_values
                 )
                 changed = (
                     language_content_changed
@@ -4558,6 +4591,7 @@ elif page == PAGE_PRODUCT_LIST:
                     p.missing_components = new_missing
                     p.box_contents = new_box
                     p.functional_checklist = new_checklist
+                    p.custom_fields = new_custom_fields
                     inventory_store.save_product(p)  # upserts the primary-language row too
                 else:
                     inventory_store.save_product(p)  # brand/price/etc. above; primary-language row re-saved unchanged
@@ -4572,7 +4606,7 @@ elif page == PAGE_PRODUCT_LIST:
                             title=name_in.strip(), description=desc_in.strip(),
                             condition_description=extra_in.strip(), defects=new_defects,
                             box_contents=new_box, missing_components=new_missing,
-                            functional_checklist=new_checklist,
+                            functional_checklist=new_checklist, custom_fields=new_custom_fields,
                             spec_summary=_existing_t.spec_summary if _existing_t else "",
                             product_condition_reasoning=_existing_t.product_condition_reasoning if _existing_t else "",
                             match_notes=_existing_t.match_notes if _existing_t else "",
@@ -5529,6 +5563,71 @@ elif page == PAGE_PRODUCT_LIST:
                 else:
                     _delete_category_with_products_dialog(_cat_company_id, _cat_id, _row["name"], _count)
 
+        st.divider()
+        st.subheader(T("product_list.settings_custom_fields_heading"))
+        st.caption(T("custom_field.tab_caption", max=custom_field_store.MAX_CUSTOM_FIELDS))
+
+        _cf_company_id = current_user.company_id
+        _cf_fields = custom_field_store.list_fields(_cf_company_id)
+
+        if not _cf_fields:
+            st.info(T("custom_field.empty_state"))
+
+        for _cf in _cf_fields:
+            _cf_col_name, _cf_col_rename, _cf_col_delete = st.columns([5, 1, 1])
+            with _cf_col_name:
+                st.write(_cf.label)
+            with _cf_col_rename:
+                if st.button("✏️", key=f"cf_rename_{_cf.id}", help=T("common.rename")):
+                    st.session_state["cf_renaming_id"] = (
+                        None if st.session_state.get("cf_renaming_id") == _cf.id else _cf.id
+                    )
+                    st.session_state["cf_deleting_id"] = None
+            with _cf_col_delete:
+                if st.button("🗑️", key=f"cf_delete_{_cf.id}", help=T("common.delete")):
+                    st.session_state["cf_deleting_id"] = _cf.id
+                    st.session_state["cf_renaming_id"] = None
+
+            if st.session_state.get("cf_renaming_id") == _cf.id:
+                with st.form(f"cf_rename_form_{_cf.id}"):
+                    _cf_new_label = st.text_input(T("custom_field.name_label"), value=_cf.label)
+                    if st.form_submit_button(T("common.save"), type="primary"):
+                        try:
+                            custom_field_store.rename_field(_cf.id, _cf_company_id, _cf_new_label.strip())
+                        except ValueError as e:
+                            st.error(str(e))
+                        else:
+                            st.session_state["cf_renaming_id"] = None
+                            st.rerun()
+
+            if st.session_state.get("cf_deleting_id") == _cf.id:
+                st.warning(T("custom_field.confirm_delete", name=_cf.label))
+                _cf_dcol1, _cf_dcol2 = st.columns(2)
+                with _cf_dcol1:
+                    if st.button(T("common.cancel"), key=f"cf_delete_cancel_{_cf.id}"):
+                        st.session_state["cf_deleting_id"] = None
+                        st.rerun()
+                with _cf_dcol2:
+                    if st.button(T("common.delete"), key=f"cf_delete_confirm_{_cf.id}", type="primary"):
+                        custom_field_store.delete_field(_cf.id, _cf_company_id)
+                        st.session_state["cf_deleting_id"] = None
+                        st.success(T("custom_field.deleted_success", name=_cf.label))
+                        st.rerun()
+
+        if len(_cf_fields) >= custom_field_store.MAX_CUSTOM_FIELDS:
+            st.caption(T("custom_field.limit_reached", max=custom_field_store.MAX_CUSTOM_FIELDS))
+        else:
+            with st.form("cf_create_form", clear_on_submit=True):
+                _cf_new_name = st.text_input(T("custom_field.name_label"), placeholder=T("custom_field.name_placeholder"))
+                if st.form_submit_button(T("custom_field.add_button"), type="primary"):
+                    try:
+                        custom_field_store.create_field(_cf_company_id, _cf_new_name.strip())
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.success(T("custom_field.created_success"))
+                        st.rerun()
+
 # =========================================================== MANAGE USERS =
 # ================================================================ ORDERS ==
 elif page == PAGE_ORDERS:
@@ -6356,7 +6455,9 @@ elif page == PAGE_SETTINGS:
             #    field appearing on the external platform's side shows up
             #    here the next time this tab opens, same live-no-caching
             #    principle as Category Mapping.
-            mappable_source_keys = IntegrationManager.get_mappable_source_fields(entry.integration_type)
+            mappable_source_keys = IntegrationManager.get_mappable_source_fields(
+                entry.integration_type, company_id=current_user.company_id,
+            )
             target_fields = IntegrationManager.get_supported_target_fields(
                 entry.integration_type, company_id=current_user.company_id,
             )
@@ -6377,6 +6478,15 @@ elif page == PAGE_SETTINGS:
             st.caption(T("settings.field_mapping_editing_hint"))
 
             source_label_by_key = {k: v for k, v in _SYNC_FIELDS_SENT if k in mappable_source_keys}
+            # This company's own self-service custom fields (Product List
+            # -> Product List Settings -> Custom Fields) are namespaced
+            # "custom:<key>" — merged in here purely for display label
+            # resolution; get_mappable_source_fields() above already
+            # decided they're valid picks.
+            for _cf in custom_field_store.list_fields(current_user.company_id):
+                cf_key = f"custom:{_cf.key}"
+                if cf_key in mappable_source_keys:
+                    source_label_by_key[cf_key] = _cf.label
             source_key_by_label = {v: k for k, v in source_label_by_key.items()}
 
             # Exactly PURE redirect rules (source_value == "") are what

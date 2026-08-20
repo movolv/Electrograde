@@ -123,15 +123,22 @@ class MarketplaceConnector(IntegrationConnector):
     def get_mappable_source_fields(self) -> set:
         """Field Mapping tab's "Source field" dropdown source — every
         field_registry.SYNCABLE_FIELDS key with mappable=True, minus this
-        connector's own CORE_FIELDS. Dynamic by construction: a new
-        SYNCABLE_FIELDS entry with mappable=True appears here (and so in
-        the UI) automatically, with zero code change required anywhere in
-        this file or a concrete connector — see the approved dynamic
-        Field Mapping redesign."""
+        connector's own CORE_FIELDS, PLUS this company's own self-service
+        custom fields (modules/custom_field_store.py — see
+        modules/models.py's Product.custom_fields), each namespaced
+        "custom:<key>" so a company's own field name can never collide
+        with a real Product attribute. Dynamic by construction on BOTH
+        halves: a new SYNCABLE_FIELDS entry with mappable=True, or a
+        company creating a new custom field in Product List Settings,
+        each appears here (and so in the UI) automatically, with zero
+        code change required anywhere in this file, a concrete connector,
+        or app.py — see the approved dynamic Field Mapping redesign."""
         from integrations import field_registry
+        from modules import custom_field_store
 
         registry_mappable = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if v.get("mappable")}
-        return registry_mappable - self.CORE_FIELDS
+        custom_keys = {f"custom:{d.key}" for d in custom_field_store.list_fields(self.company_id)}
+        return (registry_mappable - self.CORE_FIELDS) | custom_keys
 
     def get_target_fields(self) -> dict:
         """Instance-level counterpart to SUPPORTED_TARGET_FIELDS, for

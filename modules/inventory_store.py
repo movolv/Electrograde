@@ -177,6 +177,7 @@ def _hydrate_primary_language_bulk(products: List[Product]) -> List[Product]:
             p.defects = t.defects
             p.box_contents = t.box_contents
             p.missing_components = t.missing_components
+            p.custom_fields = t.custom_fields
     return products
 
 
@@ -188,6 +189,7 @@ def _hydrate_primary_language(product: Optional[Product]) -> Optional[Product]:
 
 _LANGUAGE_CONTENT_KEYS = (
     "name", "product_description", "condition_description", "defects", "box_contents", "missing_components",
+    "custom_fields",
 )
 
 
@@ -243,7 +245,7 @@ def save_product(product: Product, translated_by: str = "manual") -> None:
         box_contents=product.box_contents, missing_components=product.missing_components,
         spec_summary=product.spec_summary, functional_checklist=product.functional_checklist,
         product_condition_reasoning=product.product_condition_reasoning, match_notes=product.match_notes,
-        color=product.color,
+        color=product.color, custom_fields=product.custom_fields,
         translated_by=translated_by,
     ))
 
@@ -282,7 +284,7 @@ def save_products_bulk(products: List[Product]) -> None:
             box_contents=p.box_contents, missing_components=p.missing_components,
             spec_summary=p.spec_summary, functional_checklist=p.functional_checklist,
             product_condition_reasoning=p.product_condition_reasoning, match_notes=p.match_notes,
-            color=p.color,
+            color=p.color, custom_fields=p.custom_fields,
             translated_by="manual",
         )
         for p in products

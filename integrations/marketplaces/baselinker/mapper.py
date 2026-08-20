@@ -322,7 +322,16 @@ def _apply_field_mapping_rules(
     for rule in rules:
         if not rule.source_field or not rule.target_field or rule.source_field == "sku":
             continue
-        current = getattr(product, rule.source_field, None)
+        if rule.source_field.startswith("custom:"):
+            # A company's own self-service custom field (see
+            # modules/custom_field_store.py) — its VALUE lives in
+            # Product.custom_fields, keyed by the definition's stable
+            # `key` (everything after the "custom:" prefix), never as a
+            # real Product attribute.
+            custom_key = rule.source_field.split(":", 1)[1]
+            current = (product.custom_fields or {}).get(custom_key)
+        else:
+            current = getattr(product, rule.source_field, None)
         if current is None or current == "" or current == []:
             continue
         current_str = "; ".join(str(v) for v in current) if isinstance(current, list) else str(current)

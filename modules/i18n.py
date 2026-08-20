@@ -1115,6 +1115,26 @@ TRANSLATIONS: dict = {
         "lv": "Vispirms izveido citu kategoriju — pagaidām nav, uz kurieni pārvietot šos produktus.",
     },
     "category.creating_under": {"en": "Creating under: {parent}", "lv": "Izveido zem: {parent}"},
+    "product_list.settings_custom_fields_heading": {"en": "Custom Fields", "lv": "Pielāgotie lauki"},
+    "custom_field.tab_caption": {
+        "en": "Add your own fields to the product card (up to {max}). They appear in every content language and can be mapped in Field Mapping.",
+        "lv": "Pievieno savus laukus produkta kartītei (līdz {max}). Tie parādās visās satura valodās un tos var samapot pie Field Mapping.",
+    },
+    "custom_field.empty_state": {"en": "No custom fields yet.", "lv": "Vēl nav pielāgotu lauku."},
+    "custom_field.name_label": {"en": "Field name", "lv": "Lauka nosaukums"},
+    "custom_field.name_placeholder": {"en": "e.g. Warranty End Date", "lv": "piem., Garantijas beigu datums"},
+    "custom_field.add_button": {"en": "+ Add field", "lv": "+ Pievienot lauku"},
+    "custom_field.created_success": {"en": "Field added.", "lv": "Lauks pievienots."},
+    "custom_field.confirm_delete": {
+        "en": "Delete '{name}'? It will disappear from every product card.",
+        "lv": "Dzēst '{name}'? Tas pazudīs no visām produktu kartītēm.",
+    },
+    "custom_field.deleted_success": {"en": "'{name}' deleted.", "lv": "'{name}' dzēsts."},
+    "custom_field.limit_reached": {
+        "en": "Limit reached ({max} custom fields). Delete one to add another.",
+        "lv": "Sasniegts limits ({max} pielāgoti lauki). Dzēs vienu, lai pievienotu citu.",
+    },
+    "custom_field.section_heading": {"en": "Custom Fields", "lv": "Pielāgotie lauki"},
     "category.needs_review": {
         "en": "⚠️ AI couldn't confidently match a category — pick one below or add a new one.",
         "lv": "⚠️ AI nevarēja droši atbilst kategorijai — izvēlies zemāk vai pievieno jaunu.",

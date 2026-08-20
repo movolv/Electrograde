@@ -177,22 +177,30 @@ def get_default_structural_mapping(integration_type: str) -> dict:
     return dict(getattr(connector_cls, "DEFAULT_STRUCTURAL_MAPPING", {}))
 
 
-def get_mappable_source_fields(integration_type: str) -> set:
+def get_mappable_source_fields(integration_type: str, company_id: str = "") -> set:
     """Field Mapping tab's 'Source field' dropdown source — every
     integrations/field_registry.SYNCABLE_FIELDS key with mappable=True,
     minus this connector class's own CORE_FIELDS (see
     MarketplaceConnector.get_mappable_source_fields()'s docstring — same
     computation, done here at the class level since CORE_FIELDS never
     depends on a live connection/company, so no connector instance is
-    needed). Fields excluded either way have a fixed, hardcoded
-    destination: offering them as a pickable source would be a dead end."""
+    needed), PLUS — when `company_id` is given — that company's own
+    self-service custom fields (modules/custom_field_store.py), namespaced
+    "custom:<key>". A plain DB read, not a live API call, so this stays
+    available even for a not-yet-connected integration. Fields excluded
+    either way have a fixed, hardcoded destination: offering them as a
+    pickable source would be a dead end."""
     from integrations import field_registry
+    from modules import custom_field_store
 
     connector_cls = CONNECTORS.get(integration_type)
     if connector_cls is None:
         return set()
     registry_mappable = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if v.get("mappable")}
-    return registry_mappable - getattr(connector_cls, "CORE_FIELDS", set())
+    result = registry_mappable - getattr(connector_cls, "CORE_FIELDS", set())
+    if company_id:
+        result |= {f"custom:{d.key}" for d in custom_field_store.list_fields(company_id)}
+    return result
 
 
 def get_implemented_sync_fields(integration_type: str) -> set:

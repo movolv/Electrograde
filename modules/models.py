@@ -26,7 +26,7 @@ to write to what:
     never touched by any AI function.
 """
 from dataclasses import dataclass, field, asdict
-from typing import List
+from typing import Dict, List
 import time
 import uuid
 
@@ -127,6 +127,11 @@ class Product:
     quantity: int = 1  # unit count this record represents; always >= 1, editable everywhere. Not
     # the same as `manifest_qty` above (an unverified manifest claim) — this is the
     # authoritative, human-confirmed count used by every export/API path.
+
+    # -- CUSTOM FIELDS (self-service, per-company — see
+    # modules/custom_field_store.py for the field DEFINITIONS; this is
+    # only the VALUES, keyed by each definition's stable `key`) --
+    custom_fields: Dict[str, str] = field(default_factory=dict)
 
     # -- media / bookkeeping --
     image_paths: List[str] = field(default_factory=list)

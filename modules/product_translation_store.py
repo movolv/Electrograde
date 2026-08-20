@@ -52,6 +52,13 @@ class ProductTranslation:
     # descriptive word, not an identifier, so it's translated everywhere including
     # BaseLinker export. See integrations/marketplaces/baselinker/client.py's
     # _resolve_export_content().
+    # Self-service custom field VALUES (modules/custom_field_store.py holds
+    # the per-company field DEFINITIONS), keyed by each definition's stable
+    # `key` — one value per language, same as title/description/etc., so a
+    # custom field works in every content language a company has, including
+    # ones added after the field itself was created. {} for a language a
+    # company never filled this in for — never an error, just empty.
+    custom_fields: Dict[str, str] = field(default_factory=dict)
     translated_by: str = "manual"  # "ai" | "deepl" | "openai" | "manual"
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -81,6 +88,7 @@ def _connect():
     for col in (
         "box_contents", "missing_components", "spec_summary",
         "functional_checklist", "product_condition_reasoning", "match_notes", "color",
+        "custom_fields",
     ):
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE product_translations ADD COLUMN {col} TEXT")
@@ -93,7 +101,8 @@ def _connect():
 def _row_to_translation(row) -> ProductTranslation:
     (id_, product_id, company_id, language, title, description, condition_description,
      defects_json, translated_by, created_at, updated_at, box_contents_json, missing_components_json,
-     spec_summary, functional_checklist_json, product_condition_reasoning, match_notes, color) = row
+     spec_summary, functional_checklist_json, product_condition_reasoning, match_notes, color,
+     custom_fields_json) = row
     return ProductTranslation(
         id=id_, product_id=product_id, company_id=company_id, language=language,
         title=title or "", description=description or "", condition_description=condition_description or "",
@@ -105,6 +114,7 @@ def _row_to_translation(row) -> ProductTranslation:
         product_condition_reasoning=product_condition_reasoning or "",
         match_notes=match_notes or "",
         color=color or "",
+        custom_fields=json.loads(custom_fields_json) if custom_fields_json else {},
         translated_by=translated_by or "manual",
         created_at=created_at or 0.0, updated_at=updated_at or 0.0,
     )
@@ -113,7 +123,8 @@ def _row_to_translation(row) -> ProductTranslation:
 _COLUMNS = (
     "id, product_id, company_id, language, title, description, condition_description, "
     "defects, translated_by, created_at, updated_at, box_contents, missing_components, "
-    "spec_summary, functional_checklist, product_condition_reasoning, match_notes, color"
+    "spec_summary, functional_checklist, product_condition_reasoning, match_notes, color, "
+    "custom_fields"
 )
 
 
@@ -169,7 +180,7 @@ def upsert_translation(t: ProductTranslation) -> None:
         conn.execute(
             f"""INSERT INTO product_translations
                 ({_COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (product_id, language) DO UPDATE SET
                     title = EXCLUDED.title, description = EXCLUDED.description,
                     condition_description = EXCLUDED.condition_description, defects = EXCLUDED.defects,
@@ -177,13 +188,14 @@ def upsert_translation(t: ProductTranslation) -> None:
                     spec_summary = EXCLUDED.spec_summary, functional_checklist = EXCLUDED.functional_checklist,
                     product_condition_reasoning = EXCLUDED.product_condition_reasoning,
                     match_notes = EXCLUDED.match_notes, color = EXCLUDED.color,
+                    custom_fields = EXCLUDED.custom_fields,
                     translated_by = EXCLUDED.translated_by, updated_at = EXCLUDED.updated_at""",
             (
                 t.id, t.product_id, t.company_id, t.language, t.title, t.description,
                 t.condition_description, json.dumps(t.defects or []), t.translated_by,
                 t.created_at or now, now, json.dumps(t.box_contents or []), json.dumps(t.missing_components or []),
                 t.spec_summary, json.dumps(t.functional_checklist or []), t.product_condition_reasoning, t.match_notes,
-                t.color,
+                t.color, json.dumps(t.custom_fields or {}),
             ),
         )
     conn.close()
@@ -198,7 +210,7 @@ def upsert_translations_bulk(translations: List[ProductTranslation]) -> None:
         conn.executemany(
             f"""INSERT INTO product_translations
                 ({_COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (product_id, language) DO UPDATE SET
                     title = EXCLUDED.title, description = EXCLUDED.description,
                     condition_description = EXCLUDED.condition_description, defects = EXCLUDED.defects,
@@ -206,6 +218,7 @@ def upsert_translations_bulk(translations: List[ProductTranslation]) -> None:
                     spec_summary = EXCLUDED.spec_summary, functional_checklist = EXCLUDED.functional_checklist,
                     product_condition_reasoning = EXCLUDED.product_condition_reasoning,
                     match_notes = EXCLUDED.match_notes, color = EXCLUDED.color,
+                    custom_fields = EXCLUDED.custom_fields,
                     translated_by = EXCLUDED.translated_by, updated_at = EXCLUDED.updated_at""",
             [
                 (
@@ -213,7 +226,7 @@ def upsert_translations_bulk(translations: List[ProductTranslation]) -> None:
                     t.condition_description, json.dumps(t.defects or []), t.translated_by,
                     t.created_at or now, now, json.dumps(t.box_contents or []), json.dumps(t.missing_components or []),
                     t.spec_summary, json.dumps(t.functional_checklist or []), t.product_condition_reasoning, t.match_notes,
-                    t.color,
+                    t.color, json.dumps(t.custom_fields or {}),
                 )
                 for t in translations
             ],
