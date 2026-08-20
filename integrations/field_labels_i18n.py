@@ -20,7 +20,13 @@ DEFAULT_LANGUAGE = "en"
 LABELS = {
     "brand": {"en": "Brand", "de": "Marke", "lv": "Zīmols"},
     "model": {"en": "Model", "de": "Modell", "lv": "Modelis"},
-    "product_condition": {"en": "Condition", "de": "Zustand", "lv": "Stāvoklis"},
+    # "Product Condition"/"Preces stāvoklis", not a bare "Condition"/
+    # "Stāvoklis": this is the QUALITY GRADE (A/B/C/D), and the shorter
+    # wording read as the separate New/Used field on the marketplace side.
+    # German is deliberately left as-is — only these two were requested.
+    # Renaming a parameter does not rename it on listings already
+    # exported; those keep the old name on BaseLinker until re-exported.
+    "product_condition": {"en": "Product Condition", "de": "Zustand", "lv": "Preces stāvoklis"},
     "color": {"en": "Color", "de": "Farbe", "lv": "Krāsa"},
     "power": {"en": "Power", "de": "Leistung", "lv": "Jauda"},
     "barcode": {"en": "EAN", "de": "EAN", "lv": "EAN"},
