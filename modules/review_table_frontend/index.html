@@ -6,7 +6,7 @@
 <style>
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
                font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
-  #grid { width: 100%; height: 600px; }
+  #grid { width: 100%; height: 600px; }  /* overridden per layout mode — see applyGridLayoutMode() */
 </style>
 </head>
 <body>
@@ -27,6 +27,28 @@ function setComponentValue(value) {
 function setFrameHeight() {
   var h = document.body.scrollHeight;
   sendToStreamlit({ type: "streamlit:setFrameHeight", height: h });
+}
+
+// "autoHeight" = the grid element grows to fit every row, so the parent
+// page scrolls it (mobile cards); "normal" = fixed-height box with AG
+// Grid's own virtualized inner scroll (desktop). Kept as one function so
+// the DOM height and the grid option can never disagree — setting only
+// one of the two is what made an earlier attempt at this leave rows
+// unreachable.
+var gridLayoutIsAuto = null;
+function applyGridLayoutMode(auto) {
+  if (!gridApi || gridLayoutIsAuto === auto) { return; }
+  gridLayoutIsAuto = auto;
+  var el = document.getElementById("grid");
+  if (auto) {
+    el.style.height = "auto";
+    gridApi.setGridOption("domLayout", "autoHeight");
+  } else {
+    gridApi.setGridOption("domLayout", "normal");
+    el.style.height = GRID_HEIGHT_DESKTOP_PX + "px";
+  }
+  // Layout settles a frame later; report the new height once it has.
+  setTimeout(setFrameHeight, 80);
 }
 
 var gridApi = null;
@@ -64,17 +86,109 @@ function photoCellRenderer(params) {
   return img;
 }
 
+/* ---------------------------------------------------------------------
+   IntegrationIcon — the one place an integration is ever DRAWN. Takes a
+   branding object built by integrations/manager.py's get_branding()
+   ({display_name, parts, weight, short, status}) and knows how to render
+   it; callers (the desktop Integrations cell, the mobile card) only ever
+   hand it a product's ACTUAL integrations. Adding a new integration to
+   the Python-side catalog therefore needs no change here at all.
+
+   Two sizes: "chip" (wordmark, used where there's room) and "mini" (the
+   1-2 letter `short` form, used in the grid where a full wordmark would
+   be unreadable at row height).
+   --------------------------------------------------------------------- */
+var INTEGRATION_STATUS_RING = {
+  listed: "#16a34a",
+  sold: "#6366f1",
+  error: "#dc2626",
+  removed: "#9ca3af",
+  not_listed: "#9ca3af",
+};
+
+function buildIntegrationIcon(integration, variant) {
+  var el = document.createElement("span");
+  var isMini = variant === "mini";
+  var ring = INTEGRATION_STATUS_RING[integration.status] || "#9ca3af";
+  el.style.cssText =
+    "display:inline-flex;align-items:center;justify-content:center;" +
+    "background:#ffffff;border-radius:6px;box-sizing:border-box;" +
+    "border:1.5px solid " + ring + ";" +
+    // Mini is a FIXED width, not min-width: the Integrations cell below
+    // computes how many fit from the column's real width, and that
+    // arithmetic is only correct if every icon occupies exactly one slot
+    // (a min-width lets a 2-character code render wider and silently
+    // push icons onto a third, clipped row).
+    (isMini
+      ? "width:28px;flex:0 0 28px;height:24px;font-size:11px;"
+      : "height:28px;min-width:34px;padding:0 8px;font-size:13px;") +
+    "font-weight:" + (integration.weight || 700) + ";" +
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
+    "line-height:1;white-space:nowrap;overflow:hidden;";
+  // Accessible name + hover tooltip: color/logo alone must never be the
+  // only way to tell integrations apart (spec's accessibility section).
+  var label = integration.display_name || integration.integration_type || "";
+  el.title = label;
+  el.setAttribute("role", "img");
+  el.setAttribute("aria-label", label);
+  if (isMini) {
+    var short = document.createElement("span");
+    short.textContent = integration.short || label.slice(0, 2).toUpperCase();
+    short.style.color = (integration.parts && integration.parts[0] && integration.parts[0][1]) || "#111827";
+    el.appendChild(short);
+  } else {
+    (integration.parts || []).forEach(function (part) {
+      var seg = document.createElement("span");
+      seg.textContent = part[0];
+      seg.style.color = part[1];
+      el.appendChild(seg);
+    });
+  }
+  return el;
+}
+
+function buildOverflowChip(count, variant) {
+  var el = document.createElement("span");
+  var isMini = variant === "mini";
+  el.style.cssText =
+    "display:inline-flex;align-items:center;justify-content:center;" +
+    "background:#374151;color:#f3f4f6;border-radius:6px;box-sizing:border-box;" +
+    "border:1.5px solid #4b5563;cursor:pointer;" +
+    (isMini
+      ? "width:28px;flex:0 0 28px;height:24px;font-size:11px;"
+      : "height:28px;min-width:34px;padding:0 8px;font-size:13px;") +
+    "font-weight:700;line-height:1;white-space:nowrap;";
+  el.textContent = "+" + count;
+  return el;
+}
+
 function getSelectedIds() {
   return gridApi.getSelectedRows().map(function (r) { return r.id; });
 }
 
 function reportSelection() {
-  setComponentValue({ selected_ids: getSelectedIds(), open_id: null });
+  setComponentValue({ selected_ids: getSelectedIds(), open_id: null, integrations_id: null });
 }
 
 function openRow(data) {
   if (!data) { return; }
-  setComponentValue({ selected_ids: getSelectedIds(), open_id: data.id });
+  setComponentValue({ selected_ids: getSelectedIds(), open_id: data.id, integrations_id: null });
+}
+
+// Third signal in the wire protocol (alongside open_id): asks Python to
+// open the integrations dialog for this row, where a stale listing can be
+// unlinked. Nonce-suffixed so clicking the same row twice in a row is
+// still seen as two distinct events by Streamlit's value-changed check.
+var integrationsClickSeq = 0;
+function openIntegrations(data) {
+  if (!data) { return; }
+  integrationsClickSeq += 1;
+  setComponentValue({
+    selected_ids: getSelectedIds(),
+    open_id: null,
+    integrations_id: data.id,
+    integrations_seq: integrationsClickSeq,
+  });
 }
 
 /* Custom header component for the auto-generated selection column: a
@@ -155,9 +269,219 @@ SelectAllHeaderComponent.prototype.destroy = function () {
 
 var defaultColDef = { sortable: true, resizable: true, filter: true };
 
+// EUR, not USD: every price in this app is euros (see app.py's
+// "product_list.price_eur" and the BaseLinker export) — the old "$" here
+// was simply wrong, not a locale choice.
 function priceCellFormatter(params) {
   var v = params.value;
-  return (v === null || v === undefined || v === "") ? "" : "$" + Number(v).toFixed(2);
+  return (v === null || v === undefined || v === "") ? "" : "€" + Number(v).toFixed(2);
+}
+
+/* Product cell: thumbnail + name, with a configurable secondary metadata
+   line beneath. The metadata chips arrive pre-resolved from Python
+   (app.py's PRODUCT_METADATA_FIELDS/_product_metadata_chips), so adding
+   "EAN"/"Brand"/... to that line never touches this renderer. */
+function productInfoCellRenderer(params) {
+  var data = params.value || {};
+  var wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex;align-items:center;gap:10px;height:100%;overflow:hidden;";
+
+  if (data.photo_url) {
+    var img = document.createElement("img");
+    img.src = data.photo_url;
+    img.alt = "";
+    img.style.cssText =
+      "width:40px;height:40px;flex:0 0 40px;object-fit:cover;border-radius:6px;display:block;";
+    wrap.appendChild(img);
+  } else {
+    var ph = document.createElement("div");
+    ph.style.cssText =
+      "width:40px;height:40px;flex:0 0 40px;border-radius:6px;background:#1f2937;" +
+      "border:1px solid #293548;";
+    wrap.appendChild(ph);
+  }
+
+  var text = document.createElement("div");
+  text.style.cssText = "display:flex;flex-direction:column;justify-content:center;min-width:0;gap:2px;";
+
+  var name = document.createElement("div");
+  name.textContent = data.name || "";
+  name.title = data.name || "";
+  name.style.cssText =
+    "font-weight:600;font-size:13px;color:#f3f4f6;line-height:1.25;" +
+    "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+  text.appendChild(name);
+
+  var chips = data.metadata || [];
+  if (chips.length) {
+    var meta = document.createElement("div");
+    meta.textContent = chips.map(function (c) { return c.label + ": " + c.value; }).join(" · ");
+    meta.title = meta.textContent;
+    meta.style.cssText =
+      "font-size:11px;color:#9ca3af;line-height:1.25;" +
+      "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+    text.appendChild(meta);
+  }
+
+  wrap.appendChild(text);
+  return wrap;
+}
+
+/* Status: exactly ONE dot+label — the product's own lifecycle status,
+   never two stacked badges. A new status needs one color here and one
+   label in app.py's _PRODUCT_STATUS_LABELS. */
+var STATUS_DOT_COLORS = {
+  draft: "#9ca3af",
+  in_progress: "#eab308",
+  completed: "#16a34a",
+  archived: "#6b7280",
+};
+
+function statusDotCellRenderer(params) {
+  var data = params.value || {};
+  var color = STATUS_DOT_COLORS[data.key] || "#9ca3af";
+  var wrap = document.createElement("span");
+  wrap.style.cssText = "display:inline-flex;align-items:center;gap:6px;height:100%;";
+  var dot = document.createElement("span");
+  dot.setAttribute("aria-hidden", "true");
+  dot.style.cssText =
+    "width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:" + color + ";";
+  var label = document.createElement("span");
+  // The label always carries the meaning — the dot is decoration, so
+  // status is never communicated by color alone.
+  label.textContent = data.label || "";
+  label.style.cssText = "color:" + color + ";font-weight:600;font-size:12px;white-space:nowrap;";
+  wrap.appendChild(dot);
+  wrap.appendChild(label);
+  return wrap;
+}
+
+/* Integrations: only the ones this product is ACTUALLY listed on. How
+   many fit is measured from the column's real width — there is no fixed
+   icon limit, so 2 or 12 integrations both lay out sensibly: icons fill
+   up to two rows, and whatever still doesn't fit collapses into a "+N"
+   chip. Clicking anywhere in the cell asks Python to open the manage
+   dialog (where a stale listing can be unlinked), so that's reachable
+   whether or not there's an overflow chip. */
+// Must match buildIntegrationIcon()'s mini geometry exactly: 28px fixed
+// icon + 4px flex gap. The fit arithmetic below is only correct while
+// these agree.
+var INTEGRATION_ICON_PX = 28;
+var INTEGRATION_GAP_PX = 4;
+var INTEGRATION_ICON_SLOT_PX = INTEGRATION_ICON_PX + INTEGRATION_GAP_PX;
+var INTEGRATION_ROW_PX = 24;  // mini icon height
+var INTEGRATION_MAX_ROWS = 2;
+
+// Row labels for the mobile card, supplied by Python (args.mobile_labels)
+// so they're translated like every other string — never hardcoded English
+// here. The defaults only ever show if a caller omits them entirely.
+var MOBILE_LABELS = { stock: "Stock", price: "Price", status: "Status", integrations: "Integration" };
+
+function integrationsCellRenderer(params) {
+  var items = params.value || [];
+  var wrap = document.createElement("div");
+  wrap.style.cssText =
+    "display:flex;flex-wrap:wrap;align-content:center;align-items:center;" +
+    "gap:4px;height:100%;overflow:hidden;";
+
+  if (!items.length) {
+    var empty = document.createElement("span");
+    empty.textContent = "—";
+    empty.style.cssText = "color:#6b7280;font-size:13px;";
+    wrap.appendChild(empty);
+    return wrap;
+  }
+
+  var width = 160;
+  try {
+    if (params.column && params.column.getActualWidth) { width = params.column.getActualWidth(); }
+  } catch (e) { /* fall back to the default estimate */ }
+  // Cap the wrapper to exactly INTEGRATION_MAX_ROWS worth of height, so
+  // even if a measurement is off the cell can never spill a clipped
+  // half-row into the next row's space.
+  wrap.style.maxHeight = (INTEGRATION_ROW_PX * INTEGRATION_MAX_ROWS + INTEGRATION_GAP_PX) + "px";
+  var usable = Math.max(width - 16, INTEGRATION_ICON_SLOT_PX);
+  // n icons occupy n*ICON + (n-1)*GAP, so solve for n rather than
+  // dividing by the slot size (which over-counts by one gap per row).
+  var perRow = Math.max(1, Math.floor((usable + INTEGRATION_GAP_PX) / INTEGRATION_ICON_SLOT_PX));
+  var capacity = perRow * INTEGRATION_MAX_ROWS;
+
+  var shown = items;
+  var overflow = 0;
+  if (items.length > capacity) {
+    // Last slot becomes the "+N" chip, so it always stays visible.
+    shown = items.slice(0, Math.max(capacity - 1, 1));
+    overflow = items.length - shown.length;
+  }
+
+  shown.forEach(function (it) { wrap.appendChild(buildIntegrationIcon(it, "mini")); });
+  if (overflow > 0) {
+    var chip = buildOverflowChip(overflow, "mini");
+    chip.title = overflow + " more";
+    wrap.appendChild(chip);
+  }
+
+  wrap.style.cursor = "pointer";
+  wrap.setAttribute("role", "button");
+  wrap.setAttribute("tabindex", "0");
+  wrap.setAttribute("aria-label", "Manage integrations");
+  wrap.addEventListener("click", function (e) {
+    e.stopPropagation();
+    openIntegrations(params.data);
+  });
+  wrap.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      e.stopPropagation();
+      openIntegrations(params.data);
+    }
+  });
+  return wrap;
+}
+
+/* Mobile card: the SAME row data and the SAME sub-renderers as desktop,
+   stacked instead of columnar — not a squeezed-down table. Below the
+   breakpoint the grid switches to this single full-width column. */
+function mobileCardCellRenderer(params) {
+  var data = params.data || {};
+  var card = document.createElement("div");
+  card.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:10px 2px;height:100%;box-sizing:border-box;";
+
+  var head = productInfoCellRenderer({ value: data.product });
+  head.style.height = "auto";
+  card.appendChild(head);
+
+  var rows = document.createElement("div");
+  rows.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+
+  function addRow(label, valueEl) {
+    var line = document.createElement("div");
+    line.style.cssText = "display:flex;align-items:center;gap:8px;min-height:26px;";
+    var lab = document.createElement("span");
+    lab.textContent = label;
+    lab.style.cssText = "flex:0 0 86px;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.03em;";
+    line.appendChild(lab);
+    line.appendChild(valueEl);
+    rows.appendChild(line);
+  }
+
+  var stock = document.createElement("span");
+  stock.textContent = data.quantity === undefined || data.quantity === null ? "" : String(data.quantity);
+  stock.style.cssText = "font-size:13px;color:#f3f4f6;font-weight:600;";
+  addRow(MOBILE_LABELS.stock, stock);
+
+  var price = document.createElement("span");
+  price.textContent = priceCellFormatter({ value: data.price });
+  price.style.cssText = "font-size:13px;color:#16a34a;font-weight:700;";
+  addRow(MOBILE_LABELS.price, price);
+
+  addRow(MOBILE_LABELS.status, statusDotCellRenderer({ value: data.status }));
+  addRow(MOBILE_LABELS.integrations, integrationsCellRenderer({
+    value: data.integrations, data: data, column: null,
+  }));
+
+  card.appendChild(rows);
+  return card;
 }
 
 // Column definitions come from Python (args.column_defs) rather than being
@@ -170,9 +494,35 @@ function priceCellFormatter(params) {
 // trying to pass a JS function through JSON (which isn't possible).
 var CELL_TYPE_EXTRAS = {
   photo: { cellRenderer: photoCellRenderer, sortable: false, filter: false },
-  price: { type: "numericColumn", valueFormatter: priceCellFormatter },
+  price: {
+    type: "numericColumn",
+    valueFormatter: priceCellFormatter,
+    cellStyle: { color: "#16a34a", fontWeight: "700" },
+  },
   numeric: { type: "numericColumn" },
   text: {},
+  // Object-valued cells: sorting/filtering on a raw object is meaningless,
+  // so each supplies a comparator/getter over the field that actually
+  // reads as text.
+  product_info: {
+    cellRenderer: productInfoCellRenderer,
+    filterValueGetter: function (p) { return (p.data && p.data.product && p.data.product.name) || ""; },
+    comparator: function (a, b) {
+      return String((a && a.name) || "").localeCompare(String((b && b.name) || ""));
+    },
+  },
+  status_dot: {
+    cellRenderer: statusDotCellRenderer,
+    filterValueGetter: function (p) { return (p.data && p.data.status && p.data.status.label) || ""; },
+    comparator: function (a, b) {
+      return String((a && a.label) || "").localeCompare(String((b && b.label) || ""));
+    },
+  },
+  integrations: {
+    cellRenderer: integrationsCellRenderer,
+    sortable: false,
+    filter: false,
+  },
 };
 
 function buildColumnDefs(columns) {
@@ -200,6 +550,10 @@ function buildColumnDefs(columns) {
 // -kind columns so those few columns actually fit a phone screen without a
 // horizontal scroll (their normal desktop widths alone still add up to
 // more than a typical phone viewport).
+// Tall enough for the product cell's two lines (name + metadata) and two
+// rows of integration icons, both of which the old 52px clipped.
+var ROW_HEIGHT_DESKTOP = 64;
+var GRID_HEIGHT_DESKTOP_PX = 600;  // must match the #grid CSS rule above
 var MOBILE_BREAKPOINT_PX = 700;
 var wasMobile = false;
 var currentMobileFields = [];
@@ -216,6 +570,34 @@ function buildResponsiveColumnDefs(builtColumnDefs, mobileFields) {
   var desktop = builtColumnDefs.map(function (col) {
     return Object.assign({}, col, { hide: false });
   });
+
+  // A caller whose columns include a "product_info" cell gets the real
+  // card treatment on mobile: ONE full-width column stacking every field
+  // (same data, same sub-renderers, different layout) instead of a
+  // horizontally-cramped subset of the desktop columns. Callers without
+  // one (Orders, Manifests) keep the original hide-some-columns behavior.
+  var cardCol = builtColumnDefs.filter(function (c) { return c._kind === "product_info"; })[0];
+  if (cardCol) {
+    return {
+      desktop: desktop,
+      mobile: [Object.assign({}, cardCol, {
+        hide: false,
+        flex: 1,
+        minWidth: 200,
+        width: undefined,
+        maxWidth: undefined,
+        cellRenderer: mobileCardCellRenderer,
+        autoHeight: true,
+        sortable: false,
+        _isCard: true,
+      })].concat(
+        builtColumnDefs
+          .filter(function (c) { return c.field !== cardCol.field; })
+          .map(function (c) { return Object.assign({}, c, { hide: true }); }),
+      ),
+    };
+  }
+
   var mobile = builtColumnDefs.map(function (col) {
     var c = Object.assign({}, col);
     c.hide = mobileFields.indexOf(col.field) === -1;
@@ -261,6 +643,14 @@ function applyResponsiveColumns() {
   // means desktop never mistakenly flips to mobile in the first place.
   if (window.innerWidth < 50) { return; }
   var mobile = window.innerWidth < MOBILE_BREAKPOINT_PX;
+  var usesCard = MOBILE_COLUMN_DEFS.some(function (c) { return c._isCard; });
+  // Card mode grows the grid to its full content height and lets the PAGE
+  // scroll, instead of keeping a fixed-height box with its own inner
+  // scrollbar. On a phone a nested scroll area is awkward to drive, and a
+  // 600px box showed barely two cards while empty page space sat below it
+  // — this makes the list behave like an ordinary mobile list. Bounded by
+  // pagination (one server page of rows), not by the whole inventory.
+  applyGridLayoutMode(mobile && usesCard);
   if (mobile && !wasMobile) {
     // Redefine the whole columnDefs set rather than toggling visibility
     // and width as two separate API calls — applyColumnState() proved
@@ -268,10 +658,17 @@ function applyResponsiveColumns() {
     // visibility change on a fresh load, so the columnDefs themselves are
     // now the single source of truth for "what mobile looks like".
     gridApi.setGridOption("columnDefs", MOBILE_COLUMN_DEFS);
+    // The card stacks four labelled rows under the product header, so it
+    // needs real vertical room — autoHeight on the card column measures
+    // each card instead of clipping it to a fixed row height.
+    gridApi.setGridOption("rowHeight", usesCard ? undefined : ROW_HEIGHT_DESKTOP);
     gridApi.applyColumnState({ state: [{ colId: "ag-Grid-SelectionColumn", width: 36 }] });
+    if (usesCard) { gridApi.resetRowHeights(); }
   } else if (!mobile && wasMobile) {
     gridApi.setGridOption("columnDefs", DESKTOP_COLUMN_DEFS);
+    gridApi.setGridOption("rowHeight", ROW_HEIGHT_DESKTOP);
     gridApi.applyColumnState({ state: [{ colId: "ag-Grid-SelectionColumn", width: 50 }] });
+    gridApi.resetRowHeights();
     restoreColumnState(); // reapply any real saved user preference on top
   }
   wasMobile = mobile;
@@ -295,7 +692,7 @@ var gridOptions = {
   // page scrolling, which fought with a leftover fixed-height CSS rule and
   // left some rows unreachable.
   animateRows: true,
-  rowHeight: 52,  // a bit taller than AG Grid's default so the Photo thumbnail is actually visible
+  rowHeight: ROW_HEIGHT_DESKTOP,
   rowSelection: {
     mode: "multiRow",
     checkboxes: true,           // own dedicated (narrow, fixed) selection column, separate from Photo
@@ -317,6 +714,10 @@ var gridOptions = {
   // showed "3 pages" and Next did nothing beyond them, independent of how
   // much more data actually existed server-side).
   onSelectionChanged: reportSelection,
+  // In autoHeight (mobile card) mode the grid's height IS its content
+  // height, so every row-model change can change it — re-report so the
+  // Streamlit iframe resizes with it instead of clipping the last cards.
+  onModelUpdated: function () { if (gridLayoutIsAuto) { setTimeout(setFrameHeight, 60); } },
   onRowDoubleClicked: function (event) { openRow(event.data); },
   onCellKeyDown: function (event) {
     var key = event.event ? event.event.key : null;
@@ -351,6 +752,13 @@ window.addEventListener("message", function (event) {
   var args = data.args || {};
   var rows = args.rows || [];
   if (!gridApi) { return; }
+
+  // Guarded against an EMPTY object too ({} is truthy in JS): a caller
+  // that omits mobile_labels keeps the built-in defaults rather than
+  // silently rendering "undefined" as every card row's label.
+  if (args.mobile_labels && Object.keys(args.mobile_labels).length) {
+    MOBILE_LABELS = Object.assign({}, MOBILE_LABELS, args.mobile_labels);
+  }
 
   if (!columnsInitialized) {
     currentStateKey = args.state_key || "default";

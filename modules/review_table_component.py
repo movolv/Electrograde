@@ -29,6 +29,7 @@ def review_table(
     state_key: str,
     focus_id: str = "",
     clear_seq: int = 0,
+    mobile_labels: dict | None = None,
     key: str = "review_table",
 ) -> dict | None:
     """rows: list of dicts, each with (at least) the fields named in `columns`
@@ -49,9 +50,17 @@ def review_table(
     saved), or "" for none.
     clear_seq: bump this to make the grid deselect all rows (e.g. after
     "Clear Selection" or a successful export) without remounting it.
+    mobile_labels: {"stock", "price", "status", "integrations"} -> already-
+    translated row labels for the stacked mobile card (only used by callers
+    whose columns include a "product_info" cell — see index.html's
+    buildResponsiveColumnDefs); passing translated text in keeps every
+    user-visible string in modules/i18n.py rather than hardcoded in JS.
     Returns None until the frontend first reports back, then a dict:
-    {"selected_ids": [...], "open_id": str | None}."""
+    {"selected_ids": [...], "open_id": str | None,
+     "integrations_id": str | None} — the last asks the caller to open its
+    integrations dialog for that row."""
     return _component(
         rows=rows, column_defs=columns, mobile_fields=mobile_fields, state_key=state_key,
-        focus_id=focus_id, clear_seq=clear_seq, key=key, default=None,
+        focus_id=focus_id, clear_seq=clear_seq, mobile_labels=mobile_labels or {},
+        key=key, default=None,
     )

@@ -15,7 +15,7 @@ Shares the same PostgreSQL database as every other modules/*_store.py (modules/d
 import json
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from modules import db
 from modules.models import Product
@@ -136,6 +136,62 @@ def list_listings(product_id: str, company_id: str) -> List[MarketplaceListing]:
     ).fetchall()
     conn.close()
     return [_row_to_listing(r) for r in rows]
+
+
+def list_listings_for_products(product_ids: List[str], company_id: str) -> Dict[str, List[MarketplaceListing]]:
+    """Bulk counterpart to list_listings() — ONE query for a whole page of
+    products instead of one per row, keyed {product_id: [MarketplaceListing, ...]}.
+
+    Backs the Product List's Integrations column. Rendering a 50-row page
+    used to call get_listing() once per row (one DB round-trip each, and
+    hardcoded to a single marketplace) — exactly the N+1 pattern
+    list_products_with_listing() below already exists to avoid elsewhere.
+    Same bulk shape as product_translation_store.list_translations_for_products().
+
+    Only products that ACTUALLY have a listing row appear as keys: a
+    product listed nowhere is simply absent, never an empty-but-present
+    entry, so callers can't accidentally render an integration a product
+    isn't really on. Company-scoped, so one tenant's listings can never
+    surface in another's list."""
+    if not product_ids:
+        return {}
+    conn = _connect()
+    placeholders = ",".join("?" for _ in product_ids)
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLS} FROM marketplace_listings "
+        f"WHERE company_id = ? AND product_id IN ({placeholders}) ORDER BY marketplace ASC",
+        [company_id] + list(product_ids),
+    ).fetchall()
+    conn.close()
+    out: Dict[str, List[MarketplaceListing]] = {}
+    for r in rows:
+        listing = _row_to_listing(r)
+        out.setdefault(listing.product_id, []).append(listing)
+    return out
+
+
+def delete_listing(product_id: str, marketplace: str, company_id: str) -> bool:
+    """Unlinks ONE product from ONE marketplace — deletes this row and
+    nothing else.
+
+    LOCAL ONLY, deliberately and permanently: this never calls the
+    marketplace's API and never touches the Product itself. The case it
+    exists for is "the listing is already gone on the portal's side, and
+    ElectroGrader's record of it is now stale" — a remote delete would at
+    best be a no-op and at worst remove a listing the user still wants.
+    Re-exporting the product later simply creates a fresh row.
+
+    Returns True if a row was actually removed (False if there was
+    nothing to unlink — not an error)."""
+    conn = _connect()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM marketplace_listings WHERE product_id = ? AND marketplace = ? AND company_id = ?",
+            (product_id, marketplace, company_id),
+        )
+        removed = cur.rowcount > 0
+    conn.close()
+    return removed
 
 
 def delete_listings_for_product(product_id: str, company_id: str) -> int:

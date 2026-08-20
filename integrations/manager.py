@@ -38,6 +38,18 @@ class CatalogEntry:
     ui_group: str = "Other"  # finer-grained UI filter chip, e.g. "Marketplace"/"ERP"/"Shipping"
     description: str = ""  # one-line catalog blurb
     keywords: tuple = ()  # extra search terms beyond display_name
+    # Brand appearance, carried by the catalog entry itself so a new
+    # integration brings its own look with it — nothing in Settings, the
+    # Product List's Integrations column, or any future surface needs a
+    # per-integration branch or its own copy of this. `brand_parts` is the
+    # wordmark as ((text, css_color), ...) segments, used whenever no real
+    # logo file exists at static/integration_logos/<type>.png;
+    # `brand_weight` is its font-weight, `brand_short` the 1-2 letter
+    # fallback for spaces too small for a wordmark (e.g. the compact icons
+    # in the Product List grid).
+    brand_parts: tuple = ()
+    brand_weight: int = 700
+    brand_short: str = ""
 
 
 CONNECTORS = {
@@ -51,51 +63,62 @@ CATALOG = [
         "baselinker", integration_store.CATEGORY_MARKETPLACE, "BaseLinker", True,
         ui_group="ERP", description="Multichannel inventory & order sync (Base.com)",
         keywords=("base.com", "multichannel", "inventory", "orders", "sync"),
+        brand_parts=(("base", "#111111"), (".", "#2f6fed")), brand_weight=800, brand_short="B",
     ),
     CatalogEntry(
         "ebay", integration_store.CATEGORY_MARKETPLACE, "eBay", False,
         ui_group="Marketplace", description="Sell on the eBay marketplace",
         keywords=("auction", "marketplace"),
+        brand_parts=(("e", "#e53238"), ("b", "#0064d2"), ("a", "#f5af02"), ("y", "#86b817")),
+        brand_weight=800, brand_short="eB",
     ),
     CatalogEntry(
         "amazon", integration_store.CATEGORY_MARKETPLACE, "Amazon", False,
         ui_group="Marketplace", description="Sell on the Amazon marketplace",
         keywords=("marketplace", "fba"),
+        brand_parts=(("amazon", "#111111"),), brand_weight=700, brand_short="A",
     ),
     CatalogEntry(
         "allegro", integration_store.CATEGORY_MARKETPLACE, "Allegro", False,
         ui_group="Marketplace", description="Sell on Allegro, Poland's largest marketplace",
         keywords=("marketplace", "poland"),
+        brand_parts=(("allegro", "#ff5a00"),), brand_weight=800, brand_short="Al",
     ),
     CatalogEntry(
         "tradera", integration_store.CATEGORY_MARKETPLACE, "Tradera", False,
         ui_group="Marketplace", description="Sell on Tradera, Sweden's largest marketplace",
         keywords=("marketplace", "sweden", "auction"),
+        brand_parts=(("tradera", "#1a7a3c"),), brand_weight=800, brand_short="Tr",
     ),
     CatalogEntry(
         "woocommerce", integration_store.CATEGORY_MARKETPLACE, "WooCommerce", False,
         ui_group="Store", description="Sync products to your own WooCommerce store",
         keywords=("wordpress", "store", "ecommerce"),
+        brand_parts=(("woo", "#7f54b3"),), brand_weight=800, brand_short="Wo",
     ),
     CatalogEntry(
         "deepl", integration_store.CATEGORY_SERVICE, "DeepL Translate", True,
         ui_group="Communication", description="Automatic listing translation",
         keywords=("translate", "language", "ai"),
+        brand_parts=(("Deep", "#0f2b46"), ("L", "#0f6fff")), brand_weight=800, brand_short="DL",
     ),
     CatalogEntry(
         "openai", integration_store.CATEGORY_SERVICE, "AI Assistant", True,
         ui_group="AI", description="AI-assisted descriptions & automation",
         keywords=("ai", "assistant", "gpt", "translate", "translation"),
+        brand_parts=(("AI Assistant", "#111111"),), brand_weight=700, brand_short="AI",
     ),
     CatalogEntry(
         "dhl", integration_store.CATEGORY_SERVICE, "DHL Shipping", False,
         ui_group="Shipping", description="DHL shipping labels & rates",
         keywords=("shipping", "courier", "labels"),
+        brand_parts=(("DHL", "#d40511"),), brand_weight=900, brand_short="DH",
     ),
     CatalogEntry(
         "dpd", integration_store.CATEGORY_SERVICE, "DPD Shipping", False,
         ui_group="Shipping", description="DPD shipping labels & rates",
         keywords=("shipping", "courier", "labels"),
+        brand_parts=(("DPD", "#dc0032"),), brand_weight=900, brand_short="DP",
     ),
 ]
 
@@ -107,6 +130,37 @@ def _require_available(integration_type: str) -> CatalogEntry:
     if entry is None or not entry.available:
         raise IntegrationNotAvailableError(f"'{integration_type}' is not available yet.")
     return entry
+
+
+def get_branding(integration_type: str) -> dict:
+    """Everything any UI needs to DRAW an integration — display name (also
+    its tooltip/accessible label), wordmark segments, font weight, and a
+    short 1-2 letter fallback. The single source of truth for integration
+    appearance, so adding an integration to CATALOG is enough for it to
+    render correctly everywhere (Settings cards, the Product List's
+    Integrations column, anything added later) with no per-integration
+    branch anywhere.
+
+    An unknown/never-cataloged integration_type still returns something
+    usable — a title-cased name and neutral grey wordmark — rather than
+    raising, so a listing row referencing a since-removed integration
+    degrades gracefully instead of breaking the page that renders it."""
+    entry = _CATALOG_BY_TYPE.get(integration_type)
+    if entry is None:
+        label = integration_type.replace("_", " ").title()
+        return {
+            "integration_type": integration_type, "display_name": label,
+            "parts": [[label, "#6b7280"]], "weight": 600,
+            "short": (integration_type[:2] or "?").upper(),
+        }
+    parts = [[text, color] for text, color in entry.brand_parts] or [[entry.display_name, "#6b7280"]]
+    return {
+        "integration_type": entry.integration_type,
+        "display_name": entry.display_name,
+        "parts": parts,
+        "weight": entry.brand_weight,
+        "short": entry.brand_short or entry.display_name[:2].upper(),
+    }
 
 
 def get_supported_target_fields(integration_type: str, company_id: str = "") -> dict:
@@ -323,3 +377,4 @@ class IntegrationManager:
     get_mappable_source_fields = staticmethod(get_mappable_source_fields)
     get_implemented_sync_fields = staticmethod(get_implemented_sync_fields)
     get_external_categories = staticmethod(get_external_categories)
+    get_branding = staticmethod(get_branding)

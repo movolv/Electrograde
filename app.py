@@ -100,27 +100,38 @@ INTEGRATION_LOGOS_DIR = STATIC_DIR / "integration_logos"
 # review_table()'s column config for the Product List page — moved out of
 # modules/review_table_frontend/index.html (was hardcoded JS) so that same
 # grid component can be reused by other pages (e.g. Orders) with their own
-# columns. Order matters: desktop's must-have set (photo, sku, name,
-# quantity, price) comes first, left to right; product_condition/triage/
-# location/baselinker/status/date follow as additional desktop-only
-# columns. _PRODUCT_TABLE_MOBILE_FIELDS hides everything else below the
-# responsive breakpoint, regardless of this order.
+# columns.
+#
+# ADDING A COLUMN: append one dict here — nothing in the frontend, the
+# component wrapper, or the row-building loop below needs to change, as
+# long as `type` is one of the kinds registered in
+# review_table_frontend/index.html's CELL_TYPE_EXTRAS ("product_info" |
+# "status_dot" | "integrations" | "photo" | "price" | "numeric" | "text").
+# Fields deliberately NOT columns here (brand, weight, product_condition,
+# triage, exported date) are still on the Product and still shown/edited
+# on the product card — they were dropped from the LIST to keep a row
+# scannable, and any of them can come back as either a column here or a
+# metadata chip below.
 _PRODUCT_TABLE_COLUMNS = [
-    {"field": "photo_url", "headerName": "Photo", "width": 110, "minWidth": 60, "maxWidth": 400, "type": "photo"},
-    {"field": "sku", "headerName": "SKU", "width": 110, "minWidth": 90},
-    {"field": "name", "headerName": "Product Name", "flex": 1, "minWidth": 160},
-    {"field": "brand", "headerName": "Brand", "width": 110, "minWidth": 90},
-    {"field": "quantity", "headerName": "Qty", "width": 90, "minWidth": 70, "type": "numeric"},
-    {"field": "price", "headerName": "Price", "width": 100, "minWidth": 80, "type": "price"},
-    {"field": "weight_kg", "headerName": "Weight (kg)", "width": 110, "minWidth": 90, "type": "numeric"},
-    {"field": "product_condition", "headerName": "Product Condition", "width": 130, "minWidth": 100},
-    {"field": "triage", "headerName": "Triage", "width": 140, "minWidth": 110},
-    {"field": "location", "headerName": "Location", "width": 110, "minWidth": 90},
-    {"field": "baselinker", "headerName": "BaseLinker", "width": 120, "minWidth": 100},
-    {"field": "status", "headerName": "Status", "width": 130, "minWidth": 110},
-    {"field": "date", "headerName": "Date", "width": 120, "minWidth": 100},
+    {"field": "product", "headerName": "Product Name", "flex": 1, "minWidth": 220, "type": "product_info"},
+    {"field": "quantity", "headerName": "Stock", "width": 90, "minWidth": 70, "type": "numeric"},
+    {"field": "price", "headerName": "Price", "width": 110, "minWidth": 90, "type": "price"},
+    {"field": "status", "headerName": "Status", "width": 140, "minWidth": 110, "type": "status_dot"},
+    {"field": "integrations", "headerName": "Integration", "width": 190, "minWidth": 120, "type": "integrations"},
 ]
-_PRODUCT_TABLE_MOBILE_FIELDS = ["photo_url", "name", "price"]
+# Below the responsive breakpoint every column is rendered as a stacked
+# card row instead (see index.html), so this list is only about which
+# fields that card shows — the product cell itself is always present.
+_PRODUCT_TABLE_MOBILE_FIELDS = ["product", "quantity", "price", "status", "integrations"]
+
+# The secondary metadata line under a product's name in the list. Order is
+# display order; each entry names a key produced by the row builder below.
+# ADDING A FIELD: add its key here AND produce it in the row dict — e.g.
+# "ean"/"brand"/"category" — with no change to the column config above,
+# the frontend renderer, or the grid component. Deliberately not the
+# product's own id: it's a 12-char uuid fragment, not a human-facing
+# number, so it reads as noise next to a real SKU.
+PRODUCT_METADATA_FIELDS = ["sku", "shelf"]
 
 # review_table()'s column config for the Orders page — see modules/models.py's
 # Order dataclass and modules/order_store.py for where these fields come from.
@@ -1774,6 +1785,9 @@ def _init_state():
         "rex_bulkedit_preview": None,      # {"field","action","raw_value","rows"} from the last Preview click
         "rex_ops_popover_seq": 0,          # bumped to force the Operations popover closed when a dialog opens
         "rex_clear_seq": 0,             # bumped to tell the grid to deselect all (no remount needed)
+        "rex_integrations_product_id": None,  # product whose Integrations dialog should open on this run
+        "rex_integrations_seq": None,   # last integrations-click seq seen from the grid, to detect a NEW click
+        "rex_unlink_target": None,      # marketplace awaiting unlink confirmation inside that dialog
         "rex_focus_id": "",             # product id the grid should scroll to/highlight on next render
         "rex_last_esc_value": None,     # last value seen from esc_listener(), to detect a new Escape press
         "rex_lightbox_index": 0,        # photo index shown in the enlarge lightbox
@@ -3651,8 +3665,51 @@ elif page == PAGE_PRODUCT_LIST:
             "rex_exact_search": "",
         }
 
-        st.title(T("nav.product_list"))
-        st.caption(T("product_list.page_caption"))
+        # Phone layout: the list itself is the point of this page, but the
+        # title/description/toolbar stack above it used to push the table
+        # down to ~80% of a 844px screen, leaving barely two cards visible
+        # with empty space below. Everything below is presentation-only and
+        # scoped to <700px (the same breakpoint the grid uses), so the
+        # desktop layout is untouched:
+        #   - a smaller page title and no page description (explanatory
+        #     text, not something needed on every visit);
+        #   - Operations/Download side by side instead of Streamlit's
+        #     responsive full-width stacking;
+        #   - only the BOTTOM pager (the top one is a duplicate control);
+        #   - less dead space above the tabs.
+        st.markdown(
+            """
+            <style>
+            @media (max-width: 700px) {
+                div[data-testid="stMainBlockContainer"] { padding-top: 2.2rem !important; }
+                div[class*="st-key-rex_toolbar_title"] h1 {
+                    font-size: 1.6rem !important;
+                    margin-bottom: 0 !important;
+                }
+                div[class*="st-key-rex_toolbar_title"] div[data-testid="stCaptionContainer"] {
+                    display: none !important;
+                }
+                /* The Operations/Download row, identified by the popover it
+                   contains rather than by wrapping it in another container —
+                   :has() keeps this a pure stylesheet change with no
+                   re-indentation of the toolbar code it targets. */
+                div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-rex_ops_popover_"]) {
+                    flex-wrap: nowrap !important;
+                    gap: 0.4rem !important;
+                }
+                div[data-testid="stHorizontalBlock"]:has(div[class*="st-key-rex_ops_popover_"]) div[data-testid="stColumn"] {
+                    min-width: 0 !important;
+                    flex: 1 1 0 !important;
+                }
+                div[class*="st-key-rex_pg_bar"] { display: none !important; }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key="rex_toolbar_title"):
+            st.title(T("nav.product_list"))
+            st.caption(T("product_list.page_caption"))
 
         REVIEW_STATUS_LABELS = {
             "": T("common.all"),
@@ -3736,6 +3793,47 @@ elif page == PAGE_PRODUCT_LIST:
 
         def _status_badge(p: Product) -> str:
             return T("product_list.draft_badge") if p.status == "draft" else REVIEW_STATUS_LABELS[_review_status_of(p)]
+
+        # Product lifecycle status for the list's Status column — ONE
+        # status per row, the product's own (never a second badge stacked
+        # next to it). Adding a lifecycle state means one entry here plus
+        # its color in index.html's STATUS_DOT_COLORS; nothing else.
+        _PRODUCT_STATUS_LABELS = {
+            "draft": T("product_list.status_draft"),
+            "in_progress": T("product_list.status_in_progress"),
+            "completed": T("product_list.status_completed"),
+        }
+
+        def _product_status_label(p: Product) -> str:
+            key = p.status or "draft"
+            return _PRODUCT_STATUS_LABELS.get(key, key.replace("_", " ").title())
+
+        def _product_metadata_chips(p: Product) -> list:
+            """The secondary line under a product's name, as
+            [{"label", "value"}, ...] in PRODUCT_METADATA_FIELDS order.
+
+            Every chip a field could produce is resolved here, but only the
+            keys listed in PRODUCT_METADATA_FIELDS are emitted — so showing
+            one more (e.g. "ean") is a one-line change to that list, with
+            no edit to the column config, the row builder, or the
+            frontend. Blank values are dropped rather than rendered as an
+            empty "SKU: ·" fragment."""
+            available = {
+                "sku": (T("common.sku"), p.sku),
+                "shelf": (T("product_list.shelf_label"), p.location),
+                "ean": (T("common.barcode"), p.ean or p.manifest_barcode),
+                "brand": (T("common.brand"), p.brand),
+                "category": (T("common.category"), p.category),
+            }
+            chips = []
+            for key in PRODUCT_METADATA_FIELDS:
+                entry = available.get(key)
+                if not entry:
+                    continue
+                label, value = entry
+                if value:
+                    chips.append({"label": label, "value": str(value)})
+            return chips
 
         def _rex_reset_page():
             st.session_state.rex_page = 1
@@ -4087,6 +4185,68 @@ elif page == PAGE_PRODUCT_LIST:
                         else:
                             st.success(T("product_list.bulk_translate_success", count=ok_count))
                         if st.button(T("common.close"), use_container_width=True, key="rex_bulktranslate_done"):
+                            st.rerun()
+
+        @st.dialog(T("product_list.integrations_dialog_title"))
+        def _product_integrations_dialog(product_id: str):
+            """Opened by clicking a row's Integrations cell. Lists only the
+            integrations this product actually has a listing row for, and
+            lets a stale one be unlinked.
+
+            Unlinking is LOCAL ONLY — marketplace_store.delete_listing()
+            removes ElectroGrader's record and never calls the
+            marketplace's API (see its docstring). The dialog says so
+            explicitly, because "remove from BaseLinker" and "forget that
+            it was on BaseLinker" are very different intentions."""
+            p = inventory_store.get_product(product_id, st.session_state.company_id)
+            if p is None:
+                st.warning(T("product_list.product_not_found"))
+                return
+            st.caption(p.name or p.sku or p.id)
+            listings = marketplace_store.list_listings(p.id, p.company_id)
+            if not listings:
+                st.info(T("product_list.integrations_none"))
+                return
+
+            for listing in listings:
+                branding = IntegrationManager.get_branding(listing.marketplace)
+                name = branding["display_name"]
+                info_col, action_col = st.columns([4, 1])
+                with info_col:
+                    st.write(f"**{name}**")
+                    when = (
+                        time.strftime("%Y-%m-%d %H:%M", time.localtime(listing.last_synced_at))
+                        if listing.last_synced_at else ""
+                    )
+                    st.caption(
+                        T("product_list.integration_last_synced", when=when) if when
+                        else T("product_list.integration_never_synced")
+                    )
+                    if listing.error_message:
+                        st.caption(f"⚠ {listing.error_message}")
+                with action_col:
+                    if st.button("🗑️", key=f"unlink_open_{p.id}_{listing.marketplace}", help=T("product_list.integration_unlink")):
+                        st.session_state["rex_unlink_target"] = listing.marketplace
+
+                if st.session_state.get("rex_unlink_target") == listing.marketplace:
+                    st.warning(T("product_list.integration_unlink_confirm", name=name))
+                    ucol1, ucol2 = st.columns(2)
+                    with ucol1:
+                        if st.button(T("common.cancel"), key=f"unlink_cancel_{p.id}_{listing.marketplace}", use_container_width=True):
+                            st.session_state["rex_unlink_target"] = None
+                            st.rerun()
+                    with ucol2:
+                        if st.button(
+                            T("product_list.integration_unlink"), type="primary", use_container_width=True,
+                            key=f"unlink_go_{p.id}_{listing.marketplace}",
+                        ):
+                            marketplace_store.delete_listing(p.id, listing.marketplace, p.company_id)
+                            audit_store.log_audit(
+                                p.company_id, current_user.id, "UNLINK_LISTING", "product", p.id,
+                                f"{listing.marketplace} (local unlink only)",
+                            )
+                            st.session_state["rex_unlink_target"] = None
+                            st.success(T("product_list.integration_unlinked", name=name))
                             st.rerun()
 
         @st.dialog(T("product_list.change_status_title"))
@@ -5027,33 +5187,52 @@ elif page == PAGE_PRODUCT_LIST:
             # Targets by key prefix (all these buttons use "rex_pg_*" keys, via
             # Streamlit's "st-key-<key>" container class), not globally — other
             # buttons on the page keep their normal look.
+            # Centering is done by the flex rules below (justify-content on
+            # the columns' own horizontal block), NOT by wrapping the
+            # controls in st.columns([2, 3, 2]) gutters as this used to:
+            # those gutters left the pager only ~3/7 of the width, and on a
+            # phone that's narrow enough for Streamlit's own responsive
+            # rule to stack each column full-width — which is exactly how
+            # the pager ended up as "‹" / "1" / "›" on three separate
+            # lines. With no gutters the row has the whole width to work
+            # with, and `flex: 0 0 auto` keeps each button at its natural
+            # size instead of stretching them across it.
             st.markdown(
-                """
+                f"""
                 <style>
-                div[class*="st-key-rex_pg_"] button {
+                div[class*="st-key-rex_pg_"] button {{
                     border: none !important;
                     background: transparent !important;
                     box-shadow: none !important;
                     white-space: nowrap !important;
                     min-width: 2.6em !important;
                     padding: 2px 4px !important;
-                }
-                div[class*="st-key-rex_pg_"] button:hover:not(:disabled) {
+                }}
+                div[class*="st-key-rex_pg_"] button:hover:not(:disabled) {{
                     background: rgba(128, 128, 128, 0.15) !important;
                     border-radius: 6px !important;
-                }
-                div[class*="st-key-rex_pg_"] button[kind="primary"] {
+                }}
+                div[class*="st-key-rex_pg_"] button[kind="primary"] {{
                     background: rgba(56, 189, 248, 0.18) !important;
                     border-radius: 6px !important;
                     font-weight: 700 !important;
-                }
+                }}
+                .st-key-{key_prefix}_bar div[data-testid="stHorizontalBlock"] {{
+                    flex-wrap: nowrap !important;
+                    justify-content: center !important;
+                    gap: 0.15rem !important;
+                }}
+                .st-key-{key_prefix}_bar div[data-testid="stColumn"] {{
+                    flex: 0 0 auto !important;
+                    width: auto !important;
+                    min-width: 0 !important;
+                }}
                 </style>
                 """,
                 unsafe_allow_html=True,
             )
 
-            _left, mid, _right = st.columns([2, 3, 2])
-            with mid:
+            with st.container(key=f"{key_prefix}_bar"):
                 cols = st.columns(len(cells))
                 for col, cell in zip(cols, cells):
                     with col:
@@ -5108,6 +5287,18 @@ elif page == PAGE_PRODUCT_LIST:
                 ):
                     st.session_state.rex_open_product_id = _prior_table_result["open_id"]
                     st.rerun()
+                # Integrations cell clicked — the grid sends a monotonically
+                # increasing seq alongside the id so clicking the SAME row
+                # twice still registers as two separate opens (the id alone
+                # would be an unchanged value the second time).
+                _integrations_seq = _prior_table_result.get("integrations_seq")
+                if (
+                    _prior_table_result.get("integrations_id")
+                    and _integrations_seq != st.session_state.get("rex_integrations_seq")
+                ):
+                    st.session_state["rex_integrations_seq"] = _integrations_seq
+                    st.session_state["rex_unlink_target"] = None  # each open starts clean
+                    st.session_state["rex_integrations_product_id"] = _prior_table_result["integrations_id"]
 
             n_selected = len(st.session_state.rex_selected_ids)
             # Operations/Download sit at the LEFT, directly under the Filter
@@ -5312,6 +5503,15 @@ elif page == PAGE_PRODUCT_LIST:
                 if not products_page:
                     st.info(T("product_list.no_products_on_page"))
                 else:
+                    # ONE query for the whole page's listings, not one per
+                    # row — the Integrations cell below reads from this dict.
+                    # (This used to be a get_listing() call inside the loop:
+                    # 50 rows meant 50 round-trips, and it could only ever
+                    # see BaseLinker.)
+                    listings_by_product = marketplace_store.list_listings_for_products(
+                        [p.id for p in products_page], st.session_state.company_id,
+                    )
+
                     table_rows = []
                     for p in products_page:
                         photo_url = None
@@ -5319,25 +5519,33 @@ elif page == PAGE_PRODUCT_LIST:
                             thumb = _ensure_thumbnail(p.image_paths[0])
                             if thumb:
                                 photo_url = _image_static_url(thumb)
-                        listing = marketplace_store.get_listing(p.id, "baselinker", p.company_id)
+                        # Only integrations this product genuinely has a
+                        # listing row for — never the company's configured
+                        # integrations, and never a placeholder for one it
+                        # isn't on. Branding comes from the integrations
+                        # catalog, so a newly-added integration renders
+                        # correctly here with no change to this file.
+                        product_integrations = [
+                            {
+                                **IntegrationManager.get_branding(listing.marketplace),
+                                "status": listing.status,
+                            }
+                            for listing in listings_by_product.get(p.id, [])
+                        ]
                         table_rows.append({
                             "id": p.id,
-                            "photo_url": photo_url,
-                            "sku": p.sku or "(none)",
-                            "name": p.name or p.manifest_item_description or p.model_number or p.id,
-                            "brand": p.brand or "—",
-                            "product_condition": p.product_condition or "—",
-                            "triage": TRIAGE_LABELS.get(p.triage_status, p.triage_status),
-                            "location": p.location or "—",
+                            "product": {
+                                "photo_url": photo_url,
+                                "name": p.name or p.manifest_item_description or p.model_number or p.sku or "—",
+                                # Order/content driven entirely by
+                                # PRODUCT_METADATA_FIELDS — add a key there
+                                # and here to show one more chip.
+                                "metadata": _product_metadata_chips(p),
+                            },
                             "quantity": p.quantity or 1,
                             "price": p.price or 0,
-                            "weight_kg": p.weight_kg or p.manifest_weight_kg or 0,
-                            "baselinker": listing.status if listing else marketplace_store.STATUS_NOT_LISTED,
-                            "status": _status_badge(p),
-                            "date": (
-                                time.strftime("%Y-%m-%d", time.localtime(p.exported_at))
-                                if p.exported_at else "—"
-                            ),
+                            "status": {"key": p.status or "draft", "label": _product_status_label(p)},
+                            "integrations": product_integrations,
                         })
 
                     focus_id = st.session_state.rex_focus_id
@@ -5357,10 +5565,20 @@ elif page == PAGE_PRODUCT_LIST:
                         state_key="products",
                         focus_id=focus_id,
                         clear_seq=st.session_state.rex_clear_seq,
+                        mobile_labels={
+                            "stock": T("table_col.quantity"),
+                            "price": T("table_col.price"),
+                            "status": T("table_col.status"),
+                            "integrations": T("table_col.integrations"),
+                        },
                         key="rex_table",
                     )
                     st.caption(T("product_list.column_sort_note"))
                     _render_numbered_pagination(key_prefix="rex_pg_b")
+
+                if st.session_state.get("rex_integrations_product_id"):
+                    _product_integrations_dialog(st.session_state["rex_integrations_product_id"])
+                    st.session_state["rex_integrations_product_id"] = None
 
                 if st.session_state.rex_export_requested:
                     st.session_state.rex_export_requested = False
@@ -5940,27 +6158,18 @@ elif page == PAGE_SETTINGS:
             return ""
 
         # ---- logo: real file if dropped in later, styled wordmark otherwise --
-        _LOGO_STYLES = {
-            "baselinker": {"parts": [("base", "#111111"), (".", "#2f6fed")], "weight": 800},
-            "ebay": {"parts": [("e", "#e53238"), ("b", "#0064d2"), ("a", "#f5af02"), ("y", "#86b817")], "weight": 800},
-            "amazon": {"parts": [("amazon", "#111111")], "weight": 700},
-            "allegro": {"parts": [("allegro", "#ff5a00")], "weight": 800},
-            "tradera": {"parts": [("tradera", "#1a7a3c")], "weight": 800},
-            "woocommerce": {"parts": [("woo", "#7f54b3")], "weight": 800},
-            "deepl": {"parts": [("Deep", "#0f2b46"), ("L", "#0f6fff")], "weight": 800},
-            "openai": {"parts": [("AI Assistant", "#111111")], "weight": 700},
-            "dhl": {"parts": [("DHL", "#d40511")], "weight": 900},
-            "dpd": {"parts": [("DPD", "#dc0032")], "weight": 900},
-        }
-
+        # Wordmark definitions live on integrations/manager.py's CatalogEntry
+        # (via get_branding()), not here — the Product List's Integrations
+        # column renders the same integrations, and a second copy of these
+        # colors would inevitably drift from the catalog's.
         def _render_integration_logo(integration_type: str, height_px: int = 40) -> None:
             logo_path = INTEGRATION_LOGOS_DIR / f"{integration_type}.png"
             if logo_path.exists():
                 st.image(str(logo_path), width=height_px * 3)
                 return
-            style = _LOGO_STYLES.get(integration_type)
-            parts = style["parts"] if style else [(integration_type.replace("_", " ").title(), "#6b7280")]
-            weight = style["weight"] if style else 600
+            branding = IntegrationManager.get_branding(integration_type)
+            parts = branding["parts"]
+            weight = branding["weight"]
             spans = "".join(f'<span style="color:{color};">{text}</span>' for text, color in parts)
             # Brand wordmarks are colored for a light background (matching how
             # every one of these logos is normally displayed) — always render
