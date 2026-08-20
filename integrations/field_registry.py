@@ -45,6 +45,19 @@ SYNCABLE_FIELDS = {
     "sku": {"label": "SKU", "type": "identifier", "mappable": False},  # identity/dedup key, never redirectable
     "category": {"label": "Category", "type": "text", "mappable": False},  # owned by Category Mapping, not Field Mapping
     "barcode": {"label": "Barcode", "type": "identifier", "mappable": True},
+    # Product-card fields that had NO destination anywhere (not even a
+    # Synchronization-tab checkbox) until now — plain content fields with
+    # no structural/identity coupling, same reasoning as "defects" already
+    # had: mappable=True, no DEFAULT_STRUCTURAL_MAPPING entry, so each
+    # stays fully unmapped/unsent until an admin explicitly maps it via
+    # Field Mapping's "+" add-row.
+    "location": {"label": "Location / Shelf", "type": "text", "mappable": True},
+    "functional_test_result": {"label": "Functional Test Result", "type": "text", "mappable": True},
+    "condition_type": {"label": "Condition Type (New/Used)", "type": "text", "mappable": True},
+    "spec_summary": {"label": "Spec Summary", "type": "text", "mappable": True},
+    "box_contents": {"label": "Box Contents", "type": "list", "mappable": True},
+    "missing_components": {"label": "Missing Components", "type": "list", "mappable": True},
+    "functional_checklist": {"label": "Functional Checklist", "type": "list", "mappable": True},
 }
 
 RECEIVABLE_FIELDS = {

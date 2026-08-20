@@ -6374,77 +6374,73 @@ elif page == PAGE_SETTINGS:
             # or, for a field with no default at all (e.g. "defects"), it
             # is not sent through this mechanism at all.
             st.caption(T("settings.field_mapping_caption"))
+            st.caption(T("settings.field_mapping_editing_hint"))
 
             source_label_by_key = {k: v for k, v in _SYNC_FIELDS_SENT if k in mappable_source_keys}
-            unmapped_placeholder = T("settings.not_mapped_placeholder")
+            source_key_by_label = {v: k for k, v in source_label_by_key.items()}
 
-            # Exactly one PURE redirect rule (source_value == "") per
-            # source field is what this table manages — value-specific
-            # overrides (a rule with a non-empty source_value, e.g.
-            # translating one specific product_condition value) are a
-            # separate, older mechanism this simplified table doesn't
-            # expose an editor for, but preserves untouched on Save (see
-            # below) so nothing a company already configured is silently
-            # destroyed.
-            pure_rule_by_source = {r.source_field: r for r in mapping.rules if r.source_field and not r.source_value}
+            # Exactly PURE redirect rules (source_value == "") are what
+            # this table manages — value-specific overrides (a rule with a
+            # non-empty source_value, e.g. translating one specific
+            # product_condition value) are a separate, older mechanism
+            # this simplified table doesn't expose an editor for, but
+            # preserves untouched on Save (see below) so nothing a company
+            # already configured is silently destroyed.
+            pure_rules = [r for r in mapping.rules if r.source_field and not r.source_value]
             value_specific_rules = [r for r in mapping.rules if r.source_value]
             default_mapping = IntegrationManager.get_default_structural_mapping(entry.integration_type)
 
+            def _source_label(source_key: str) -> str:
+                return source_label_by_key.get(source_key) or T("category.unknown_field", field_key=source_key)
+
             def _target_label(target_key: str) -> str:
-                if not target_key:
-                    return unmapped_placeholder
                 if target_key in target_fields:
                     return target_fields[target_key]
-                return T("category.unknown_field", key=target_key)
+                return T("category.unknown_field", field_key=target_key)
 
-            rows = []
-            row_source_keys = []
-            for source_key, label in source_label_by_key.items():
-                rule = pure_rule_by_source.get(source_key)
-                if rule is not None:
-                    target_key = rule.target_field
-                else:
-                    target_key = default_mapping.get(source_key, "")
-                rows.append({
-                    "ElectroGrader field": label,
-                    "BaseLinker field": _target_label(target_key),
-                    "Status": T("category.status_mapped") if target_key else T("category.status_not_mapped"),
-                })
-                row_source_keys.append(source_key)
+            # Every ElectroGrader<->BaseLinker click below opens the SAME
+            # full list either side can ever be mapped with — both
+            # SelectboxColumns are built from the live discovery lists at
+            # the top of this function, never a narrower per-row subset.
+            source_options = list(source_label_by_key.values())
+            target_options = list(target_fields.values())
 
-            # Orphaned rows: a rule saved for a source field that's no
-            # longer mappable today (e.g. it became core, or was renamed —
-            # see the approved redesign's backward-compat requirement).
-            # Never silently dropped — shown as its own flagged row so an
-            # admin can see and clear it explicitly; simply omitting it
-            # from the edited table on Save (see below) removes it for
-            # real, same as clearing any other row.
-            for source_key, rule in pure_rule_by_source.items():
-                if source_key in mappable_source_keys:
-                    continue
-                rows.append({
-                    "ElectroGrader field": T("category.unknown_field", key=source_key),
-                    "BaseLinker field": _target_label(rule.target_field),
-                    "Status": T("category.status_not_mapped") if not rule.target_field else T("category.status_mapped"),
-                })
-                row_source_keys.append(source_key)
+            if pure_rules:
+                rows = [
+                    {"ElectroGrader field": _source_label(r.source_field), "BaseLinker field": _target_label(r.target_field), "Mapped": True}
+                    for r in pure_rules
+                ]
+            else:
+                # Nothing saved yet for this company — pre-fill with what
+                # this connector's own hardcoded defaults do TODAY, as
+                # ordinary editable/toggleable rows, purely a live preview
+                # (nothing written until Save is pressed below).
+                rows = [
+                    {"ElectroGrader field": _source_label(sk), "BaseLinker field": _target_label(tk), "Mapped": True}
+                    for sk, tk in default_mapping.items()
+                ]
 
-            target_options = [unmapped_placeholder] + list(target_fields.values())
-            # Preserve a stale/unknown target label as a selectable option
-            # too (rather than a value the SelectboxColumn would silently
-            # reject) — so an unavailable target round-trips through Save
-            # unchanged unless the admin explicitly picks something else.
+            # Preserve any stale/unknown field label as a selectable
+            # option too (rather than a value the SelectboxColumn would
+            # silently reject) — so an unavailable field round-trips
+            # through Save unchanged unless the admin explicitly picks
+            # something else instead.
             for row in rows:
+                if row["ElectroGrader field"] not in source_options:
+                    source_options.append(row["ElectroGrader field"])
                 if row["BaseLinker field"] not in target_options:
                     target_options.append(row["BaseLinker field"])
 
-            df = pd.DataFrame(rows, columns=["ElectroGrader field", "BaseLinker field", "Status"])
+            df = pd.DataFrame(rows, columns=["ElectroGrader field", "BaseLinker field", "Mapped"])
             edited = st.data_editor(
-                df, use_container_width=True, hide_index=True, num_rows="fixed",
+                df, use_container_width=True, hide_index=True, num_rows="dynamic",
                 key=f"mapping_editor_{entry.integration_type}",
-                disabled=["ElectroGrader field", "Status"],
                 column_config={
-                    "BaseLinker field": st.column_config.SelectboxColumn(options=target_options),
+                    "ElectroGrader field": st.column_config.SelectboxColumn(options=source_options, required=True),
+                    "BaseLinker field": st.column_config.SelectboxColumn(options=target_options, required=True),
+                    "Mapped": st.column_config.CheckboxColumn(
+                        default=True, help=T("settings.mapped_checkbox_help"),
+                    ),
                 },
             )
 
@@ -6452,13 +6448,13 @@ elif page == PAGE_SETTINGS:
                 target_key_by_label = {v: k for k, v in target_fields.items()}
                 new_pure_rules = []
                 chosen_targets: dict = {}  # target_key -> [source labels] claiming it, for conflict detection
-                for source_key, (_, row) in zip(row_source_keys, edited.iterrows()):
-                    chosen_label = row["BaseLinker field"]
-                    if chosen_label == unmapped_placeholder:
-                        continue
-                    target_key = target_key_by_label.get(chosen_label, chosen_label)
+                for _, row in edited.iterrows():
+                    if not row["Mapped"] or not row.get("ElectroGrader field") or not row.get("BaseLinker field"):
+                        continue  # unchecked ("un-mapped"), or an incomplete newly-added row — never saved
+                    source_key = source_key_by_label.get(row["ElectroGrader field"], row["ElectroGrader field"])
+                    target_key = target_key_by_label.get(row["BaseLinker field"], row["BaseLinker field"])
                     new_pure_rules.append(field_mapping_store.FieldMappingRule(source_field=source_key, target_field=target_key))
-                    chosen_targets.setdefault(target_key, []).append(source_label_by_key.get(source_key, source_key))
+                    chosen_targets.setdefault(target_key, []).append(row["ElectroGrader field"])
 
                 # Conflict validation: one BaseLinker target field can hold
                 # exactly one value — two DIFFERENT ElectroGrader fields

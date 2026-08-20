@@ -117,12 +117,18 @@ def get_supported_target_fields(integration_type: str, company_id: str = "") -> 
     With `company_id` and an actually-connected integration, builds a real
     connector instance and calls its get_target_fields() — for BaseLinker
     this fetches the company's own custom "extra fields" live (see
-    BaselinkerConnector.get_target_fields), not just the two generic
-    fields every company used to be limited to. Without `company_id` (or
+    BaselinkerConnector.get_target_fields), not just the static fields
+    every company would otherwise be limited to. Without `company_id` (or
     if not connected, or the live call fails), falls back to the
-    connector CLASS's static SUPPORTED_TARGET_FIELDS — never a hardcoded
-    per-integration branch here, and never an exception raised up to the
-    UI just because a live fetch didn't work."""
+    connector CLASS's static STRUCTURAL_TARGET_FIELDS +
+    SUPPORTED_TARGET_FIELDS (the exact same two dicts get_target_fields()
+    itself starts from before merging in anything live) — never just
+    SUPPORTED_TARGET_FIELDS alone, or a not-yet-connected company would
+    see its own default mappings (brand -> features:brand, etc.) resolve
+    to "unknown" purely because the class-level structural targets were
+    left out of this fallback. Never a hardcoded per-integration branch
+    here, and never an exception raised up to the UI just because a live
+    fetch didn't work."""
     connector_cls = CONNECTORS.get(integration_type)
     if connector_cls is None:
         return {}
@@ -131,8 +137,11 @@ def get_supported_target_fields(integration_type: str, company_id: str = "") -> 
             if is_connected(company_id, integration_type):
                 return get(company_id, integration_type).get_target_fields()
         except Exception:
-            pass  # fall through to the static class-level list below
-    return dict(getattr(connector_cls, "SUPPORTED_TARGET_FIELDS", {}))
+            pass  # fall through to the static class-level lists below
+    return {
+        **dict(getattr(connector_cls, "STRUCTURAL_TARGET_FIELDS", {})),
+        **dict(getattr(connector_cls, "SUPPORTED_TARGET_FIELDS", {})),
+    }
 
 
 def get_external_categories(integration_type: str, company_id: str) -> list:

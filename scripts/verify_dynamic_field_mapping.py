@@ -76,6 +76,10 @@ def main() -> int:
     expected_mappable = {
         "name", "brand", "model", "product_description", "condition_description",
         "defects", "product_condition", "color", "power", "weight_kg", "barcode",
+        # Added later: previously-invisible product-card fields with no
+        # structural coupling — see integrations/field_registry.py.
+        "location", "functional_test_result", "condition_type", "spec_summary",
+        "box_contents", "missing_components", "functional_checklist",
     }
     actual_core = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if not v.get("mappable")}
     actual_mappable = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if v.get("mappable")}

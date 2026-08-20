@@ -971,15 +971,20 @@ TRANSLATIONS: dict = {
         "en": "Map ElectroGrader data onto this integration's technical fields. One active configuration per integration.",
         "lv": "Sasaisti ElectroGrader datus ar šīs integrācijas tehniskajiem laukiem. Viena aktīva konfigurācija katrai integrācijai.",
     },
+    "settings.field_mapping_editing_hint": {
+        "en": "Click either side to pick from every available field. Uncheck \"Mapped\" to unmap a row without losing your picks, or use the row menu to add/remove rows entirely.",
+        "lv": "Uzklikšķini jebkurā pusē, lai izvēlētos no visiem pieejamajiem laukiem. Noņem ķeksīti \"Sasaistīts\", lai atmapotu rindu, nezaudējot izvēli, vai izmanto rindas izvēlni, lai pilnībā pievienotu/noņemtu rindas.",
+    },
     "settings.save_field_mapping": {"en": "💾 Save field mapping", "lv": "💾 Saglabāt lauku sasaisti"},
-    "settings.not_mapped_placeholder": {"en": "— Not mapped —", "lv": "— Nav sasaistīts —"},
+    "settings.mapped_checkbox_help": {
+        "en": "Checked = this mapping is active. Uncheck to disable it without deleting the row.",
+        "lv": "Atzīmēts = šī sasaiste ir aktīva. Noņem ķeksīti, lai to izslēgtu, nedzēšot rindu.",
+    },
     "settings.mapping_conflict": {
         "en": "Mapping conflict: {sources} all target \"{target}\" — a field can only receive one value. Pick a different target for all but one.",
         "lv": "Sasaistes konflikts: {sources} visi mērķē uz \"{target}\" — viens lauks var saņemt tikai vienu vērtību. Izvēlies citu mērķi visiem, izņemot vienu.",
     },
-    "category.unknown_field": {"en": "⚠ Unknown ({key})", "lv": "⚠ Nezināms ({key})"},
-    "category.status_mapped": {"en": "Mapped", "lv": "Sasaistīts"},
-    "category.status_not_mapped": {"en": "Not mapped", "lv": "Nav sasaistīts"},
+    "category.unknown_field": {"en": "⚠ Unknown ({field_key})", "lv": "⚠ Nezināms ({field_key})"},
     "settings.tab_category_mapping": {"en": "🔗 Category Mapping", "lv": "🔗 Kategoriju sasaiste"},
     "settings.no_external_categories": {
         "en": "No categories found on {name}'s side yet — check the connection, or create one there first.",
