@@ -12,6 +12,7 @@ override the mapping before anything is imported — see
 `auto_detect_columns` / `extract_rows` below, used separately so the app can
 render an editable confirmation step in between.
 """
+import re
 import uuid
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -112,15 +113,51 @@ def extract_rows(df: pd.DataFrame, column_map: Dict[str, str]) -> List[dict]:
 _GRAMS_MISLABELED_AS_KG_MEDIAN_THRESHOLD = 50.0
 
 
+def _parse_weight_value(raw: str) -> float:
+    """Parses a manifest weight cell into a float, tolerant of both
+    decimal-point ("0.5") and decimal-comma ("0,5" — common in EU-locale
+    exports, e.g. Excel with a Latvian/European regional format) notation,
+    plus stray unit text/whitespace ("1.2 kg"). Without this, a plain
+    float(...) call raises on anything but a bare decimal-point number and
+    the caller silently treated the whole row as "no weight" — column
+    correctly mapped, every row's actual value just discarded with no
+    warning anywhere. Returns 0.0 for anything genuinely unparseable
+    (blank, "N/A", "-", etc.) — same fallback as before, just far less
+    likely to be hit now that the real-world formats we've seen are
+    handled."""
+    s = (raw or "").strip()
+    if not s:
+        return 0.0
+    # Drop everything except digits, '.', ',', and '-' — strips unit
+    # suffixes like "kg"/"kgs"/"g" and any stray whitespace.
+    s = re.sub(r"[^0-9.,\-]", "", s)
+    if not s:
+        return 0.0
+    if "," in s and "." in s:
+        # Whichever separator appears LAST is the decimal point; the
+        # other is a thousands separator and gets dropped
+        # ("1,234.5" -> 1234.5, "1.234,5" -> 1234.5).
+        if s.rindex(",") > s.rindex("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        # A lone comma in a per-item weight column is overwhelmingly a
+        # decimal separator (EU-locale export) — no realistic single-item
+        # weight needs a thousands separator.
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 def _fix_weight_units(rows: List[dict]) -> None:
     """Mutates rows in place: if the batch's median weight_kg value implies
     the column is actually in grams, convert every row's weight_kg to kg."""
     values = []
     for row in rows:
-        try:
-            w = float(row.get("weight_kg", "") or 0)
-        except ValueError:
-            continue
+        w = _parse_weight_value(row.get("weight_kg", ""))
         if w > 0:
             values.append(w)
 
@@ -133,10 +170,7 @@ def _fix_weight_units(rows: List[dict]) -> None:
         return
 
     for row in rows:
-        try:
-            w = float(row.get("weight_kg", "") or 0)
-        except ValueError:
-            continue
+        w = _parse_weight_value(row.get("weight_kg", ""))
         if w > 0:
             row["weight_kg"] = str(w / 1000.0)
 
@@ -146,10 +180,7 @@ def _parse_qty_weight(row: dict) -> Tuple[int, float]:
         qty = int(float(row.get("qty", "") or "0"))
     except ValueError:
         qty = 0
-    try:
-        weight_kg = float(row.get("weight_kg", "") or "0")
-    except ValueError:
-        weight_kg = 0.0
+    weight_kg = _parse_weight_value(row.get("weight_kg", ""))
     return qty, weight_kg
 
 
