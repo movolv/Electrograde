@@ -25,7 +25,17 @@ from typing import Optional, Set
 
 import requests
 
-from integrations.base import ConnectionTestResult, ConnectorActionResult, ImportedProductData, MarketplaceConnector
+from integrations.base import (
+    CHECK_AUTH_ERROR,
+    CHECK_NOT_FOUND,
+    CHECK_SUCCESS,
+    CHECK_TEMPORARY_ERROR,
+    ConnectionTestResult,
+    ConnectorActionResult,
+    ImportedProductData,
+    MarketplaceConnector,
+    ProductConnectionCheck,
+)
 from integrations.marketplaces.baselinker import import_products, mapper, order_mapper, sync
 from modules import category_mapping_store, company_store, field_mapping_store, product_translation_store, sync_rules_store
 
@@ -36,7 +46,18 @@ _last_call_at: dict = {}  # keyed by API token, not one shared global — see mo
 
 
 class BaseLinkerAPIError(RuntimeError):
-    pass
+    """An API-level error: the request reached BaseLinker and it answered
+    with status=ERROR. `code` carries BaseLinker's own error_code (e.g.
+    "ERROR_AUTH_TOKEN") so callers can tell a credentials problem from an
+    ordinary failure without pattern-matching the human-readable message."""
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code or ""
+
+    def is_auth_error(self) -> bool:
+        upper = f"{self.code} {self}".upper()
+        return "AUTH" in upper or "TOKEN" in upper
 
 
 def _rate_limit_wait(token: str) -> None:
@@ -58,7 +79,10 @@ def _call(method: str, parameters: dict, token: str) -> dict:
     resp.raise_for_status()
     data = resp.json()
     if data.get("status") == "ERROR":
-        raise BaseLinkerAPIError(f"{method} failed: {data.get('error_message', data)}")
+        raise BaseLinkerAPIError(
+            f"{method} failed: {data.get('error_message', data)}",
+            code=str(data.get("error_code") or ""),
+        )
     return data
 
 
@@ -606,6 +630,47 @@ class BaselinkerConnector(MarketplaceConnector):
         # BaseLinker's addInventoryProduct is a full upsert — no separate
         # stock-only endpoint worth using here.
         return self.update_product(product, external_id)
+
+    def check_product_connection(self, external_id: str) -> ProductConnectionCheck:
+        """Real getInventoryProductsData call for this one product id.
+
+        BaseLinker answers a lookup for a non-existent product with a
+        SUCCESSFUL response whose "products" map simply omits it — so an
+        empty/missing entry is the NOT_FOUND signal, and every exception
+        path below stays firmly on the "couldn't verify" side. That split
+        matters: only NOT_FOUND is offered to the user as grounds for
+        removing the association."""
+        if not external_id:
+            return ProductConnectionCheck(
+                status=CHECK_NOT_FOUND, external_id="",
+                message="This listing has no BaseLinker product id stored.",
+            )
+        try:
+            products = get_product_data([external_id], self._config())
+        except BaseLinkerAPIError as e:
+            # Reached BaseLinker; it refused. Credentials problems are
+            # their own outcome — retrying won't help, the integration
+            # settings need attention.
+            return ProductConnectionCheck(
+                status=CHECK_AUTH_ERROR if e.is_auth_error() else CHECK_TEMPORARY_ERROR,
+                message=str(e), external_id=external_id,
+            )
+        except requests.RequestException as e:
+            # Timeout, DNS/connection failure, or a 5xx via
+            # raise_for_status() — the product's existence is simply
+            # unknown, never "gone".
+            return ProductConnectionCheck(
+                status=CHECK_TEMPORARY_ERROR, message=str(e), external_id=external_id,
+            )
+        except (TypeError, ValueError) as e:
+            # A malformed id that never formed a real request.
+            return ProductConnectionCheck(
+                status=CHECK_TEMPORARY_ERROR, message=str(e), external_id=external_id,
+            )
+
+        if str(external_id) in {str(k) for k in (products or {})}:
+            return ProductConnectionCheck(status=CHECK_SUCCESS, external_id=external_id)
+        return ProductConnectionCheck(status=CHECK_NOT_FOUND, external_id=external_id)
 
     # ---- Real two-way sync (Push/Pull) --------------------------------
 

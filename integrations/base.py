@@ -32,6 +32,26 @@ class ConnectorActionResult:
     data: dict = field(default_factory=dict)
 
 
+# Outcomes of a manual product connection check. Kept as four DISTINCT
+# states rather than a bool because the difference is what decides
+# whether a user should consider removing the association: only NOT_FOUND
+# is real evidence the listing is gone. A timeout or a bad token says
+# nothing about whether the product still exists, and must never be
+# presented (or acted on) as if it did.
+CHECK_SUCCESS = "success"                  # the external product exists
+CHECK_NOT_FOUND = "not_found"              # the API answered, and it is definitively gone
+CHECK_TEMPORARY_ERROR = "temporary_error"  # timeout / network / 5xx — unknown, retry later
+CHECK_AUTH_ERROR = "auth_error"            # credentials rejected — an integration settings problem
+
+
+@dataclass
+class ProductConnectionCheck:
+    """Result of MarketplaceConnector.check_product_connection()."""
+    status: str                 # one of the CHECK_* constants above
+    message: str = ""           # detail for the UI, e.g. the API's own error text
+    external_id: str = ""
+
+
 @dataclass
 class ImportedProductData:
     """One remote product, translated into ElectroGrader's vocabulary for
@@ -201,6 +221,27 @@ class MarketplaceConnector(IntegrationConnector):
     @abstractmethod
     def sync_inventory(self, product, external_id: str) -> ConnectorActionResult:
         raise NotImplementedError
+
+    def check_product_connection(self, external_id: str) -> ProductConnectionCheck:
+        """Does `external_id` still exist on this marketplace? One live
+        API call, triggered only by the user's explicit "Check product
+        connection" click — never on a Product List render, never on a
+        schedule (see integrations/manager.check_product_connection()).
+
+        Deliberately NOT @abstractmethod: a connector that hasn't
+        implemented it yet degrades to "couldn't verify" (which changes
+        nothing and prompts a retry) instead of breaking the dialog or
+        forcing every existing connector to be edited at once.
+
+        Implementations MUST distinguish the four CHECK_* outcomes, and in
+        particular must never report a timeout/network failure as
+        NOT_FOUND — that distinction is the whole point of this call, since
+        NOT_FOUND is what invites the user to remove the association."""
+        return ProductConnectionCheck(
+            status=CHECK_TEMPORARY_ERROR,
+            message=f"{self.integration_type} does not support product connection checks yet.",
+            external_id=external_id,
+        )
 
     def export_product(self, product) -> ConnectorActionResult:
         """The one call site app.py actually uses:

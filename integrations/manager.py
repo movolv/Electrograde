@@ -361,6 +361,81 @@ def test(company_id: str, integration_type: str) -> ConnectionTestResult:
     return result
 
 
+CHECK_LIMIT_REACHED = "limit_reached"  # quota exhausted; no API call was made
+CHECK_NOT_LINKED = "not_linked"        # no listing row for this (product, integration)
+
+
+def check_product_connection(company_id: str, integration_type: str, product_id: str):
+    """Manual "does this product still exist over there?" check for ONE
+    product on ONE integration. Returns a ProductConnectionCheck whose
+    status is a CHECK_* constant from integrations/base.py, or one of the
+    two module-level ones above.
+
+    Order of operations matters:
+      1. resolve the listing WITHIN this company (a product_id belonging
+         to another tenant simply has no listing here, so a caller can
+         never check — or spend quota on — someone else's product);
+      2. claim one unit of this company's daily quota, atomically;
+      3. only then spend the API call;
+      4. on SUCCESS, stamp last_verified_at.
+
+    The quota is claimed before the call and never refunded on failure:
+    a timeout still cost the marketplace a request, which is exactly what
+    the limit exists to bound. A request rejected at step 2 never reaches
+    the marketplace at all.
+
+    Never deletes the association, whatever the outcome — that stays a
+    deliberate user action (see marketplace_store.delete_listing())."""
+    from integrations.base import (
+        CHECK_AUTH_ERROR,
+        CHECK_SUCCESS,
+        CHECK_TEMPORARY_ERROR,
+        ProductConnectionCheck,
+    )
+    from modules import integration_check_quota_store, marketplace_store
+
+    listing = marketplace_store.get_listing(product_id, integration_type, company_id)
+    if listing is None:
+        return ProductConnectionCheck(status=CHECK_NOT_LINKED, message="No listing for this integration.")
+
+    # Resolve the connector BEFORE claiming quota. A listing can outlive
+    # its integration (disconnected since, or a type that isn't available
+    # in this build), and a request that can never reach the marketplace
+    # must not burn one of the company's daily checks.
+    try:
+        connector = get(company_id, integration_type)
+    except IntegrationNotConnectedError as e:
+        return ProductConnectionCheck(
+            status=CHECK_AUTH_ERROR, external_id=listing.external_listing_id, message=str(e),
+        )
+    except IntegrationNotAvailableError as e:
+        return ProductConnectionCheck(
+            status=CHECK_TEMPORARY_ERROR, external_id=listing.external_listing_id, message=str(e),
+        )
+
+    allowed, used, limit = integration_check_quota_store.try_consume(company_id)
+    if not allowed:
+        return ProductConnectionCheck(
+            status=CHECK_LIMIT_REACHED, external_id=listing.external_listing_id,
+            message=f"{used}/{limit}",
+        )
+
+    result = connector.check_product_connection(listing.external_listing_id)
+
+    if result.status == CHECK_SUCCESS:
+        marketplace_store.mark_verified(product_id, integration_type, company_id)
+
+    integration_store.record_sync(
+        company_id, integration_type, "check_product_connection", product_id=product_id,
+        status=(
+            integration_store.SYNC_STATUS_SUCCESS if result.status == CHECK_SUCCESS
+            else integration_store.SYNC_STATUS_ERROR
+        ),
+        error_message="" if result.status == CHECK_SUCCESS else f"{result.status}: {result.message}",
+    )
+    return result
+
+
 class IntegrationManager:
     """Thin staticmethod façade over the module-level functions above,
     purely so call sites can spell it IntegrationManager.get(...) — every
@@ -378,3 +453,4 @@ class IntegrationManager:
     get_implemented_sync_fields = staticmethod(get_implemented_sync_fields)
     get_external_categories = staticmethod(get_external_categories)
     get_branding = staticmethod(get_branding)
+    check_product_connection = staticmethod(check_product_connection)

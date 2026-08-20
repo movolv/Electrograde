@@ -41,6 +41,7 @@ from modules import (
     i18n,
     identifier_lookup,
     image_pipeline,
+    integration_check_quota_store,
     integration_store,
     inventory_store,
     lookup_cache_store,
@@ -65,8 +66,20 @@ from modules import (
     web_search,
 )
 from integrations import field_registry, scheduler as sync_scheduler
-from integrations.base import ConnectorActionResult
-from integrations.manager import CATALOG, IntegrationManager, IntegrationNotAvailableError, IntegrationNotConnectedError
+from integrations.base import (
+    CHECK_AUTH_ERROR,
+    CHECK_NOT_FOUND,
+    CHECK_SUCCESS,
+    CHECK_TEMPORARY_ERROR,
+    ConnectorActionResult,
+)
+from integrations.manager import (
+    CATALOG,
+    CHECK_LIMIT_REACHED,
+    IntegrationManager,
+    IntegrationNotAvailableError,
+    IntegrationNotConnectedError,
+)
 from integrations.marketplaces.baselinker import client as baselinker_client
 from sync import catalog_import, change_detector, engine as sync_engine, service as sync_service
 from sync.status import STATUS_DISABLED, STATUS_SUCCESS
@@ -1788,6 +1801,8 @@ def _init_state():
         "rex_integrations_product_id": None,  # product whose Integrations dialog should open on this run
         "rex_integrations_seq": None,   # last integrations-click seq seen from the grid, to detect a NEW click
         "rex_unlink_target": None,      # marketplace awaiting unlink confirmation inside that dialog
+        "rex_check_result": None,       # {"marketplace","status","message"} of the last connection check
+        "rex_check_pending": None,      # marketplace whose check should run on the next dialog pass
         "rex_focus_id": "",             # product id the grid should scroll to/highlight on next render
         "rex_last_esc_value": None,     # last value seen from esc_listener(), to detect a new Escape press
         "rex_lightbox_index": 0,        # photo index shown in the enlarge lightbox
@@ -4238,25 +4253,88 @@ elif page == PAGE_PRODUCT_LIST:
                 st.info(T("product_list.integrations_none"))
                 return
 
+            # A pending check is executed HERE, at the top of the dialog
+            # body, rather than inside the button below: @st.dialog
+            # re-executes this whole function when a widget inside it is
+            # used, so running it first means the "Last checked" line and
+            # the quota counter rendered further down already reflect it.
+            # Doing the work in the button branch instead left both showing
+            # pre-check values until the user interacted a second time.
+            _pending = st.session_state.pop("rex_check_pending", None)
+            if _pending:
+                _check = IntegrationManager.check_product_connection(p.company_id, _pending, p.id)
+                st.session_state["rex_check_result"] = {
+                    "marketplace": _pending, "status": _check.status, "message": _check.message,
+                }
+                listings = marketplace_store.list_listings(p.id, p.company_id)
+
+            _checks_used, _checks_limit = integration_check_quota_store.get_usage(p.company_id)
+
             for listing in listings:
                 branding = IntegrationManager.get_branding(listing.marketplace)
                 name = branding["display_name"]
-                info_col, action_col = st.columns([4, 1])
-                with info_col:
-                    st.write(f"**{name}**")
-                    when = (
-                        time.strftime("%Y-%m-%d %H:%M", time.localtime(listing.last_synced_at))
-                        if listing.last_synced_at else ""
-                    )
-                    st.caption(
-                        T("product_list.integration_last_synced", when=when) if when
-                        else T("product_list.integration_never_synced")
-                    )
-                    if listing.error_message:
-                        st.caption(f"⚠ {listing.error_message}")
-                with action_col:
-                    if st.button("🗑️", key=f"unlink_open_{p.id}_{listing.marketplace}", help=T("product_list.integration_unlink")):
+                st.divider()
+                st.write(f"**{name}**")
+                st.caption(T("product_list.integration_connected"))
+                st.caption(T(
+                    "product_list.integration_external_id",
+                    external_id=listing.external_listing_id or "—",
+                ))
+                _checked_when = (
+                    time.strftime("%d.%m.%Y %H:%M", time.localtime(listing.last_verified_at))
+                    if listing.last_verified_at else ""
+                )
+                st.caption(
+                    T("product_list.integration_last_checked", when=_checked_when) if _checked_when
+                    else T("product_list.integration_never_checked")
+                )
+
+                bcol1, bcol2 = st.columns(2)
+                with bcol1:
+                    if st.button(
+                        T("product_list.check_connection"), use_container_width=True,
+                        key=f"check_conn_{p.id}_{listing.marketplace}",
+                        disabled=_checks_used >= _checks_limit,
+                    ):
+                        # Flag the request, then re-run only THIS dialog:
+                        # scope="fragment" keeps it open (a default
+                        # scope="app" rerun would close it before the user
+                        # saw the answer), and re-entering the body from
+                        # the top is what lets "Last checked" and the quota
+                        # counter above render post-check values.
+                        st.session_state["rex_check_pending"] = listing.marketplace
+                        st.rerun(scope="fragment")
+                with bcol2:
+                    if st.button(
+                        T("product_list.integration_unlink"), use_container_width=True,
+                        key=f"unlink_open_{p.id}_{listing.marketplace}",
+                    ):
                         st.session_state["rex_unlink_target"] = listing.marketplace
+
+                # Outcome of the most recent check for THIS listing, shown
+                # right under its buttons.
+                _result = st.session_state.get("rex_check_result") or {}
+                if _result.get("marketplace") == listing.marketplace:
+                    _status = _result.get("status")
+                    if _status == CHECK_SUCCESS:
+                        st.success(T("product_list.check_verified", name=name))
+                    elif _status == CHECK_NOT_FOUND:
+                        # Deliberately NOT auto-removing the association or
+                        # hiding the icon: a single "not found" answer is
+                        # the user's cue to decide, not the app's licence
+                        # to delete their data.
+                        st.error(T("product_list.check_lost", name=name))
+                    elif _status == CHECK_LIMIT_REACHED:
+                        st.warning(T(
+                            "product_list.check_limit_reached",
+                            used=_checks_limit, limit=_checks_limit,
+                        ))
+                    elif _status == CHECK_AUTH_ERROR:
+                        st.error(T("product_list.check_auth_failed"))
+                    else:
+                        st.warning(T("product_list.check_unreachable"))
+                    if _result.get("message") and _status in (CHECK_TEMPORARY_ERROR, CHECK_AUTH_ERROR):
+                        st.caption(_result["message"])
 
                 if st.session_state.get("rex_unlink_target") == listing.marketplace:
                     st.warning(T("product_list.integration_unlink_confirm", name=name))
@@ -4276,8 +4354,12 @@ elif page == PAGE_PRODUCT_LIST:
                                 f"{listing.marketplace} (local unlink only)",
                             )
                             st.session_state["rex_unlink_target"] = None
+                            st.session_state["rex_check_result"] = None
                             st.success(T("product_list.integration_unlinked", name=name))
                             st.rerun()
+
+            st.divider()
+            st.caption(T("product_list.checks_used_today", used=_checks_used, limit=_checks_limit))
 
         @st.dialog(T("product_list.change_status_title"))
         def _confirm_change_status_dialog(selected_products):

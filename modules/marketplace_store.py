@@ -38,6 +38,7 @@ class MarketplaceListing:
     url: str = ""
     last_synced_at: float = 0.0
     error_message: str = ""
+    last_verified_at: float = 0.0  # last successful manual connection check; 0.0 = never checked
 
 
 def _connect():
@@ -65,6 +66,13 @@ def _connect():
     # company_id (the only source of truth available for legacy rows; a
     # listing can't outlive/precede the product it belongs to).
     existing_cols = db.table_columns(conn, "marketplace_listings")
+    # When the user last manually confirmed, via a real API call, that this
+    # listing still exists on the marketplace (see
+    # integrations/manager.check_product_connection()). Distinct from
+    # last_synced_at, which records when data was last pushed/pulled — a
+    # listing can be freshly synced and still have never been verified.
+    if "last_verified_at" not in existing_cols:
+        conn.execute("ALTER TABLE marketplace_listings ADD COLUMN last_verified_at DOUBLE PRECISION")
     if "company_id" not in existing_cols:
         conn.execute("ALTER TABLE marketplace_listings ADD COLUMN company_id TEXT NOT NULL DEFAULT 'default'")
         conn.execute(
@@ -85,12 +93,13 @@ def _row_to_listing(r: tuple) -> MarketplaceListing:
         external_listing_id=r[3] or "",
         status=r[4] or STATUS_NOT_LISTED, price=r[5] or 0.0, url=r[6] or "",
         last_synced_at=r[7] or 0.0, error_message=r[8] or "",
+        last_verified_at=r[9] or 0.0,
     )
 
 
 _SELECT_COLS = (
     "product_id, marketplace, company_id, external_listing_id, status, price, url, "
-    "last_synced_at, error_message"
+    "last_synced_at, error_message, last_verified_at"
 )
 
 
@@ -168,6 +177,25 @@ def list_listings_for_products(product_ids: List[str], company_id: str) -> Dict[
         listing = _row_to_listing(r)
         out.setdefault(listing.product_id, []).append(listing)
     return out
+
+
+def mark_verified(product_id: str, marketplace: str, company_id: str, when: Optional[float] = None) -> None:
+    """Records that a manual connection check just confirmed this listing
+    still exists on the marketplace. Only ever called on a SUCCESS result
+    — a NOT_FOUND/timeout/auth failure deliberately leaves the previous
+    timestamp alone rather than overwriting it with a failure, so the
+    dialog can keep showing when it was last genuinely reachable.
+
+    Note upsert_listing()'s ON CONFLICT clause does not touch this column,
+    so a later re-export/sync of the same listing preserves it too."""
+    conn = _connect()
+    with conn:
+        conn.execute(
+            "UPDATE marketplace_listings SET last_verified_at = ? "
+            "WHERE product_id = ? AND marketplace = ? AND company_id = ?",
+            (when if when is not None else time.time(), product_id, marketplace, company_id),
+        )
+    conn.close()
 
 
 def delete_listing(product_id: str, marketplace: str, company_id: str) -> bool:

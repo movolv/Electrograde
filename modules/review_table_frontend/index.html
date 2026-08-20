@@ -98,6 +98,12 @@ function photoCellRenderer(params) {
    1-2 letter `short` form, used in the grid where a full wordmark would
    be unreadable at row height).
    --------------------------------------------------------------------- */
+// The border is tinted by the listing's STORED status (green = listed,
+// grey = not listed/removed, red = last export errored, indigo = sold).
+// It reflects what the last sync/export recorded, NOT a live check — the
+// Product List never calls a marketplace while rendering. Whether the
+// product still exists on the other end is only ever established by the
+// user pressing "Check product connection" in the dialog.
 var INTEGRATION_STATUS_RING = {
   listed: "#16a34a",
   sold: "#6366f1",

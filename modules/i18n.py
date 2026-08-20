@@ -645,12 +645,41 @@ TRANSLATIONS: dict = {
     },
     "product_list.integration_unlink": {"en": "Unlink", "lv": "Atsaistīt"},
     "product_list.integration_unlink_confirm": {
-        "en": "Unlink '{name}'? This only removes ElectroGrader's record of the listing — it never deletes anything on {name} itself.",
-        "lv": "Atsaistīt '{name}'? Tas noņem tikai ElectroGrader ierakstu par publikāciju — pašā {name} nekas netiek dzēsts.",
+        "en": "Are you sure you want to remove this product integration? This only removes ElectroGrader's record of the listing — it never deletes anything on {name} itself.",
+        "lv": "Vai tiešām vēlies noņemt šo produkta integrāciju? Tas noņem tikai ElectroGrader ierakstu par publikāciju — pašā {name} nekas netiek dzēsts.",
     },
     "product_list.integration_unlinked": {"en": "Unlinked from {name}.", "lv": "Atsaistīts no {name}."},
     "product_list.integration_last_synced": {"en": "Last synced: {when}", "lv": "Pēdējā sinhronizācija: {when}"},
     "product_list.integration_never_synced": {"en": "Never synced", "lv": "Nav sinhronizēts"},
+    "product_list.integration_connected": {"en": "Product integrated", "lv": "Produkts ir integrēts"},
+    "product_list.integration_external_id": {"en": "External Product ID: {external_id}", "lv": "Ārējais produkta ID: {external_id}"},
+    "product_list.integration_last_checked": {"en": "Last checked: {when}", "lv": "Pēdējoreiz pārbaudīts: {when}"},
+    "product_list.integration_never_checked": {"en": "Never checked", "lv": "Nav pārbaudīts"},
+    "product_list.check_connection": {"en": "Check product connection", "lv": "Pārbaudīt produkta savienojumu"},
+    "product_list.check_verified": {
+        "en": "Connection verified — product is connected to {name}.",
+        "lv": "Savienojums apstiprināts — produkts ir savienots ar {name}.",
+    },
+    "product_list.check_lost": {
+        "en": "Connection lost — product was not found in {name}. Nothing was removed; use Unlink if you want to clear this link.",
+        "lv": "Savienojums zaudēts — produkts netika atrasts {name}. Nekas netika noņemts; izmanto Atsaistīt, ja vēlies notīrīt šo saiti.",
+    },
+    "product_list.check_unreachable": {
+        "en": "Could not verify connection — the marketplace could not be reached. Please try again.",
+        "lv": "Neizdevās pārbaudīt savienojumu — tirdzniecības vietu neizdevās sasniegt. Lūdzu, mēģini vēlreiz.",
+    },
+    "product_list.check_auth_failed": {
+        "en": "Integration authentication failed. Please check the integration settings.",
+        "lv": "Integrācijas autentifikācija neizdevās. Lūdzu, pārbaudi integrācijas iestatījumus.",
+    },
+    "product_list.check_limit_reached": {
+        "en": "Daily product connection check limit reached ({used}/{limit}). Try again tomorrow.",
+        "lv": "Sasniegts dienas produktu savienojuma pārbaužu limits ({used}/{limit}). Mēģini rīt.",
+    },
+    "product_list.checks_used_today": {
+        "en": "Connection checks used today: {used}/{limit}",
+        "lv": "Šodien izmantotās savienojuma pārbaudes: {used}/{limit}",
+    },
     "product_list.save_button": {"en": "💾 Save", "lv": "💾 Saglabāt"},
 
     "product_list.saved": {"en": "Saved.", "lv": "Saglabāts."},
