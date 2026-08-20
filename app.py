@@ -3213,14 +3213,39 @@ if page == PAGE_NEW_ITEM:
         )
 
         st.caption(T("new_item.box_dimensions_caption"))
+
+        def _blank_if_unset(value: float):
+            """A not-yet-measured dimension is stored as 0.0, but showing
+            that as a literal "0.00" means the operator has to select and
+            delete it before typing — on every box, on every item. Passing
+            None instead renders the field genuinely empty (with a
+            placeholder), so it can be typed into straight away. A real
+            stored value still shows normally, and the Save handler below
+            turns an empty (None) field back into 0.0."""
+            return float(value) if value else None
+
+        _dim_placeholder = T("new_item.box_dimension_placeholder")
         dim_cols = st.columns(4)
         with dim_cols[0]:
-            length_in = st.number_input(T("new_item.box_length"), min_value=0.0, value=float(product.box_length_cm), step=0.5)
+            length_in = st.number_input(
+                T("new_item.box_length"), min_value=0.0, value=_blank_if_unset(product.box_length_cm),
+                step=0.5, placeholder=_dim_placeholder,
+            )
         with dim_cols[1]:
-            width_in = st.number_input(T("new_item.box_width"), min_value=0.0, value=float(product.box_width_cm), step=0.5)
+            width_in = st.number_input(
+                T("new_item.box_width"), min_value=0.0, value=_blank_if_unset(product.box_width_cm),
+                step=0.5, placeholder=_dim_placeholder,
+            )
         with dim_cols[2]:
-            height_in = st.number_input(T("new_item.box_height"), min_value=0.0, value=float(product.box_height_cm), step=0.5)
+            height_in = st.number_input(
+                T("new_item.box_height"), min_value=0.0, value=_blank_if_unset(product.box_height_cm),
+                step=0.5, placeholder=_dim_placeholder,
+            )
         with dim_cols[3]:
+            # Weight deliberately keeps showing its number rather than
+            # blanking at 0: unlike the three box dimensions it is usually
+            # already filled in from the manifest, and hiding a real value
+            # would be worse than the empty-field convenience is worth.
             weight_kg_in = st.number_input(
                 T("new_item.box_weight"), min_value=0.0,
                 value=float(product.weight_kg or product.manifest_weight_kg), step=0.1,
@@ -3280,9 +3305,14 @@ if page == PAGE_NEW_ITEM:
             if st.button(T("new_item.save_item"), type="primary", use_container_width=True):
                 product.location = location_in.strip()
                 product.functional_test_result = test_in
-                product.box_length_cm = float(length_in)
-                product.box_width_cm = float(width_in)
-                product.box_height_cm = float(height_in)
+                # An empty dimension field reads back as None (see
+                # _blank_if_unset above) — stored as 0.0, the same "not
+                # measured" value it has always used, so nothing downstream
+                # (export, BaseLinker weight mapping, Product List) sees a
+                # new None it isn't prepared for.
+                product.box_length_cm = float(length_in or 0.0)
+                product.box_width_cm = float(width_in or 0.0)
+                product.box_height_cm = float(height_in or 0.0)
                 product.weight_kg = float(weight_kg_in)
                 product.price = float(price_override_in)
                 product.quantity = int(quantity_in)
