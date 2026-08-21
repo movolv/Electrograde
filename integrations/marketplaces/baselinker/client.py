@@ -21,6 +21,7 @@ Expected shapes (validated in connect()):
 """
 import json
 import time
+from dataclasses import dataclass
 from typing import Optional, Set
 
 import requests
@@ -170,6 +171,69 @@ def get_order_statuses(config: dict) -> dict:
 # that's the whole point. Errors (bad token, network) propagate as
 # BaseLinkerAPIError/requests.RequestException; the Settings page catches
 # and displays them rather than these functions swallowing anything.
+
+@dataclass
+class TokenVerification:
+    """Outcome of verify_token() below. Kept in this module rather than
+    integrations/base.py because it is shaped by BaseLinker's own account
+    model (`inventory_count`), exactly like the list_*() helpers around it;
+    promote it to a shared dataclass the day a second connector needs the
+    same shape, not before.
+
+    `status` is one of integrations/base.py's CHECK_* constants, reusing the
+    same three-way split check_product_connection() already draws — see
+    verify_token() for why a bare success/failure boolean is the wrong shape
+    here."""
+    status: str                 # CHECK_SUCCESS / CHECK_AUTH_ERROR / CHECK_TEMPORARY_ERROR
+    message: str = ""           # the API's own error text, for the UI to show verbatim
+    inventory_count: int = 0    # only meaningful on CHECK_SUCCESS — proof the token really opened the account
+
+
+def verify_token(token: str) -> TokenVerification:
+    """Checks ONLY whether this API token works — one cheap, read-only
+    getInventories call, needing no inventory_id/category_id/price group.
+
+    That "needs nothing else" part is the whole point, and what separates
+    this from BaselinkerConnector.test_connection(): that one can only run
+    once the entire Settings form is filled in and submitted, so it cannot
+    tell somebody whose TOKEN is wrong from somebody who merely picked the
+    wrong inventory — and until this existed there was no way at all to ask
+    "is my key even valid?" without first getting through inventory and
+    category selection.
+
+    Splits failure three ways rather than returning a bare bool, because
+    the three demand opposite responses: BaseLinker actively REFUSED the
+    credentials (retrying is pointless — the token needs replacing), we
+    never reached BaseLinker at all (network/DNS/timeout/5xx — the token
+    may well be perfect and the right move is to try again), or it worked.
+    Collapsing the first two into one "failed" is precisely what leaves
+    someone stuck with a connection they cannot diagnose.
+
+    Never raises: every failure path is reported as a value, since the only
+    caller is a UI button whose entire job is to explain what went wrong.
+    """
+    token = (token or "").strip()
+    if not token:
+        return TokenVerification(status=CHECK_AUTH_ERROR, message="No API token provided.")
+    try:
+        data = _call("getInventories", {}, token)
+    except BaseLinkerAPIError as e:
+        # Reached BaseLinker and it answered with status=ERROR. Only a
+        # credentials-shaped error is the token's fault; anything else
+        # (rate limit, account restriction) is "try again", not "your key
+        # is wrong" — mislabeling those would send the user off replacing
+        # a token that was fine.
+        return TokenVerification(
+            status=CHECK_AUTH_ERROR if e.is_auth_error() else CHECK_TEMPORARY_ERROR,
+            message=str(e),
+        )
+    except requests.RequestException as e:
+        # Never got an answer — says nothing about the token's validity.
+        return TokenVerification(status=CHECK_TEMPORARY_ERROR, message=str(e))
+    return TokenVerification(
+        status=CHECK_SUCCESS, inventory_count=len(data.get("inventories") or []),
+    )
+
 
 def list_inventories(token: str) -> list:
     """Real getInventories call. Each returned dict also carries

@@ -6417,6 +6417,7 @@ elif page == PAGE_SETTINGS:
             options_key = f"bl_options_{current_user.company_id}"
             categories_key = f"bl_categories_{current_user.company_id}"
             auto_fetch_key = f"bl_auto_fetched_{current_user.company_id}"
+            fetch_error_key = f"bl_fetch_error_{current_user.company_id}"
 
             def _do_fetch(tok: str) -> None:
                 try:
@@ -6424,14 +6425,21 @@ elif page == PAGE_SETTINGS:
                     price_groups = baselinker_client.list_price_groups(tok)
                     warehouses = baselinker_client.list_warehouses(tok)
                 except (baselinker_client.BaseLinkerAPIError, requests.RequestException) as e:
+                    # Parked in session_state rather than rendered here: the
+                    # caller reruns straight after this returns, which throws
+                    # away anything already painted — so an st.error() call on
+                    # this line was never actually seen, and a failing fetch
+                    # looked like a button that did nothing at all. Rendered
+                    # after the rerun instead, below the buttons.
                     st.session_state[options_key] = None
-                    st.error(T("settings.fetch_options_failed", error=str(e)))
+                    st.session_state[fetch_error_key] = str(e)
                     return
                 st.session_state[options_key] = {
                     "token": tok, "inventories": inventories,
                     "price_groups": price_groups, "warehouses": warehouses,
                 }
                 st.session_state[categories_key] = None
+                st.session_state.pop(fetch_error_key, None)
 
             # ---- Step 1: token + fetch ----
             token = st.text_input(
@@ -6449,15 +6457,59 @@ elif page == PAGE_SETTINGS:
                 st.session_state[auto_fetch_key] = True
                 _do_fetch(record.credentials.get("token", ""))
 
+            def _token_to_use() -> str:
+                """Whatever was just typed, else the stored one — so both
+                buttons below work for a first-time setup and for
+                re-checking an account that is already connected."""
+                return (token or (record.credentials.get("token", "") if has_credentials else "")).strip()
+
+            # "Verify key" sits HERE, beside the token field, deliberately
+            # ahead of every other step. The only credentials check that
+            # existed before was the form's own "Save & test connection" at
+            # the very bottom, unreachable until an inventory was fetched
+            # AND categories were loaded — so someone whose token was simply
+            # wrong (or whose server could not reach the API at all) had no
+            # way to find that out, and no way to tell those two apart. This
+            # answers "is my key good?" on its own, before anything else is
+            # filled in.
+            verify_col, fetch_col = st.columns(2)
             fetch_label = T("settings.refetch_options") if options_key in st.session_state else T("settings.fetch_options")
-            if st.button(fetch_label, key=f"bl_fetch_btn_{entry.integration_type}"):
-                use_token = token or (record.credentials.get("token", "") if has_credentials else "")
+            verify_clicked = verify_col.button(
+                T("settings.verify_token"), key=f"bl_verify_btn_{entry.integration_type}",
+                help=T("settings.verify_token_help"), use_container_width=True,
+            )
+            fetch_clicked = fetch_col.button(
+                fetch_label, key=f"bl_fetch_btn_{entry.integration_type}", use_container_width=True,
+            )
+
+            if verify_clicked:
+                use_token = _token_to_use()
+                if not use_token:
+                    st.warning(T("settings.api_token_required"))
+                else:
+                    with st.spinner(T("settings.verifying_token")):
+                        check = baselinker_client.verify_token(use_token)
+                    # Three outcomes, three different next steps for the user
+                    # — never one generic "failed" (see verify_token()).
+                    if check.status == CHECK_SUCCESS:
+                        st.success(T("settings.verify_token_ok", count=check.inventory_count))
+                    elif check.status == CHECK_AUTH_ERROR:
+                        st.error(T("settings.verify_token_rejected", error=check.message))
+                    else:
+                        st.warning(T("settings.verify_token_unreachable", error=check.message))
+
+            if fetch_clicked:
+                use_token = _token_to_use()
                 if not use_token:
                     st.warning(T("settings.api_token_required"))
                 else:
                     with st.spinner(T("settings.fetching_options")):
                         _do_fetch(use_token)
                     st.rerun()
+
+            fetch_error = st.session_state.get(fetch_error_key)
+            if fetch_error:
+                st.error(T("settings.fetch_options_failed", error=fetch_error))
 
             options = st.session_state.get(options_key)
             if not options:

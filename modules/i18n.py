@@ -950,6 +950,33 @@ TRANSLATIONS: dict = {
     "settings.category_id_field": {"en": "Category ID", "lv": "Kategorijas ID"},
     "settings.price_group_id": {"en": "Price group ID (optional)", "lv": "Cenu grupas ID (nav obligāts)"},
     "settings.warehouse_id": {"en": "Warehouse ID (optional)", "lv": "Noliktavas ID (nav obligāts)"},
+    "settings.verify_token": {"en": "🔑 Verify key", "lv": "🔑 Pārbaudīt atslēgu"},
+    "settings.verify_token_help": {
+        "en": "Checks the API token on its own, before anything else is filled in — "
+              "tells you straight away whether the key is the problem.",
+        "lv": "Pārbauda tikai API atslēgu, pirms vēl kaut kas cits ir aizpildīts — "
+              "uzreiz parāda, vai vainīga ir atslēga.",
+    },
+    "settings.verifying_token": {"en": "Checking the API token…", "lv": "Pārbauda API atslēgu…"},
+    # Phrased as "label: {count}" on purpose — "1 inventories"/"1 inventāri"
+    # would be wrong in both languages, and neither has a plural form worth
+    # a plural-rules mechanism for a single string.
+    "settings.verify_token_ok": {
+        "en": "✅ Key is valid — account opened. Inventories found: {count}. You can fetch options now.",
+        "lv": "✅ Atslēga ir derīga — konts atvērts. Atrasto inventāru skaits: {count}. Tagad vari ielādēt opcijas.",
+    },
+    "settings.verify_token_rejected": {
+        "en": "❌ BaseLinker rejected this key: {error} — replace it with a new token from "
+              "Account & other → My account → API.",
+        "lv": "❌ BaseLinker noraidīja šo atslēgu: {error} — aizvieto to ar jaunu atslēgu no "
+              "Konts un cits → Mans konts → API.",
+    },
+    "settings.verify_token_unreachable": {
+        "en": "⚠️ Could not reach BaseLinker: {error} — the key itself may be fine. "
+              "Check this server's internet access and try again.",
+        "lv": "⚠️ Neizdevās sasniegt BaseLinker: {error} — pati atslēga varētu būt derīga. "
+              "Pārbaudi šī servera interneta piekļuvi un mēģini vēlreiz.",
+    },
     "settings.fetch_options": {"en": "🔍 Fetch options", "lv": "🔍 Ielādēt opcijas"},
     "settings.refetch_options": {"en": "🔄 Re-fetch options", "lv": "🔄 Ielādēt opcijas no jauna"},
     "settings.fetching_options": {"en": "Fetching account data from BaseLinker…", "lv": "Ielādē konta datus no BaseLinker…"},
