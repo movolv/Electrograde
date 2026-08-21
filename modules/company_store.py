@@ -121,12 +121,24 @@ def create_company(
     product_limit: int = 500,
     company_id: Optional[str] = None,
     slug: Optional[str] = None,
+    default_product_language: str = "",
 ) -> Company:
     """`company_id` is normally left auto-generated; only the migration
     script passes an explicit one (DEFAULT_COMPANY_ID), to line up with
     data already tagged company_id='default' before this table existed.
     `slug`: purely additive optional param (auto-derived from `name` if not
-    given) — every existing call site keeps working unchanged."""
+    given) — every existing call site keeps working unchanged.
+
+    `default_product_language`: settable at creation, which is the only
+    moment it is free. Changed later, it retroactively splits the catalog —
+    every product authored before the switch has no content in the new
+    language, so each one silently exports in its original language instead
+    (see integrations/marketplaces/baselinker/client.py's
+    _resolve_export_content()), and a marketplace ends up holding two
+    unrelated sets of parameter names. Choosing it here, before the company
+    owns a single product, is the one path with nothing to migrate.
+    Defaults to "" meaning "leave the Company default" (currently "en"), so
+    every existing caller behaves exactly as before."""
     now = time.time()
     company = Company(
         id=company_id or uuid.uuid4().hex[:12],
@@ -134,6 +146,8 @@ def create_company(
         user_limit=user_limit, product_limit=product_limit,
         created_at=now, updated_at=now,
     )
+    if default_product_language:
+        company.default_product_language = default_product_language
     conn = _connect()
     with conn:
         conn.execute(

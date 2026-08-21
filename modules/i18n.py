@@ -82,6 +82,15 @@ TRANSLATIONS: dict = {
         "en": "No plan-specific limits yet — this just records your choice for later.",
         "lv": "Pagaidām plānam nav ierobežojumu — tas tikai saglabā tavu izvēli vēlākai izmantošanai.",
     },
+    "login.product_language": {"en": "Product content language", "lv": "Produktu satura valoda"},
+    "login.product_language_help": {
+        "en": "The language your product titles and descriptions are written in, and the one they "
+              "are sent to marketplaces in. Pick it now: changing it later leaves every product "
+              "created before the change without content in the new language.",
+        "lv": "Valoda, kādā tiek rakstīti tavi produktu nosaukumi un apraksti un kādā tie tiek "
+              "sūtīti uz tirdzniecības vietnēm. Izvēlies to tagad: mainot to vēlāk, visiem pirms "
+              "maiņas izveidotajiem produktiem nebūs satura jaunajā valodā.",
+    },
     "login.your_name": {"en": "Your name", "lv": "Tavs vārds"},
     "login.your_email": {"en": "Your email", "lv": "Tavs e-pasts"},
     "login.your_password": {"en": "Your password", "lv": "Tava parole"},
@@ -961,6 +970,28 @@ TRANSLATIONS: dict = {
               "Synchronization has Quantity switched on. Pick a warehouse below and save.",
         "lv": "⚠️ **Noliktava ir “Nav”, tāpēc daudzums (stock) netiek sūtīts uz BaseLinker** — kaut arī "
               "Sinhronizācijā Daudzums ir ieslēgts. Izvēlies noliktavu zemāk un saglabā.",
+    },
+    "settings.warn_products_missing_translation": {
+        # NB: never name a placeholder {lang} — t()'s own second positional
+        # parameter is `lang`, so a lang= kwarg raises TypeError at runtime.
+        "en": "⚠️ **{count} products have no ‘{language}’ content**, so they export in their original "
+              "language instead. Mixing languages splits BaseLinker’s Parameters into two "
+              "unrelated sets (e.g. “Zīmols” vs “Brand”). Translate them before exporting.",
+        "lv": "⚠️ **{count} produktiem nav satura valodā “{language}”**, tāpēc tie eksportējas savā "
+              "sākotnējā valodā. Valodu sajaukšana sadala BaseLinker parametrus divās nesaistītās "
+              "kopās (piem., “Zīmols” pret “Brand”). Iztulko tos pirms eksporta.",
+    },
+    "settings.warn_language_mismatch": {
+        "en": "ℹ️ You export in “{export}”, but this BaseLinker inventory’s default catalog language "
+              "is “{inventory}”. BaseLinker rejects a product with no name in its default language, so "
+              "every export also carries a second copy under “{inventory}” — that is why a product "
+              "shows text under two tabs. To send one language only, change the inventory’s default "
+              "language to “{export}” in BaseLinker.",
+        "lv": "ℹ️ Tu eksportē valodā “{export}”, bet šī BaseLinker inventāra noklusējuma kataloga "
+              "valoda ir “{inventory}”. BaseLinker noraida produktu bez nosaukuma tā noklusējuma "
+              "valodā, tāpēc katrs eksports nes arī otru kopiju valodā “{inventory}” — tāpēc produktam "
+              "teksts parādās divās cilnēs. Lai sūtītu tikai vienu valodu, nomaini inventāra "
+              "noklusējuma valodu uz “{export}” BaseLinker pusē.",
     },
     "settings.verify_token": {"en": "🔑 Verify key", "lv": "🔑 Pārbaudīt atslēgu"},
     "settings.verify_token_help": {

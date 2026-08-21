@@ -1668,6 +1668,18 @@ def _render_login_form():
             format_func=lambda p: T(f"login.plan_{p.lower()}"),
             help=T("login.plan_help"),
         )
+        # Asked HERE, at signup, because this is the only moment the choice
+        # is free: every product a company creates is authored in this
+        # language, and switching it later leaves everything created before
+        # the switch with no content in the new one — those products then
+        # quietly export in their original language instead. See
+        # company_store.create_company().
+        _signup_lang_options = list(company_store.CONTENT_LANGUAGES.keys())
+        product_language_in = st.selectbox(
+            T("login.product_language"), options=_signup_lang_options,
+            format_func=lambda code: company_store.CONTENT_LANGUAGES[code],
+            help=T("login.product_language_help"),
+        )
         admin_name_in = st.text_input(T("login.your_name"))
         admin_email_in = st.text_input(T("login.your_email"))
         admin_password_in = st.text_input(T("login.your_password"), type="password")
@@ -1680,6 +1692,7 @@ def _render_login_form():
                 try:
                     company = company_store.create_company(
                         name=company_name_in.strip(), plan=plan_in.lower(), status=company_store.STATUS_PENDING,
+                        default_product_language=product_language_in,
                     )
                     user = auth.register_user(
                         company_id=company.id, name=admin_name_in.strip(), email=admin_email_in.strip(),
@@ -6442,7 +6455,52 @@ elif page == PAGE_SETTINGS:
                 if _wants("quantity") and not settings.get("warehouse_id"):
                     st.warning(T("settings.warn_warehouse_missing"))
 
+            def _warn_language_gaps() -> None:
+                """The two language facts an export silently depends on and
+                nothing ever showed.
+
+                1. A product with no content in the export language does NOT
+                   fail — _resolve_export_content() quietly falls back to its
+                   primary_language. One product going out in Latvian and the
+                   next in English gives BaseLinker two DIFFERENT Parameters
+                   blocks (features|lv "Zīmols" vs features|en "Brand"), which
+                   it treats as unrelated parameters. The per-export warning
+                   already existed but only ever reached a log, so the split
+                   grew unseen; this is that same fact, counted, up front.
+                2. BaseLinker demands a name under the INVENTORY's own default
+                   catalog language and rejects the whole call without one, so
+                   exporting in any other language has to send a second copy
+                   under that default (see mapper.build_payload). That is why
+                   a product shows text under two tabs. It is not a bug and
+                   cannot simply be removed — but it is fixable, by changing
+                   the inventory's default language on BaseLinker's side, and
+                   nothing told anyone that.
+                """
+                if not record or not current_company:
+                    return
+                export_language = settings.get("export_language") or current_company.default_product_language
+                if not export_language:
+                    return
+
+                missing = product_translation_store.count_products_missing_language(
+                    current_user.company_id, export_language,
+                )
+                if missing:
+                    st.warning(T("settings.warn_products_missing_translation",
+                                 count=missing, language=export_language))
+
+                # Cached per (token, inventory_id) in the client, and "" on any
+                # failure — a settings page must never hang or break over a
+                # piece of account metadata.
+                inv_default = baselinker_client.inventory_default_language(
+                    record.credentials.get("token", ""), settings.get("inventory_id", ""),
+                )
+                if inv_default and inv_default != export_language:
+                    st.info(T("settings.warn_language_mismatch",
+                              export=export_language, inventory=inv_default))
+
             _warn_silently_dropped_fields()
+            _warn_language_gaps()
 
             options_key = f"bl_options_{current_user.company_id}"
             categories_key = f"bl_categories_{current_user.company_id}"

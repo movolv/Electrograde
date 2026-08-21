@@ -27,8 +27,16 @@ _DATABASE_URL, _drop_scratch_db = make_scratch_database("sync_ownership")
 os.environ["ELECTROGRADER_DATABASE_URL"] = _DATABASE_URL
 os.environ.setdefault("ELECTROGRADER_ENCRYPTION_KEY", "kQ8h9ZqF3v1n7yB2xW6tR4mL0sD5cE8pJ9uK1oI3aF0=")
 
+from integrations import field_registry  # noqa: E402
 from modules import company_store, sync_ownership_store  # noqa: E402
 from sync import engine  # noqa: E402
+
+# Derived from the registry, never hardcoded: both assertions below used to
+# spell out "12", which silently went stale the moment fields were added to
+# SYNC_OWNERSHIP_FIELDS (it holds 15 today). The code was right and the test
+# was wrong, which is the worst way round — a suite that always fails is one
+# nobody reads.
+_OWNERSHIP_FIELD_COUNT = len(field_registry.SYNC_OWNERSHIP_FIELDS)
 
 _checks_passed = 0
 _failures = []
@@ -66,7 +74,7 @@ def main() -> int:
     cfg = sync_ownership_store.list_field_config(company_a.id, "baselinker")
     check("saved config loads back with correct source_system", cfg["brand"].source_system == "manual")
     check("saved config loads back with correct sync_enabled", cfg["brand"].sync_enabled is False)
-    check("list_field_config still includes every SYNC_OWNERSHIP_FIELDS key", len(cfg) == 12)
+    check("list_field_config still includes every SYNC_OWNERSHIP_FIELDS key", len(cfg) == _OWNERSHIP_FIELD_COUNT)
 
     # ----------------------------------------- saved choice always wins over default --
     print("\n-- saved choice ALWAYS wins over default_owner (both directions) --")
@@ -108,7 +116,7 @@ def main() -> int:
     # ------------------------------------------------------- future sync readiness --
     print("\n-- sync/engine.py's get_export_field_owners() read path --")
     owners = engine.get_export_field_owners(company_a.id, "baselinker")
-    check("returns all 12 fields", len(owners) == 12)
+    check(f"returns all {_OWNERSHIP_FIELD_COUNT} fields", len(owners) == _OWNERSHIP_FIELD_COUNT)
     check("reflects company A's saved overrides (quantity=electrograder)", owners["quantity"] == "electrograder")
     check("reflects an unconfigured field's default (status=baselinker)", owners["status"] == "baselinker")
 

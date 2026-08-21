@@ -170,6 +170,37 @@ def list_translations_for_products(product_ids: List[str]) -> Dict[str, Dict[str
     return out
 
 
+def count_products_missing_language(company_id: str, language: str) -> int:
+    """How many of this company's products have NO content at all in
+    `language` — i.e. what a marketplace export in that language would
+    silently fall back to the product's primary_language for (see
+    integrations/marketplaces/baselinker/client.py's
+    _resolve_export_content()).
+
+    Counted entirely in SQL, deliberately: the obvious implementation —
+    list every product, then ask get_translation() per row — is one query
+    per product, and this is called on a settings page for a company that
+    may hold 100k of them. A product whose primary_language IS `language`
+    already has its row here (inventory_store.save_product() always writes
+    the primary language's content into this table, never into the products
+    blob), so a plain NOT EXISTS covers that case without a special check.
+    """
+    conn = _connect()
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM products p
+        WHERE p.company_id = ?
+          AND NOT EXISTS (
+              SELECT 1 FROM product_translations t
+              WHERE t.product_id = p.id AND t.language = ?
+          )
+        """,
+        (company_id, language),
+    ).fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+
 def upsert_translation(t: ProductTranslation) -> None:
     assert t.product_id and t.company_id and t.language, (
         "ProductTranslation.product_id/company_id/language must be set before saving."
