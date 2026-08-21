@@ -69,6 +69,7 @@ def build_payload(
     primary_condition_description: str = "", color: str = "",
     field_mapping_rules: Optional[list] = None,
     redirectable_fields: Optional[Set[str]] = None,
+    inventory_default_language: str = "",
 ) -> dict:
     """Builds the addInventoryProduct parameters for one Product.
 
@@ -164,12 +165,11 @@ def build_payload(
     # whole addInventoryProduct call with "Product name not provided" if
     # it's missing) under whichever language the INVENTORY ACCOUNT itself
     # is configured with as its default catalog language — independent of
-    # which language(s) text_fields otherwise contains. We don't track that
-    # per-account setting ourselves, but `primary_language` (the product's
-    # AI-authored original) is the one language guaranteed to exist for
-    # every product, so it's always included too whenever the requested
-    # export `language` differs — a small safety duplication, not a
-    # second "real" export language.
+    # which language(s) text_fields otherwise contains. `primary_language`
+    # (the product's AI-authored original) is the one language guaranteed
+    # to exist for every product, so it's always included too whenever the
+    # requested export `language` differs — a small safety duplication,
+    # not a second "real" export language.
     if primary_language and primary_language != language:
         if _wanted("name"):
             text_fields[f"name|{primary_language}"] = primary_title or product.model_number or product.sku
@@ -179,6 +179,24 @@ def build_payload(
             primary_label = field_labels_i18n.label("condition_scratches_details", primary_language)
             text_fields[f"description_extra1|{primary_language}"] = (
                 f"{primary_label}: {primary_condition_description}"
+            )
+
+    # The duplication above only helps when the export language and the
+    # product's primary language DIFFER. A product whose primary language
+    # already IS the export language (e.g. a Latvian-authored product
+    # exported in Latvian) would otherwise send `name|lv` and nothing
+    # else, and BaseLinker rejects the whole call with "Product name not
+    # provided" because the inventory's own default language carries no
+    # name. `inventory_default_language` is that account setting, read
+    # live by the caller (client.py's inventory_default_language()), so
+    # the mandatory slot is always filled whatever language we export in.
+    # Empty string = the caller couldn't determine it; behave exactly as
+    # before rather than guessing a language.
+    if inventory_default_language and _wanted("name"):
+        default_name_key = f"name|{inventory_default_language}"
+        if not text_fields.get(default_name_key):
+            text_fields[default_name_key] = (
+                title or primary_title or product.model_number or product.sku
             )
 
     if existing_listing_id:
@@ -305,7 +323,9 @@ def _apply_field_mapping_rules(
     them a Python list directly.
 
     target_field starting with "extra_field_" writes into `text_fields`
-    under BaseLinker's own extra_field_<id>|<language> convention; one
+    under the bare extra_field_<id> key — deliberately WITHOUT a language
+    suffix, which BaseLinker rejects for additional fields (see the call
+    site below); one
     starting with "features:" (BaselinkerConnector.STRUCTURAL_TARGET_FIELDS
     — what the Field Mapping table's default preview rows for brand/model/
     product_condition/color/power point at, e.g. "features:brand", so
@@ -343,7 +363,18 @@ def _apply_field_mapping_rules(
         value = rule.target_value or rule.target_label or current_str
         target = rule.target_field
         if target.startswith("extra_field_"):
-            text_fields[f"{target}|{language}"] = value
+            # NO "|<language>" suffix here, unlike every other text_fields
+            # key below. BaseLinker rejects a language-suffixed additional
+            # field outright — "Additional field extra_field_<id> does not
+            # support setting values in different languages" — which fails
+            # the WHOLE addInventoryProduct call, not just that field.
+            # Verified live against a real account: "|lv" and "|en" (the
+            # inventory's own DEFAULT language) both fail, the bare key
+            # succeeds, and getInventoryProductsData reads it back bare.
+            # Additional fields are per-account, single-value by default;
+            # the inventory being multi-language (name|lv/description|lv
+            # work fine) does not extend to them.
+            text_fields[target] = value
         elif target.startswith("features:"):
             label_field = target.split(":", 1)[1]
             label = field_labels_i18n.label(label_field, language)

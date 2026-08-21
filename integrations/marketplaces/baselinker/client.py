@@ -181,6 +181,40 @@ def list_inventories(token: str) -> list:
     return data.get("inventories", []) or []
 
 
+# {(token, inventory_id): default_language} — the inventory's default
+# catalog language changes about never, but every export needs it, so it
+# is fetched once per process instead of adding a getInventories round
+# trip to each one.
+_default_language_cache: dict = {}
+
+
+def inventory_default_language(token: str, inventory_id) -> str:
+    """The catalog language this inventory treats as its default — the one
+    BaseLinker demands a product name under (see mapper.build_payload()'s
+    `inventory_default_language`).
+
+    Returns "" if it can't be determined (no token, API down, inventory not
+    on this account). Callers must treat that as "unknown" and carry on;
+    an export must never fail because this piece of metadata was
+    unavailable."""
+    key = (token, str(inventory_id))
+    if key in _default_language_cache:
+        return _default_language_cache[key]
+    if not token:
+        return ""
+    try:
+        inventories = list_inventories(token)
+    except (BaseLinkerAPIError, requests.RequestException):
+        return ""  # deliberately not cached — a transient failure should be retried
+    result = ""
+    for inv in inventories:
+        if str(inv.get("inventory_id")) == str(inventory_id):
+            result = str(inv.get("default_language") or "")
+            break
+    _default_language_cache[key] = result
+    return result
+
+
 def list_price_groups(token: str) -> list:
     """Real getInventoryPriceGroups call — global (not inventory-scoped);
     the Settings page filters by the chosen inventory's own price_groups
@@ -371,6 +405,8 @@ class BaselinkerConnector(MarketplaceConnector):
             primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
                 redirectable_fields=self.get_mappable_source_fields(),
+                inventory_default_language=inventory_default_language(
+                    config["token"], config["inventory_id"]),
         )
         wants_images = fields_send is None or "image_paths" in fields_send
         payload["_preview_image_count"] = len(product.image_paths) if wants_images and product.image_paths else 0
@@ -562,6 +598,8 @@ class BaselinkerConnector(MarketplaceConnector):
                 primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
                 redirectable_fields=self.get_mappable_source_fields(),
+                inventory_default_language=inventory_default_language(
+                    config["token"], config["inventory_id"]),
             )
             data = _call("addInventoryProduct", payload, config["token"])
         except (BaseLinkerAPIError, requests.RequestException) as e:
@@ -584,6 +622,8 @@ class BaselinkerConnector(MarketplaceConnector):
                 primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
                 redirectable_fields=self.get_mappable_source_fields(),
+                inventory_default_language=inventory_default_language(
+                    config["token"], config["inventory_id"]),
             )
             if "text_fields" in payload:
                 payload["text_fields"] = self._merge_text_fields(external_id, payload["text_fields"], config)

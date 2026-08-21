@@ -152,7 +152,7 @@ def main() -> int:
     cf_preview = cf_connector.preview_payload(cf_product)
     check(
         "(4) preview_payload() carries the custom field's value at its mapped target",
-        cf_preview.get("text_fields", {}).get("extra_field_888|en") == "230V",
+        cf_preview.get("text_fields", {}).get("extra_field_888") == "230V",
     )
 
     # (5) Delete the definition -> no longer offered as a source field, but

@@ -157,7 +157,7 @@ def main() -> int:
     )
     check(
         "redirected product_description IS at its new target",
-        payload2.get("text_fields", {}).get("extra_field_999|en") == "A great product",
+        payload2.get("text_fields", {}).get("extra_field_999") == "A great product",
     )
 
     # (c) defects (no default placement at all) mapped via a rule — should
@@ -169,7 +169,7 @@ def main() -> int:
     )
     check(
         "defects (no default) reaches its mapped target",
-        payload3.get("text_fields", {}).get("extra_field_888|en") == "scratch on lid",
+        payload3.get("text_fields", {}).get("extra_field_888") == "scratch on lid",
     )
 
     # (d) A field the CALLER did not mark redirectable ignores a redirect
@@ -187,7 +187,7 @@ def main() -> int:
     )
     check(
         "the rule's target ALSO gets a copy (additive, since the default wasn't suppressed)",
-        payload4.get("text_fields", {}).get("extra_field_777|en") == "2.5",
+        payload4.get("text_fields", {}).get("extra_field_777") == "2.5",
     )
 
     # (e) sku redirects are always refused, regardless of redirectable_fields.
@@ -196,7 +196,7 @@ def main() -> int:
         product, config, title="x", description="x", language="en",
         field_mapping_rules=[sku_rule], redirectable_fields={"sku"},
     )
-    check("sku redirect is refused even if 'sku' is passed in redirectable_fields", "extra_field_666|en" not in payload5.get("text_fields", {}))
+    check("sku redirect is refused even if 'sku' is passed in redirectable_fields", "extra_field_666" not in payload5.get("text_fields", {}))
     check("sku itself is still sent normally", payload5.get("sku") == "TEST-SKU")
 
     # -------------------------------------- backward compat: no migration needed --
@@ -315,7 +315,7 @@ def main() -> int:
         preview = voltage_connector.preview_payload(voltage_product)
         check(
             "(4) preview_payload() carries the new field's value at its mapped target",
-            preview.get("text_fields", {}).get("extra_field_999|en") == "230V",
+            preview.get("text_fields", {}).get("extra_field_999") == "230V",
         )
     finally:
         del field_registry.SYNCABLE_FIELDS["voltage_test"]
