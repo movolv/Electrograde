@@ -6414,6 +6414,36 @@ elif page == PAGE_SETTINGS:
                 st.caption(T("settings.last_sync", ts=time.strftime('%Y-%m-%d %H:%M', time.localtime(record.last_sync_at))))
             settings = record.settings if record else {}
 
+            def _warn_silently_dropped_fields() -> None:
+                """Surfaces the one mismatch this form can produce that
+                nothing else in the app ever reports: `price` and `quantity`
+                are gated in mapper.build_payload() on a price group /
+                warehouse being chosen HERE, so leaving either at "None"
+                means that field is silently absent from every payload —
+                while the Synchronization tab keeps its checkbox ticked and
+                shows no "(not yet applied)" note, because the field IS
+                implemented. Read off the SAVED settings and the SAVED rule
+                (never the live widgets, whose value inside an st.form is
+                stale until submit), so this always describes what is
+                actually happening right now."""
+                if not record:
+                    return
+                rule = sync_rules_store.get_rule(current_user.company_id, entry.integration_type)
+                # No rule, or one never actually saved, means build_payload()
+                # gets fields_send=None and sends everything — so both fields
+                # are wanted. Mirrors BaselinkerConnector._resolve_fields_send().
+                wanted = None if (rule is None or not rule.fields_send_configured) else set(rule.fields_send)
+
+                def _wants(f: str) -> bool:
+                    return wanted is None or f in wanted
+
+                if _wants("price") and not settings.get("price_group_id"):
+                    st.warning(T("settings.warn_price_group_missing"))
+                if _wants("quantity") and not settings.get("warehouse_id"):
+                    st.warning(T("settings.warn_warehouse_missing"))
+
+            _warn_silently_dropped_fields()
+
             options_key = f"bl_options_{current_user.company_id}"
             categories_key = f"bl_categories_{current_user.company_id}"
             auto_fetch_key = f"bl_auto_fetched_{current_user.company_id}"
@@ -6600,6 +6630,34 @@ elif page == PAGE_SETTINGS:
                             return i
                     return 0
 
+                def _preselect(setting_key: str, options: list, api_default) -> int:
+                    """Which option to open on. A company that has actually
+                    saved this setting keeps exactly what it saved — including
+                    a deliberate "None". Only an integration being configured
+                    for the FIRST time (key absent from `settings` entirely,
+                    as opposed to present-and-empty) falls back to the default
+                    BaseLinker itself reports for this inventory.
+
+                    That distinction is the whole point: `settings` is {} for a
+                    brand-new integration but always carries the key once
+                    saved, so "never configured" and "explicitly set to None"
+                    are genuinely different states and must not be collapsed.
+
+                    Without this, every new company opened on "None" for both
+                    price group and warehouse — and mapper.build_payload()
+                    silently drops `prices`/`stock` when those are empty, while
+                    the Synchronization tab keeps showing Price and Quantity as
+                    enabled. The one company that ever exported correctly only
+                    did so because scripts/migrate_baselinker_env_to_integration.py
+                    seeded it from the legacy BASELINKER_* env vars, which no
+                    new company will ever run. `_index_of` already degrades to
+                    0 ("None") if the API default isn't among the options, so
+                    an inventory that genuinely has no default still behaves
+                    exactly as before."""
+                    if setting_key in settings:
+                        return _index_of(options, settings.get(setting_key))
+                    return _index_of(options, api_default)
+
                 cat_ids = list(by_id.keys())
                 cat_index = _index_of(cat_ids, settings.get("category_id"))
                 category_choice = st.selectbox(
@@ -6612,7 +6670,7 @@ elif page == PAGE_SETTINGS:
                 _pg_by_id = {pg["price_group_id"]: pg for pg in available_price_groups}
                 price_group_choice = st.selectbox(
                     T("settings.select_price_group"), options=_pg_options,
-                    index=_index_of(_pg_options, settings.get("price_group_id")),
+                    index=_preselect("price_group_id", _pg_options, selected_inventory.get("default_price_group")),
                     format_func=lambda pid: T("settings.option_none") if pid is None else _pg_by_id[pid].get("name", pid),
                 )
 
@@ -6620,7 +6678,7 @@ elif page == PAGE_SETTINGS:
                 _wh_by_id = {w["_composite_id"]: w for w in available_warehouses}
                 warehouse_choice = st.selectbox(
                     T("settings.select_warehouse"), options=_wh_options,
-                    index=_index_of(_wh_options, settings.get("warehouse_id")),
+                    index=_preselect("warehouse_id", _wh_options, selected_inventory.get("default_warehouse")),
                     format_func=lambda wid: T("settings.option_none") if wid is None else _wh_by_id[wid].get("name", wid),
                 )
 

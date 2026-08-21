@@ -950,6 +950,18 @@ TRANSLATIONS: dict = {
     "settings.category_id_field": {"en": "Category ID", "lv": "Kategorijas ID"},
     "settings.price_group_id": {"en": "Price group ID (optional)", "lv": "Cenu grupas ID (nav obligāts)"},
     "settings.warehouse_id": {"en": "Warehouse ID (optional)", "lv": "Noliktavas ID (nav obligāts)"},
+    "settings.warn_price_group_missing": {
+        "en": "⚠️ **Price group is “None”, so price is never sent to BaseLinker** — even though "
+              "Synchronization has Price switched on. Pick a price group below and save.",
+        "lv": "⚠️ **Cenu grupa ir “Nav”, tāpēc cena netiek sūtīta uz BaseLinker** — kaut arī "
+              "Sinhronizācijā Cena ir ieslēgta. Izvēlies cenu grupu zemāk un saglabā.",
+    },
+    "settings.warn_warehouse_missing": {
+        "en": "⚠️ **Warehouse is “None”, so quantity (stock) is never sent to BaseLinker** — even though "
+              "Synchronization has Quantity switched on. Pick a warehouse below and save.",
+        "lv": "⚠️ **Noliktava ir “Nav”, tāpēc daudzums (stock) netiek sūtīts uz BaseLinker** — kaut arī "
+              "Sinhronizācijā Daudzums ir ieslēgts. Izvēlies noliktavu zemāk un saglabā.",
+    },
     "settings.verify_token": {"en": "🔑 Verify key", "lv": "🔑 Pārbaudīt atslēgu"},
     "settings.verify_token_help": {
         "en": "Checks the API token on its own, before anything else is filled in — "
