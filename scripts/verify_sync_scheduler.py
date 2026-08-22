@@ -146,7 +146,16 @@ def main() -> int:
     # ------------------------------------------------------- get_supported_target_fields --
     print("\n-- get_supported_target_fields --")
     bl_fields = integration_manager.get_supported_target_fields("baselinker")
-    check("baselinker declares condition_id/category_id target fields", set(bl_fields) == {"condition_id", "category_id"})
+    # "category_id" was deliberately REMOVED from SUPPORTED_TARGET_FIELDS —
+    # it belongs exclusively to the Category Mapping feature, and letting a
+    # Field Mapping rule target it too would silently overwrite what
+    # Category Mapping already resolved (see BaselinkerConnector's comment).
+    # This assertion still demanded it and had been failing ever since.
+    # Asserted as a subset, plus the explicit exclusion, so adding a new
+    # target field later does not break it again.
+    check("baselinker declares the static top-level target fields",
+          {"condition_id", "ean", "weight"} <= set(bl_fields))
+    check("category_id is NOT offered (owned by Category Mapping)", "category_id" not in bl_fields)
     check("deepl (a ServiceConnector) has no target fields", integration_manager.get_supported_target_fields("deepl") == {})
     check("unknown integration_type returns {}", integration_manager.get_supported_target_fields("nonexistent") == {})
 

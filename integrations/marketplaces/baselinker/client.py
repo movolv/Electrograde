@@ -35,6 +35,7 @@ from integrations.base import (
     ConnectorActionResult,
     ImportedProductData,
     MarketplaceConnector,
+    MissingTranslationError,
     ProductConnectionCheck,
 )
 from integrations.marketplaces.baselinker import import_products, mapper, order_mapper, sync
@@ -461,20 +462,25 @@ class BaselinkerConnector(MarketplaceConnector):
         instead."""
         config = self._config(product)
         fields_send = self._resolve_fields_send()
-        ec = self._resolve_export_content(product)
+        try:
+            ec = self._resolve_export_content(product)
+        except MissingTranslationError as e:
+            # Preview must SHOW the block, not crash and not paper over it
+            # with some other language — it is the same resolution the real
+            # export uses, so it has to reach the same verdict.
+            return {"_export_blocked": str(e), "_missing_language": e.language}
         payload = mapper.build_payload(
-            product, config, existing_listing_id=None, fields_send=fields_send, include_images=False,
-            title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
-            language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
-            primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
-                color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
-                redirectable_fields=self.get_mappable_source_fields(),
-                inventory_default_language=inventory_default_language(
-                    config["token"], config["inventory_id"]),
+            product, config, ec["language"], existing_listing_id=None, fields_send=fields_send,
+            include_images=False,
+            title=ec["title"], description=ec["description"],
+            condition_description=ec["condition_description"],
+            color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
+            redirectable_fields=self.get_mappable_source_fields(),
+            inventory_default_language=inventory_default_language(
+                config["token"], config["inventory_id"]),
         )
         wants_images = fields_send is None or "image_paths" in fields_send
         payload["_preview_image_count"] = len(product.image_paths) if wants_images and product.image_paths else 0
-        payload["_language_fallback_warning"] = ec["warning"]
         return payload
 
     def _config(self, product=None) -> dict:
@@ -527,74 +533,59 @@ class BaselinkerConnector(MarketplaceConnector):
         ]
 
     def _resolve_export_content(self, product) -> dict:
-        """Resolves which language to export in — this integration's own
-        `export_language` setting if set, else the company's
-        `default_product_language` — and fetches that
-        modules/product_translation_store row. Falls back to the product's
-        primary_language (with a warning) if no translation exists yet for
-        the requested language, rather than ever silently mislabeling
-        English text as another language.
+        """The ONE content/language resolution every export path shares —
+        full export, single-field push, automatic sync and preview.
 
-        Also fetches the product's primary-language content whenever it
-        differs from the resolved export language — BaseLinker requires a
-        name under its own account default catalog language regardless of
-        what else is sent (see mapper.build_payload()'s `primary_language`
-        params), and primary_language is the one language guaranteed to
-        exist for every product.
+        The language comes from resolve_export_language() (inherited, see
+        integrations/base.py): the integration's own `export_language`, else
+        the company's `default_product_language`. Nothing here consults the
+        product to decide a language.
 
-        This is the ONLY place in the BaseLinker connector that decides a
-        language or reads a translation — mapper.build_payload() just
-        places the strings it's given; it never calls a translation
-        provider or resolves a language itself.
+        There is NO fallback to another language. If the product has no
+        content in the resolved language, this raises
+        MissingTranslationError and the export is refused. It used to
+        silently switch `export_language` to the product's own
+        primary_language, which changed not just the text but the whole
+        payload's language — `features|lv` became `features|en`, with
+        translated parameter NAMES to match. BaseLinker treats a
+        differently-named parameter as a different parameter, so a catalog
+        exported that way splits into two unrelated parameter sets, a
+        little more with every product. Refusing is visible; mislabelling
+        is not.
+
+        mapper.build_payload() only ever places the strings handed to it —
+        it never resolves a language or reads a translation itself.
         """
-        export_language = self.settings.get("export_language") or ""
+        export_language = self.resolve_export_language()
         if not export_language:
-            company = company_store.get_company(self.company_id)
-            export_language = company.default_product_language if company else product.primary_language
+            raise MissingTranslationError("", getattr(product, "sku", ""))
 
         translation = product_translation_store.get_translation(product.id, export_language)
-        warning = None
-        if translation is None and export_language != product.primary_language:
-            warning = (
-                f"No {export_language!r} translation exists for this product yet — "
-                f"exported in {product.primary_language!r} instead. "
-                f"Use the product's Translate action to add one."
-            )
-            export_language = product.primary_language
-            translation = product_translation_store.get_translation(product.id, export_language)
-
         if translation is None:
-            # No translation row at all (shouldn't happen post-migration) —
-            # fall back to whatever is directly on the Product rather than
-            # exporting nothing.
-            title, description, condition_description = product.name, product.product_description, product.condition_description
-            color = product.color
-        else:
-            title, description, condition_description = translation.title, translation.description, translation.condition_description
+            if export_language == product.primary_language:
+                # Same language, different storage: inventory_store hydrates
+                # a Product's name/description FROM the primary-language row,
+                # so a product predating that table still carries its
+                # primary-language content on the object itself. Reading it
+                # here is not a language fallback — it is the requested
+                # language, just not in the usual place.
+                return {
+                    "title": product.name, "description": product.product_description,
+                    "condition_description": product.condition_description,
+                    "language": export_language, "color": product.color,
+                }
+            raise MissingTranslationError(export_language, getattr(product, "sku", ""))
+
+        return {
+            "title": translation.title,
+            "description": translation.description,
+            "condition_description": translation.condition_description,
+            "language": export_language,
             # color is a deliberate exception to "parameter values are never
             # translated" (confirmed with the user) — falls back to the
             # untranslated product.color if this translation predates the
             # color field being added, rather than exporting a blank color.
-            color = translation.color or product.color
-
-        primary_language, primary_title, primary_description, primary_condition_description = "", "", "", ""
-        if export_language != product.primary_language:
-            primary = product_translation_store.get_translation(product.id, product.primary_language)
-            primary_language = product.primary_language
-            if primary is not None:
-                primary_title, primary_description, primary_condition_description = (
-                    primary.title, primary.description, primary.condition_description
-                )
-            else:
-                primary_title, primary_description, primary_condition_description = (
-                    product.name, product.product_description, product.condition_description
-                )
-
-        return {
-            "title": title, "description": description, "condition_description": condition_description,
-            "language": export_language, "warning": warning, "color": color,
-            "primary_language": primary_language, "primary_title": primary_title,
-            "primary_description": primary_description, "primary_condition_description": primary_condition_description,
+            "color": translation.color or product.color,
         }
 
     def connect(self) -> ConnectionTestResult:
@@ -653,37 +644,38 @@ class BaselinkerConnector(MarketplaceConnector):
         if found_id:
             return self.update_product(product, found_id)
 
-        ec = self._resolve_export_content(product)
         try:
+            ec = self._resolve_export_content(product)
             payload = mapper.build_payload(
-                product, config, existing_listing_id=None, fields_send=self._resolve_fields_send(),
-                title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
-                language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
-                primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
+                product, config, ec["language"], existing_listing_id=None,
+                fields_send=self._resolve_fields_send(),
+                title=ec["title"], description=ec["description"],
+                condition_description=ec["condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
                 redirectable_fields=self.get_mappable_source_fields(),
                 inventory_default_language=inventory_default_language(
                     config["token"], config["inventory_id"]),
             )
             data = _call("addInventoryProduct", payload, config["token"])
+        except MissingTranslationError as e:
+            return ConnectorActionResult(success=False, message=str(e))
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, message=str(e))
 
         return ConnectorActionResult(
-            success=True, external_id=str(data.get("product_id", "")),
-            message="Created." + (f" Warning: {ec['warning']}" if ec["warning"] else ""),
+            success=True, external_id=str(data.get("product_id", "")), message="Created.",
             data={"warnings": data.get("warnings", {}) or {}},
         )
 
     def update_product(self, product, external_id: str) -> ConnectorActionResult:
         config = self._config(product)
-        ec = self._resolve_export_content(product)
         try:
+            ec = self._resolve_export_content(product)
             payload = mapper.build_payload(
-                product, config, existing_listing_id=external_id, fields_send=self._resolve_fields_send(),
-                title=ec["title"], description=ec["description"], condition_description=ec["condition_description"],
-                language=ec["language"], primary_language=ec["primary_language"], primary_title=ec["primary_title"],
-                primary_description=ec["primary_description"], primary_condition_description=ec["primary_condition_description"],
+                product, config, ec["language"], existing_listing_id=external_id,
+                fields_send=self._resolve_fields_send(),
+                title=ec["title"], description=ec["description"],
+                condition_description=ec["condition_description"],
                 color=ec["color"], field_mapping_rules=self._field_mapping_rules(),
                 redirectable_fields=self.get_mappable_source_fields(),
                 inventory_default_language=inventory_default_language(
@@ -692,12 +684,13 @@ class BaselinkerConnector(MarketplaceConnector):
             if "text_fields" in payload:
                 payload["text_fields"] = self._merge_text_fields(external_id, payload["text_fields"], config)
             data = _call("addInventoryProduct", payload, config["token"])
+        except MissingTranslationError as e:
+            return ConnectorActionResult(success=False, external_id=external_id, message=str(e))
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, external_id=external_id, message=str(e))
 
         return ConnectorActionResult(
-            success=True, external_id=str(data.get("product_id", external_id)),
-            message="Updated." + (f" Warning: {ec['warning']}" if ec["warning"] else ""),
+            success=True, external_id=str(data.get("product_id", external_id)), message="Updated.",
             data={"warnings": data.get("warnings", {}) or {}},
         )
 
@@ -810,7 +803,19 @@ class BaselinkerConnector(MarketplaceConnector):
             return ConnectorActionResult(success=False, message="No existing BaseLinker listing to push a field to.")
 
         try:
-            return sync.push_field(product, field_name, listing_id, config, self._field_mapping_rules())
+            # Same resolution as create_product()/update_product()/
+            # preview_payload() — one language decision per company, shared
+            # by every path that can reach BaseLinker.
+            ec = self._resolve_export_content(product)
+            return sync.push_field(
+                product, field_name, listing_id, config, ec,
+                field_mapping_rules=self._field_mapping_rules(),
+                inventory_default_language=inventory_default_language(
+                    config["token"], config["inventory_id"]),
+                redirectable_fields=self.get_mappable_source_fields(),
+            )
+        except MissingTranslationError as e:
+            return ConnectorActionResult(success=False, external_id=listing_id, message=str(e))
         except (BaseLinkerAPIError, requests.RequestException) as e:
             return ConnectorActionResult(success=False, external_id=listing_id, message=str(e))
 

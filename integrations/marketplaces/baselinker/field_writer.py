@@ -13,10 +13,32 @@ from integrations.marketplaces.baselinker import mapper
 
 
 def build_partial_payload(
-    product, field_name: str, config: dict, existing_listing_id: Optional[str] = None,
+    product, field_name: str, config: dict, export_content: dict,
+    existing_listing_id: Optional[str] = None,
     field_mapping_rules: Optional[list] = None,
+    inventory_default_language: str = "",
+    redirectable_fields: Optional[set] = None,
 ) -> dict:
+    """`export_content` is BaselinkerConnector._resolve_export_content()'s
+    output, passed in whole — the SAME resolved language and strings the
+    full export uses.
+
+    It used to be omitted entirely, which was silently wrong twice over:
+    build_payload()'s `language` defaulted to "en", so every single-field
+    push wrote name|en / description|en / features|en regardless of the
+    company's chosen language; and `title`/`description` defaulted to "",
+    so pushing "name" sent `product.model_number or product.sku` instead of
+    the real title, and pushing "product_description" sent "" — actively
+    blanking a description that existed. `language` is now a required
+    argument of build_payload(), so this can no longer drift back.
+    """
     return mapper.build_payload(
-        product, config, existing_listing_id=existing_listing_id, fields_send={field_name},
+        product, config, export_content["language"],
+        existing_listing_id=existing_listing_id, fields_send={field_name},
+        title=export_content["title"], description=export_content["description"],
+        condition_description=export_content["condition_description"],
+        color=export_content["color"],
         field_mapping_rules=field_mapping_rules,
+        redirectable_fields=redirectable_fields,
+        inventory_default_language=inventory_default_language,
     )

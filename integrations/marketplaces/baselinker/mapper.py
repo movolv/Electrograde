@@ -62,16 +62,24 @@ def encode_image(path: str, max_base64_bytes: int = MAX_IMAGE_BASE64_BYTES) -> s
 
 
 def build_payload(
-    product, config: dict, include_images: bool = True, existing_listing_id: Optional[str] = None,
+    product, config: dict, language: str, include_images: bool = True,
+    existing_listing_id: Optional[str] = None,
     fields_send: Optional[Set[str]] = None,
-    title: str = "", description: str = "", condition_description: str = "", language: str = "en",
-    primary_language: str = "", primary_title: str = "", primary_description: str = "",
-    primary_condition_description: str = "", color: str = "",
+    title: str = "", description: str = "", condition_description: str = "",
+    color: str = "",
     field_mapping_rules: Optional[list] = None,
     redirectable_fields: Optional[Set[str]] = None,
     inventory_default_language: str = "",
 ) -> dict:
     """Builds the addInventoryProduct parameters for one Product.
+
+    `language` is REQUIRED and positional — deliberately no default. It
+    used to default to "en", which meant a caller that simply forgot to
+    pass it produced a silently English payload rather than an error;
+    field_writer.build_partial_payload() did exactly that, so every
+    single-field push wrote name|en/description|en/features|en no matter
+    what language the company had chosen. Making it required turns that
+    class of bug into an immediate TypeError at the call site.
 
     `title`/`description`/`condition_description`/`language` are the
     already-resolved export content — this function never reads
@@ -80,6 +88,14 @@ def build_payload(
     `product_translations` row itself (see client.py, which resolves the
     export language, fetches the matching translation, and passes plain
     strings in here — this module stays "pure": no DB access, no network).
+
+    Exactly ONE content language leaves this function. There is no
+    second-language duplication of description/description_extra1/features
+    any more, and no fallback: a product with nothing in `language` is
+    refused upstream (integrations/base.MissingTranslationError) rather
+    than quietly exported in another language. `inventory_default_language`
+    remains the single, narrow exception, and only ever for `name` — see
+    below.
 
     `fields_send=None` (the default) sends everything unconditionally —
     the exact behavior this function always had, still used for companies
@@ -161,43 +177,29 @@ def build_payload(
         label = field_labels_i18n.label("condition_scratches_details", language)
         text_fields[f"description_extra1|{language}"] = f"{label}: {condition_description}"
 
-    # BaseLinker requires a non-empty name (and, empirically, rejects the
-    # whole addInventoryProduct call with "Product name not provided" if
-    # it's missing) under whichever language the INVENTORY ACCOUNT itself
-    # is configured with as its default catalog language — independent of
-    # which language(s) text_fields otherwise contains. `primary_language`
-    # (the product's AI-authored original) is the one language guaranteed
-    # to exist for every product, so it's always included too whenever the
-    # requested export `language` differs — a small safety duplication,
-    # not a second "real" export language.
-    if primary_language and primary_language != language:
-        if _wanted("name"):
-            text_fields[f"name|{primary_language}"] = primary_title or product.model_number or product.sku
-        if _default_wanted("product_description"):
-            text_fields[f"description|{primary_language}"] = primary_description or ""
-        if _default_wanted("condition_description") and primary_condition_description:
-            primary_label = field_labels_i18n.label("condition_scratches_details", primary_language)
-            text_fields[f"description_extra1|{primary_language}"] = (
-                f"{primary_label}: {primary_condition_description}"
-            )
-
-    # The duplication above only helps when the export language and the
-    # product's primary language DIFFER. A product whose primary language
-    # already IS the export language (e.g. a Latvian-authored product
-    # exported in Latvian) would otherwise send `name|lv` and nothing
-    # else, and BaseLinker rejects the whole call with "Product name not
-    # provided" because the inventory's own default language carries no
-    # name. `inventory_default_language` is that account setting, read
-    # live by the caller (client.py's inventory_default_language()), so
-    # the mandatory slot is always filled whatever language we export in.
-    # Empty string = the caller couldn't determine it; behave exactly as
-    # before rather than guessing a language.
+    # The ONE place a key outside `language` is written, and only ever for
+    # `name`. BaseLinker rejects the whole addInventoryProduct call with
+    # "Product name not provided" unless a name exists under the INVENTORY
+    # ACCOUNT's own default catalog language — verified live: a product
+    # carrying only name|lv is refused while that inventory's default is
+    # "en", and accepted once the default is "lv". So this is a hard
+    # platform requirement, not a preference.
+    #
+    # The VALUE written is the already-resolved `title`, i.e. the export
+    # language's own text — never a second language's content. No
+    # description, description_extra1 or features copy is made, so the
+    # Parameters block can never appear under two languages for one
+    # product, which is the split that actually damages a catalog.
+    #
+    # This whole branch disappears once an inventory's default language is
+    # aligned with the company's export language (the approved "variant A"
+    # procedure): the key it writes becomes `name|<language>`, which is
+    # already present, making it a no-op. Empty string = the caller could
+    # not determine the account setting; write nothing rather than guess.
     if inventory_default_language and _wanted("name"):
         default_name_key = f"name|{inventory_default_language}"
         if not text_fields.get(default_name_key):
-            text_fields[default_name_key] = (
-                title or primary_title or product.model_number or product.sku
-            )
+            text_fields[default_name_key] = title or product.model_number or product.sku
 
     if existing_listing_id:
         payload["product_id"] = int(existing_listing_id)

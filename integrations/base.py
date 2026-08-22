@@ -52,6 +52,26 @@ class ProductConnectionCheck:
     external_id: str = ""
 
 
+class MissingTranslationError(RuntimeError):
+    """The product has no content in the company's chosen export language.
+
+    Raised instead of quietly exporting some other language. Falling back
+    used to look harmless per product, but a marketplace receiving one
+    product in Latvian and the next in English ends up holding two
+    unrelated sets of parameter names ("Zīmols" vs "Brand"), and the split
+    compounds silently across a catalog. A blocked export is visible and
+    fixable; a mislabelled one is neither.
+    """
+
+    def __init__(self, language: str, product_sku: str = ""):
+        self.language = language
+        self.product_sku = product_sku
+        super().__init__(
+            f"Cannot export: missing {language!r} translation"
+            + (f" for SKU {product_sku}" if product_sku else "")
+        )
+
+
 @dataclass
 class ImportedProductData:
     """One remote product, translated into ElectroGrader's vocabulary for
@@ -159,6 +179,29 @@ class MarketplaceConnector(IntegrationConnector):
         registry_mappable = {k for k, v in field_registry.SYNCABLE_FIELDS.items() if v.get("mappable")}
         custom_keys = {f"custom:{d.key}" for d in custom_field_store.list_fields(self.company_id)}
         return (registry_mappable - self.CORE_FIELDS) | custom_keys
+
+    def resolve_export_language(self) -> str:
+        """THE one place any export path decides which language to send —
+        full export, single-field push, automatic sync and preview all call
+        this, so they can never disagree.
+
+        Order: this integration's own `export_language` override, else the
+        company's `default_product_language`. Deliberately NOT falling back
+        to anything product-derived: the language is a property of the
+        COMPANY's channel configuration, not of whichever product happens
+        to be exporting, and letting a product influence it is exactly how
+        one catalog ends up in two languages.
+
+        Returns "" only when the company row is missing entirely — callers
+        must treat that as "cannot export", never as a licence to guess.
+        """
+        from modules import company_store
+
+        explicit = (self.settings.get("export_language") or "").strip()
+        if explicit:
+            return explicit
+        company = company_store.get_company(self.company_id)
+        return (company.default_product_language or "").strip() if company else ""
 
     def get_target_fields(self) -> dict:
         """Instance-level counterpart to SUPPORTED_TARGET_FIELDS, for

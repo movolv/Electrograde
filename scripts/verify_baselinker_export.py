@@ -64,6 +64,18 @@ class _FakeProduct:
     box_width_cm = 0
     box_height_cm = 0
     manifest_weight_kg = 0
+    # Every Product attribute mapper.build_payload() reads. These were
+    # missing, so this whole suite died on an AttributeError at the first
+    # build_payload() call rather than checking anything — it had been
+    # failing since brand/model/product_condition/color/power/weight_kg
+    # gained payload destinations and nobody updated the stub.
+    brand = "FakeBrand"
+    model = "FakeModel"
+    product_condition = "B"
+    color = "Black"
+    power = "100W"
+    weight_kg = 2.5
+    custom_fields: dict = {}
 
 
 _CONFIG = {"inventory_id": 1, "category_id": 2, "tax_rate": 23, "price_group_id": "pg1", "warehouse_id": "w1"}
@@ -80,8 +92,8 @@ def main() -> int:
     connector_a = BaselinkerConnector(company_a.id, {"token": "t"}, {"inventory_id": "1", "category_id": "2"})
     fields_send = connector_a._resolve_fields_send()  # noqa: SLF001
     check("_resolve_fields_send() is None when no rule exists", fields_send is None)
-    legacy_payload = mapper.build_payload(_FakeProduct(), _CONFIG, fields_send=fields_send)
-    full_payload = mapper.build_payload(_FakeProduct(), _CONFIG, fields_send=None)
+    legacy_payload = mapper.build_payload(_FakeProduct(), _CONFIG, "en", fields_send=fields_send)
+    full_payload = mapper.build_payload(_FakeProduct(), _CONFIG, "en", fields_send=None)
     check("payload identical to unconditional (legacy) build", legacy_payload == full_payload)
     check("legacy payload includes ean (barcode)", "ean" in legacy_payload)
     check("legacy payload includes prices", "prices" in legacy_payload)
@@ -93,7 +105,7 @@ def main() -> int:
     )
     fields_send2 = connector_a._resolve_fields_send()  # noqa: SLF001
     check("_resolve_fields_send() still None (configured=False)", fields_send2 is None)
-    payload2 = mapper.build_payload(_FakeProduct(), _CONFIG, fields_send=fields_send2)
+    payload2 = mapper.build_payload(_FakeProduct(), _CONFIG, "en", fields_send=fields_send2)
     check("payload still identical to legacy despite an (unconfigured) rule existing", payload2 == full_payload)
 
     # --------------------------------------------------- real, saved toggles --
@@ -107,7 +119,7 @@ def main() -> int:
     )
     fields_send3 = connector_a._resolve_fields_send()  # noqa: SLF001
     check("_resolve_fields_send() returns the saved set", fields_send3 == {"name", "product_description", "price", "quantity", "sku"})
-    payload3 = mapper.build_payload(_FakeProduct(), _CONFIG, fields_send=fields_send3)
+    payload3 = mapper.build_payload(_FakeProduct(), _CONFIG, "en", fields_send=fields_send3)
     check("toggled payload excludes ean (barcode not selected)", "ean" not in payload3)
     check("toggled payload excludes description_extra1 (condition_description not selected)",
           "description_extra1" not in payload3.get("text_fields", {}))
@@ -169,9 +181,20 @@ def main() -> int:
         "BaselinkerConnector.DEFAULT_SYNC_FIELDS matches only implemented fields",
         set(BaselinkerConnector.DEFAULT_SYNC_FIELDS) <= BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS | {"sku"},
     )
+    # brand/model/product_condition were later given real payload
+    # destinations (the "Information -> Parameters" block) and deliberately
+    # added to DEFAULT_SYNC_FIELDS; this assertion still listed them as
+    # excluded and so had been failing ever since. What must stay excluded
+    # is only what genuinely has NO destination in mapper.build_payload():
+    # "category" belongs to the separate Category Mapping feature, and
+    # "defects" is sent only when a Field Mapping rule points it somewhere.
     check(
-        "brand/model/category/product_condition/defects excluded from BaselinkerConnector.DEFAULT_SYNC_FIELDS",
-        not ({"brand", "model", "category", "product_condition", "defects"} & set(BaselinkerConnector.DEFAULT_SYNC_FIELDS)),
+        "category/defects (no payload destination) excluded from DEFAULT_SYNC_FIELDS",
+        not ({"category", "defects"} & set(BaselinkerConnector.DEFAULT_SYNC_FIELDS)),
+    )
+    check(
+        "every DEFAULT_SYNC_FIELDS entry is one this connector really implements",
+        set(BaselinkerConnector.DEFAULT_SYNC_FIELDS) - {"sku"} <= BaselinkerConnector.IMPLEMENTED_SYNC_FIELDS,
     )
 
     # ------------------------------------------------------------------- summary --
